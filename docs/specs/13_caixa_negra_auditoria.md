@@ -28,7 +28,19 @@
   - Data Studio (o SQL executado e o resultado do dry-run);
   - início e fim de impersonation.
 - **Recusas:** também se regista o que foi negado (`outcome = 'denied'`): 401/403, tentativas IDOR, login falhado, rate-limit, CSRF e webhook com assinatura inválida.
-- **Fora de âmbito:** leituras normais de catálogo, que ficam nos logs/métricas e não na caixa negra. Exceção: são registadas as leituras de dados pessoais por staff ou admin (ver ficha de cliente, exportar).
+- **Todas as ações de qualquer utilizador autenticado são auditáveis (owner, 25/11), seja qual for o papel.**
+  - **Cliente:** registo, login, ver encomendas, adicionar e remover do carrinho (mesmo estando no Redis), favoritos, checkout passo a passo, pagamento, devolução, avaliação, alterar dados, consentimentos, pedidos RGPD.
+  - **Lojista e a sua equipa:** criar, editar e apagar produtos e variantes, preços, stock, imagens, importações e migração (com o resumo do lote e o detalhe por linha), encomendas, envios, reembolsos, definições da loja, IBAN, faturação, equipa e convites, e consultas de relatórios.
+  - **Membro da Câmara:** aprovar e suspender lojas, definições do tenant e do template, conteúdos, relatórios e exportações, gestão de utilizadores do tenant.
+  - **Admin e superadmin:** tudo o que fazem, incluindo **leituras** (cada ecrã ou registo consultado e cada pesquisa), Data Studio, impersonation (com as duas identidades), alterações de RBAC, tenants, comissões e feature flags.
+- **Regra técnica:** cada pedido HTTP de um utilizador autenticado gera um `audit_event`. Mudanças e recusas são síncronas e gravadas na mesma transação. Leituras e ações sem BD (carrinho em Redis, pesquisas) são assíncronas, com entrega garantida: o evento vai para um Redis Stream, o worker grava-o em lote em `audit_events` dentro da cadeia de hash e só depois faz ACK.
+  - **Exceção:** leituras de admin/superadmin e de dados pessoais são **síncronas**. Se a gravação falhar, a resposta é 503.
+  - O que não tem utilizador autenticado (navegação anónima no catálogo) fica nos logs e métricas. Passa à caixa negra quando é uma mudança ou uma recusa (ex.: tentativa de login, checkout de convidado).
+- **Ninguém está acima da auditoria (superadmin incluído):**
+  - não existe papel, flag ou endpoint para desligar, filtrar ou editar a auditoria;
+  - as ações de superadmin são enviadas também para WORM quase em tempo real (minutos, não só a raiz diária);
+  - cada ação de superadmin gera um alerta para o owner;
+  - mexer na retenção ou nos papéis de auditoria exige duas pessoas (2 superadmins com 2FA), e esse próprio ato é auditado.
 
 ## 2. Modelo (PG 18, particionado por mês desde o início, `created_at`)
 `audit_events`:
