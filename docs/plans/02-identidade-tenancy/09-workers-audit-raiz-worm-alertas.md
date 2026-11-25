@@ -1,6 +1,6 @@
 # 09 — Worker Go: raiz diária em WORM, `verify-audit` e alerta de ações superadmin (épico: 02-identidade-tenancy)
 
-**Agente:** go-integrations · **Modelo:** opus · **Depende de:** 02, 05, 08 · **Paralelo com:** 04, 06
+**Agente:** go-integrations · **Modelo:** opus · **Depende de:** 01b, 05, 08 · **Paralelo com:** 04, 06
 
 ## Objetivo
 A cadeia fica ancorada fora da BD todos os dias, há um comando que deteta adulteração, e cada ação de superadmin vai para WORM em minutos e gera alerta ao owner.
@@ -20,7 +20,7 @@ WORM: interface WormStore { Put(ctx, key, body, retainUntil) error; Get(ctx, key
 Raiz diária (tarefa periódica Asynq, 00:10 UTC, do dia anterior; TaskID = 'audit-root-YYYY-MM-DD'): manifesto JSON {"day", "generated_at", "chains": [{chain_key, retention_class, first_seq, last_seq, last_hash hex, events}], "prev_manifest_sha256"} → Put roots/YYYY/MM/DD.json. Já existe → comparar; igual = ok, diferente = ALERTA e erro (nunca sobrescrever). Dias em falta são recuperados por ordem.
   No mesmo job: audit_ensure_partitions(3); audit_default_partition_rows() > 0 → alerta.
 verify-audit (binário próprio; código de saída ≠ 0 se houver quebra): por cada cadeia chama audit_verify_chain em janelas de 1 dia e confirma que o last_hash de cada dia bate com o manifesto no WORM; imprime as quebras (id, seq, problema), nunca o conteúdo dos eventos.
-Superadmin: handler Asynq do tipo `audit.superadmin_action` (vem do outbox; TaskID = id do evento → idempotente; envelope {id, tenant_id, aggregate, aggregate_id, event_type, created_at, payload}): Put superadmin/YYYY/MM/DD/<aggregate_id>.json com o payload, depois Alerter.Notify. Falha de qualquer dos dois → erro (Asynq repete, até 10 vezes; esgotado → log de erro + alerta).
+Superadmin (mudou no 01b: o sinal deixou de passar pelo outbox): relay que lê `audit.audit_alerts WHERE published_at IS NULL ORDER BY created_at` (FOR UPDATE SKIP LOCKED, lotes de 100, a cada 30 s e no arranque) → Put superadmin/YYYY/MM/DD/<id>.json com o payload (idempotente: se já existe, compara) → Alerter.Notify → UPDATE published_at. Falha de qualquer passo → a linha fica por publicar e volta na ronda seguinte; se tiver mais de 15 min sem publicar → alerta 'audit.alert_backlog'. O worker não consegue apagar nem alterar alertas (só o published_at de NULL para um valor).
 Alerter: interface { Notify(ctx, Alert{Kind, Summary, EventID}) error }; implementação webhook HTTP POST JSON para ALERT_WEBHOOK_URL (timeout 5 s, cliente próprio, sem dados pessoais: só ator-id, ação, alvo, hora). O worker NÃO arranca sem WORM_* e sem ALERT_WEBHOOK_URL; em dev aceita ALERT_WEBHOOK_URL=log:// (escreve no log). Canais (owner 25/11): email (SMTP), Telegram (bot) e Discord (webhook); o Alerter envia para TODOS os configurados (fan-out, um por ação de superadmin) e o worker não arranca sem pelo menos um. Config: ALERT_EMAIL_*, ALERT_TELEGRAM_*, ALERT_DISCORD_WEBHOOK_URL. WhatsApp fica para depois (exige API Business). Em dev, log://.
 Regras Go: context com timeout em toda a chamada externa; segredos só por ambiente e nunca em logs; cliente S3 = dependência nova, justificar no PR (preferir a mais pequena com Object Lock).
 ```
