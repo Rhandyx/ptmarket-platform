@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // .tool_response.filePath // empty'); case \"$f\" in */backend-rust/*.rs) ;; *) exit 0 ;; esac; cd \"$CLAUDE_PROJECT_DIR/backend-rust\" 2>/dev/null || exit 0; cargo fmt -- \"$f\" >/dev/null 2>&1; out=$(cargo check --quiet --message-format short 2>&1) || { printf 'cargo check falhou após editar %s:\\n%s\\n' \"$f\" \"$(printf '%s' \"$out\" | tail -n 40)\" >&2; exit 2; }",
+            "timeout": 300,
+            "statusMessage": "cargo fmt + cargo check (backend-rust)"
+          },
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // .tool_response.filePath // empty'); case \"$f\" in */workers-go/*.go) ;; *) exit 0 ;; esac; cd \"$CLAUDE_PROJECT_DIR/workers-go\" 2>/dev/null && [ -f go.mod ] || exit 0; gofmt -w \"$f\" >/dev/null 2>&1; out=$(go vet ./... 2>&1) || { printf 'go vet falhou após editar %s:\\n%s\\n' \"$f\" \"$(printf '%s' \"$out\" | tail -n 40)\" >&2; exit 2; }",
+            "timeout": 180,
+            "statusMessage": "gofmt + go vet (workers-go)"
+          },
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // .tool_response.filePath // empty'); case \"$f\" in */frontend-web/*.ts|*/frontend-web/*.tsx) ;; *) exit 0 ;; esac; case \"$f\" in */node_modules/*) exit 0 ;; esac; cd \"$CLAUDE_PROJECT_DIR/frontend-web\" 2>/dev/null && [ -f package.json ] || exit 0; err=\"\"; for s in typecheck lint; do grep -q \"\\\"$s\\\"\" package.json || continue; out=$(npm run --silent \"$s\" 2>&1) || err=\"$err$(printf '\\n[npm run %s]\\n%s' \"$s\" \"$(printf '%s' \"$out\" | tail -n 30)\")\"; done; [ -z \"$err\" ] || { printf 'Verificação do frontend falhou após editar %s:%s\\n' \"$f\" \"$err\" >&2; exit 2; }",
+            "timeout": 240,
+            "statusMessage": "npm run typecheck + lint (frontend-web)"
+          }
+        ]
+      }
+    ]
+  }
+}
