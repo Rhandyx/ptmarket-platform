@@ -1,0 +1,108 @@
+.viewport {
+  position: fixed;
+  inset-block-end: var(--space-4);
+  inset-inline: var(--space-4);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-3);
+  pointer-events: none;
+}
+
+.region {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  inline-size: min(100%, 24rem);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.toast {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+  animation: toast-in var(--motion-slow) var(--motion-ease) both;
+}
+
+.toast::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 0.3125rem;
+  background: var(--accent);
+}
+
+.info {
+  --accent: var(--color-primary);
+}
+
+.success {
+  --accent: var(--color-success);
+}
+
+.error {
+  --accent: var(--color-danger);
+}
+
+.title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: var(--leading-snug);
+}
+
+.description {
+  grid-column: 1;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+.close {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: var(--target-min);
+  min-block-size: var(--target-min);
+  margin: calc(var(--space-3) * -1) calc(var(--space-3) * -1) 0 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--motion-ease);
+}
+
+.close:hover {
+  background: var(--color-border);
+  color: var(--color-text);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-4)) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

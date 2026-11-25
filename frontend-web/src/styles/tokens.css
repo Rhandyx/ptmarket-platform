@@ -21,6 +21,15 @@
   --color-border: light-dark(#e4e1da, #2a3350);
   --color-focus: light-dark(#0f4c81, #8dbff0);
 
+  /* Estados e sobreposições (cartão 09) */
+  --color-danger: light-dark(#b42318, #ff9a8f);
+  --color-on-danger: light-dark(#fff, #0c1220);
+  --color-success: light-dark(#116b3a, #7fdba5);
+  --color-overlay: light-dark(rgb(17 24 39 / 45%), rgb(0 0 0 / 62%));
+  --blur-overlay: 0.25rem;
+  --z-popover: 50;
+  --z-toast: 90;
+
   /* Espaço (escala generosa) */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -43,6 +52,8 @@
   /* Sombra */
   --shadow-sm: 0 0.0625rem 0.125rem light-dark(rgb(17 24 39 / 8%), rgb(0 0 0 / 40%));
   --shadow-md: 0 0.5rem 1.5rem light-dark(rgb(17 24 39 / 10%), rgb(0 0 0 / 45%));
+
+  --shadow-lg: 0 1.5rem 4rem light-dark(rgb(17 24 39 / 18%), rgb(0 0 0 / 60%));
 
   /* Movimento (150–250 ms) */
   --motion-fast: 150ms;

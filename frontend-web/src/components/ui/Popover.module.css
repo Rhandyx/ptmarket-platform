@@ -1,0 +1,54 @@
+.panel {
+  inline-size: max-content;
+  max-inline-size: min(20rem, calc(100vw - var(--space-5)));
+  margin: auto;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: var(--shadow-md);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  opacity: 0;
+  transform: translateY(calc(var(--space-2) * -1));
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease),
+    overlay var(--motion-fast) allow-discrete,
+    display var(--motion-fast) allow-discrete;
+}
+
+.panel:popover-open {
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .panel:popover-open {
+    opacity: 0;
+    transform: translateY(calc(var(--space-2) * -1));
+  }
+}
+
+/* Posição junto ao disparador (âncora implícita); sem suporte, fica centrado. */
+@supports (position-area: block-end) {
+  .panel {
+    inset: auto;
+    margin: var(--space-2) 0;
+    position-area: block-end span-inline-end;
+    position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+  }
+}
+
+.panel > * + * {
+  margin-block-start: var(--space-2);
+}
+
+.heading {
+  font-weight: 700;
+}
+
+.text {
+  color: var(--color-text-muted);
+}

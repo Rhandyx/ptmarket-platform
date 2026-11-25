@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && stylelint \"src/**/*.css\"",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "next": "16.4.6",
@@ -21,6 +22,8 @@
     "react-dom": "19.3.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.1",
+    "@playwright/test": "1.65.1",
     "@types/node": "26.6.10",
     "@types/react": "19.3.3",
     "@types/react-dom": "19.3.0",

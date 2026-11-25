@@ -5,3 +5,6 @@ next-env.d.ts
 coverage
 .env*
 !.env.example
+
+.results
+/e2e/__screenshots__/
