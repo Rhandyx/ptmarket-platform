@@ -1,6 +1,6 @@
 # PT Market & Loja Portugal (Segjar Soluções)
 
-Rust/Axum/SQLx `backend-rust/` · Go/Asynq `workers-go/` · PostgreSQL 17 `migrations/` · Next.js `frontend-web/` · `infra/`
+Rust/Axum/SQLx `backend-rust/` · Go/Asynq `workers-go/` · PostgreSQL 18 `migrations/` · Next.js `frontend-web/` · `infra/`
 
 ## Regras inegociáveis
 1. Dinheiro nunca em float: cêntimos `BIGINT`/`i64`, percentagens em bps `INT`, `Decimal` em Rust.

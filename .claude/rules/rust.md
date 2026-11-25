@@ -10,7 +10,7 @@ paths:
 - PK = UUIDv7 gerado em Rust (`Uuid::now_v7()`).
 - `state.db_replica` para leituras públicas; `state.db_primary` para escritas, checkout, stock, admin.
 - SQL só com `sqlx::query!`/`query_as!`. JSONB: passar `serde_json::Value`, nunca string + `::jsonb`.
-- Stock: `UPDATE ... WHERE stock_qty >= $n` + `stock_reservations`. Eventos: escrever em `outbox_events` na mesma transação; nunca publicar no Redis a partir de um handler.
+- Stock: desconto atómico `WHERE stock_qty >= $n` + linha em `stock_reservations` na mesma transação (spec 11 D2). `.sqlx/` no git (`cargo sqlx prepare`). Eventos: escrever em `outbox_events` na mesma transação; nunca publicar no Redis a partir de um handler.
 - Todo o handler com ID verifica dono/tenant (além de RLS) e tem teste anti-IDOR.
 - DTOs: `#[serde(deny_unknown_fields)]` + validação; limites de tamanho.
 - `StorageBackend` e `SearchBackend` são traits; nada de código preso a um fornecedor.

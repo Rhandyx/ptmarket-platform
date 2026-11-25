@@ -31,3 +31,6 @@ uploads/
 
 # Provas de UX (screenshots) — locais
 proofs/
+
+# Worktrees dos agentes
+.claude/worktrees/

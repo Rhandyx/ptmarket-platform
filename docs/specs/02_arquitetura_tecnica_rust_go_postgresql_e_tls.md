@@ -1,6 +1,6 @@
 # 02. Especificação da Arquitetura Técnica (Rust + Go + PostgreSQL 17 + Next.js)
 
-> **Revisto em 25/11/2026:** o modelo de dados (§4) muda segundo a **spec 11 §2**: `product_variants`, stock atómico com reservas, `outbox_events`, `customers`, UUIDv7, IVA em bps e preços com IVA. A edge/TLS (§1) muda segundo a **spec 12 §1**: Cloudflare for SaaS, com o Caddy On-Demand TLS só como fallback. Em caso de conflito, prevalecem as specs 11 e 12.
+> **Revisto em 25/11/2026:** o modelo de dados (§4) muda segundo a **spec 11 §2**: `product_variants`, stock atómico com reservas, `outbox_events`, `customers`, UUIDv7, **PostgreSQL 18 em vez de 17**, IVA em bps e preços com IVA. A edge/TLS (§1) muda segundo a **spec 12 §1**: Cloudflare for SaaS, com o Caddy On-Demand TLS só como fallback. Em caso de conflito, prevalecem as specs 11 e 12.
 
 **Princípio Orientador:** Máxima segurança financeira e isolamento multi-tenant no núcleo (**Rust + PostgreSQL**), velocidade de adaptação em integrações externas (**Go**) e zero dessincronização entre backend e frontend (**OpenAPI tipado**).
 

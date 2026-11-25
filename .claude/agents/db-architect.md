@@ -1,6 +1,6 @@
 ---
 name: db-architect
-description: Executa cartões de migrations PostgreSQL 17 (RLS, índices, constraints).
+description: Executa cartões de migrations PostgreSQL 18 (RLS, índices, constraints).
 model: sonnet
 tools: Read, Write, Edit, Bash, Grep, Glob
 maxTurns: 60

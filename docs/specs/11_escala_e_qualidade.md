@@ -18,17 +18,20 @@
 | # | Alteração | Porquê |
 |---|---|---|
 | D1 | **`product_variants`** (id, product_id, sku, ean, attributes JSONB, price_cents, compare_at_price_cents, lowest_price_30d_cents, stock_qty, is_active). `products` deixa de ter preço/stock/`variants` JSONB; um produto simples tem 1 variante. `sub_order_items` e `product_price_history` referenciam `variant_id`. | Stock e preço por variante, bloqueáveis atomicamente. |
-| D2 | **Stock atómico:** `UPDATE product_variants SET stock_qty = stock_qty - $n WHERE id = $id AND stock_qty >= $n` (0 linhas = sem stock). **`stock_reservations`** (variant_id, order_id, qty, expires_at) durante o pagamento; worker liberta as expiradas. | Nunca vender o que não existe, mesmo com 1000 checkouts em simultâneo. |
+| D2 | **Stock atómico com reserva:** ao iniciar o pagamento, `UPDATE product_variants SET stock_qty = stock_qty - $n WHERE id = $id AND stock_qty >= $n` (0 linhas = sem stock) **e**, na mesma transação, uma linha em **`stock_reservations`** (variant_id, order_id, qty, expires_at). Pagamento confirmado → a reserva é apagada. Reserva expirada ou pagamento falhado → um worker devolve a `qty` ao stock e apaga a reserva (idempotente). O stock nunca é descontado duas vezes. | Nunca vender o que não existe, mesmo com 1000 checkouts em simultâneo. |
 | D3 | **`outbox_events`** (id, aggregate, aggregate_id, event_type, payload JSONB, created_at, published_at NULL). Escrito **na mesma transação** que a alteração de negócio; um publicador lê-o e envia para Redis/Asynq; consumidores idempotentes por `id`. Nada é publicado no Redis diretamente a partir de um handler. | Zero eventos perdidos entre o commit na BD e a fila. |
 | D4 | **`customers`** (id, email único, nome, telefone, nif, password_hash Argon2id, passkeys, consentimentos, anonymized_at). `orders.customer_id` (NULL = convidado, com snapshot de nome/email/morada). `loyalty_ledger` usa `customer_id`. | Uma conta para todas as lojas e Câmaras; RGPD (esquecimento) num só sítio. |
 | D5 | **`catalog_item_id` UUID NULL** em `products` (+ tabela `catalog_items` por GTIN/EAN, criada mais tarde). | "O mesmo produto em várias lojas" e comparação de preços sem migrar dados. |
-| D6 | **UUIDv7** gerados em Rust (`uuid` crate, feature `v7`) para todas as PK; o `DEFAULT` SQL fica só como rede de segurança. | Índices ordenados no tempo → muito mais eficientes com milhões de linhas (PG17 não tem v7 nativo). |
-| D7 | **Preços com IVA incluído** (`price_cents` = PVP, obrigatório B2C em PT). **IVA em bps** (`vat_rate_bps INT`: 2300 = 23%), coerente com as comissões. Arredondamento: half-even, por linha, documentado num único módulo `money`. | Uma só convenção; zero diferenças de cêntimos entre fatura, ledger e montra. |
+| D6 | **PostgreSQL 18** (em vez do 17 da spec 02) e **UUIDv7** em todas as PK: gerados em Rust (`Uuid::now_v7()`), com `DEFAULT uuidv7()` nativo do PG18 como rede de segurança. | Índices ordenados no tempo → muito mais eficientes com milhões de linhas. Começando do zero, não há razão para arrancar numa versão sem `uuidv7()` nativo. |
+| D7 | **Preços com IVA incluído** (`price_cents` = PVP, obrigatório B2C em PT). **IVA em bps** (`vat_rate_bps INT`: 2300 = 23%), coerente com as comissões. Arredondamento **aritmético (half-up) por linha**, num único módulo `money`; tem de dar exatamente os mesmos cêntimos que o software de faturação certificado (Moloni) — o primeiro cartão de `payments` inclui um teste de paridade com faturas reais. | Uma só convenção; zero diferenças de cêntimos entre fatura, ledger e montra. |
 | D8 | `currency CHAR(3) NOT NULL DEFAULT 'EUR'` em `orders`, `sub_orders`, `refunds`. | Custo zero agora; evita migração se houver outra moeda. |
 | D9 | **Pesquisa atrás de `SearchBackend`** (trait, como `StorageBackend`): `PostgresSearch` (FTS + trigram) agora; `Meilisearch`/`OpenSearch` mais tarde, alimentado pelo outbox. | Trocar o motor de pesquisa sem tocar no resto. |
 | D10 | Tabelas que crescem sem parar (`orders`, `outbox_events`, `product_price_history`, `admin_audit_logs`) com índice por `created_at`; **particionamento por mês só quando medido** (> ~50 M linhas). | Preparado, não pago antes do tempo. |
 
 Índices compostos começam sempre por `tenant_id` (exceto tabelas globais: `customers`, `catalog_items`).
+
+### Nota para a Fase 1 (verificação em compilação)
+`sqlx::query!` precisa da BD ou de metadados offline: fazer commit da pasta `backend-rust/.sqlx/` (`cargo sqlx prepare`) — o hook de Rust ativa `SQLX_OFFLINE=true` quando ela existe, para o `cargo check` funcionar em qualquer worktree sem BD.
 
 ## 3. Desempenho (orçamentos — falhar = não entra)
 

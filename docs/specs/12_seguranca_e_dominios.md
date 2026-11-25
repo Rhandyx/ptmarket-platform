@@ -1,7 +1,7 @@
 # 12. Segurança ("nível máximo anti-hacker") e Domínios das Câmaras
 
 **Estado:** aprovado pelo owner em 25/11/2026. **Prevalece sobre as specs 02 e 10** em TLS/edge e segurança.
-**Padrão medível:** **OWASP ASVS 4.x/5.x — nível 2 em toda a plataforma, nível 3 em `payments`, `admin` e `identity`.** O `security-auditor` revê cada diff contra esta lista.
+**Padrão medível:** **OWASP ASVS 5.0 — nível 2 em toda a plataforma, nível 3 em `payments`, `admin` e `identity`.** O `security-auditor` revê cada diff contra esta lista.
 
 ---
 
@@ -48,7 +48,7 @@
 - JSONB: passar `serde_json::Value`/tipos diretamente — **nunca** serializar para string e fazer `$1::jsonb` (dupla codificação).
 
 **Browser**
-- **CSP estrita com nonces** (Next.js middleware), `frame-ancestors 'none'`, HSTS com `preload`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` mínima, COOP `same-origin`.
+- **CSP estrita com nonces** (Next.js middleware), `frame-ancestors 'none'`, HSTS (`max-age` ≥ 1 ano; `includeSubDomains` + `preload` **só nos nossos domínios** — nos subdomínios das Câmaras só `max-age`, porque o preload abrange o domínio inteiro delas), `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` mínima, COOP `same-origin`.
 - Nenhum HTML enviado por utilizadores é servido; descrições de produto em Markdown sanitizado.
 
 **Pagamentos e webhooks**
