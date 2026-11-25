@@ -18,7 +18,7 @@ Extensões do pedido: Actor { actor_type, actor_id, impersonator_id } (ausente =
 O extractor AuditCtx (FromRequestParts) nasce aqui: request_id do x-request-id, ip, user_agent_hash = sha256(User-Agent). IP: CF-Connecting-IP só se o peer TCP estiver em TRUSTED_PROXY_CIDRS (config; vazio = nunca confiar); senão o peer.
 Decisão depois do handler (por esta ordem):
   1. status 401/403 ou Denied → SÍNCRONO outcome 'denied' (transação própria; a do handler fez rollback). Falhou → 503.
-  2. status 429 → Redis Stream (assíncrono; evita amplificação de escrita sob ataque — desvio à spec, a confirmar pelo owner).
+  2. status 429 (owner 25/11: máxima segurança, sem perder nada e sem amplificação): o 1.º 429 por (ator ou IP, classe de rota) em cada janela de 60 s → audit_event SÍNCRONO (denied, reason 'rate_limit'); os seguintes na mesma janela só incrementam um contador no Redis; no fim da janela sai 1 evento 'security.rate_limit_summary' com a contagem (Stream). Máximo de 1 escrita síncrona por chave por minuto. Redis indisponível → 503 (falha fechado).
   3. método ≠ GET/HEAD: se ctx.recorded já está marcado → nada; senão SÍNCRONO. Vale também para anónimos (actor 'anonymous'). 5xx → outcome 'error'.
   4. GET autenticado + ReadSync → SÍNCRONO; falhou → descarta o corpo e responde 503.
   5. GET autenticado + ReadAsync → XADD; falhou → tenta síncrono; falhou → 503.
