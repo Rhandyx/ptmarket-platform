@@ -2,11 +2,13 @@
 
 **Agente:** db-architect · **Modelo:** opus · **Depende de:** 01b, 04 (numeração 0012) · **Paralelo com:** 06, 08
 
+> **Mudou no 01b (ler antes de começar):** a caixa negra vive no schema `audit` (dono NOLOGIN). O migrator só tem USAGE + CREATE em `audit`. Qualquer migration que crie objetos em `audit` termina com `SELECT audit_admin.audit_seal();`. Uma função SECURITY DEFINER nova em `audit` só passa a selagem se a sua assinatura estiver na allowlist da `audit_seal()` em `infra/postgres/init/03-audit-bootstrap.sh` (este cartão pode editá-la; o README de infra diz como aplicar como superuser). Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Escrever na cadeia: só através de `audit._chain_insert` (fórmula única `audit._event_hash`).
+
 ## Objetivo
 A raiz diária e os alertas de superadmin de cada tenant-Câmara vão para o bucket WORM da própria Câmara, que é ela que paga e que controla (decisão do owner, 25/11/2026: "quanto menos responsabilidades para nós, melhor"). Os eventos de plataforma e os tenants de comércio direto (onde a plataforma recebe comissão) usam o bucket da plataforma.
 
 ## Pode alterar
-- `migrations/0012_audit_worm_targets.sql`, `migrations/tests/audit_worm_targets.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste)
+- `migrations/0012_audit_worm_targets.sql`, `migrations/tests/audit_worm_targets.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste); `infra/postgres/init/03-audit-bootstrap.sh` (só a allowlist da `audit_seal`)
 
 ## Não tocar
 - `migrations/0001–0011`, `infra/`, `backend-rust/`, `workers-go/`; nunca ler `.env`

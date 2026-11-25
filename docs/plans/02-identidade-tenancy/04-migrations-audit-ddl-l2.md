@@ -2,6 +2,8 @@
 
 **Agente:** db-architect · **Modelo:** opus · **Depende de:** 03, 05 · **Paralelo com:** 06, 09
 
+> **Mudou no 01b (ler antes de começar):** a caixa negra vive no schema `audit` (dono NOLOGIN). O migrator só tem USAGE + CREATE em `audit`. Qualquer migration que crie objetos em `audit` termina com `SELECT audit_admin.audit_seal();`. Uma função SECURITY DEFINER nova em `audit` só passa a selagem se a sua assinatura estiver na allowlist da `audit_seal()` em `infra/postgres/init/03-audit-bootstrap.sh` (este cartão pode editá-la; o README de infra diz como aplicar como superuser). Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Escrever na cadeia: só através de `audit._chain_insert` (fórmula única `audit._event_hash`).
+
 ## Objetivo
 Todo o `CREATE`/`ALTER`/`DROP`/`GRANT`/`REVOKE` fica em `audit_events` (`ddl.*`) e qualquer tabela criada a partir de agora recebe sozinha os triggers da L1.
 

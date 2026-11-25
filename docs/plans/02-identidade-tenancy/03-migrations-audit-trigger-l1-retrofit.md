@@ -2,11 +2,13 @@
 
 **Agente:** db-architect · **Modelo:** opus · **Depende de:** 02 · **Paralelo com:** 08
 
+> **Mudou no 01b (ler antes de começar):** a caixa negra vive no schema `audit` (dono NOLOGIN). O migrator só tem USAGE + CREATE em `audit`. Qualquer migration que crie objetos em `audit` termina com `SELECT audit_admin.audit_seal();`. Uma função SECURITY DEFINER nova em `audit` só passa a selagem se a sua assinatura estiver na allowlist da `audit_seal()` em `infra/postgres/init/03-audit-bootstrap.sh` (este cartão pode editá-la; o README de infra diz como aplicar como superuser). Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Escrever na cadeia: só através de `audit._chain_insert` (fórmula única `audit._event_hash`).
+
 ## Objetivo
 Cada INSERT/UPDATE/DELETE/TRUNCATE em qualquer tabela fica em `audit_events` com ator e antes/depois mascarados; mutação da app/worker sem ator aborta; uma tabela sem trigger chumba os testes.
 
 ## Pode alterar
-- `migrations/0010_audit_row_trigger.sql`, `migrations/tests/audit_l1.sql` (criar); `migrations/tests/rls.sql`, `migrations/tests/omnibus.sql` (editar: só fixar o ator onde atuam como app)
+- `migrations/0010_audit_row_trigger.sql`, `migrations/tests/audit_l1.sql` (criar); `migrations/tests/rls.sql`, `migrations/tests/omnibus.sql` (editar: só fixar o ator onde atuam como app); `infra/postgres/init/03-audit-bootstrap.sh` (só a allowlist da `audit_seal`)
 
 ## Não tocar
 - `migrations/0001–0009` — imutáveis; `backend-rust/` — os testes `rls_isolation` ficam VERMELHOS depois deste cartão até ao cartão 06 (esperado; não contornar); `workers-go/`, `infra/`
