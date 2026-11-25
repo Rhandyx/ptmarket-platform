@@ -1,29 +1,35 @@
 # COMEÇA AQUI — estado do projeto
 
 > Nova conversa: o owner escreve **"começa aqui"**. Lê este ficheiro primeiro, depois só o que a próxima tarefa pede.
-> Mantido pelo supervisor (sessão principal). As secções mais recentes ficam no topo. Máx. ~40 linhas: o histórico está no git.
+> Mantido pelo supervisor (sessão principal, Opus). Secções recentes no topo. Máx. ~40 linhas: o histórico está no git.
 
-## 25/11/2026 — Fase 0 concluída (estrutura, sem código da aplicação)
-- Specs em `docs/specs/` (02–12). **11 (escala e qualidade) e 12 (segurança e domínios) prevalecem sobre a 02.**
-- 9 agentes em `.claude/agents/` (Sonnet por defeito; Opus nos cartões críticos; Fable só arquitetura; Haiku pesquisa e tarefas triviais).
-- Regras por área em `.claude/rules/` (rust, go, sql, frontend), que carregam só ao tocar na pasta.
-- Hooks: Rust fmt+check · Go fmt+vet · frontend typecheck+lint. A leitura de `docs/business/` e das pastas geradas está bloqueada.
-- Método: épico → `architect-master` escreve cartões (`docs/plans/<épico>/`, modelo `_CARTAO.md`) → executores fazem um cartão cada → `security-auditor` + `ux-reviewer` → o supervisor revê o diff e integra.
+## 25/11/2026 — Fase 1 concluída (épico `01-fundacao`, 9 cartões + auditorias)
+- **Dev:** `infra/scripts/dev-check.sh` sobe PG 18.1 + Redis 8 (127.0.0.1). Papéis: `ptmarket_migrator` (dono), `ptmarket_app` (API), `ptmarket_worker` (outbox), `ptmarket_price_writer` (só trigger Omnibus). Nenhum é superuser.
+- **BD** `migrations/0001–0007`: RLS FORCE com contexto `app.current_tenant_id`. Omnibus calculado por triggers (a app só lê). Outbox global só sem contexto de tenant. Prova: `migrations/tests/run.sh` (corre sem superuser).
+- **Rust** `backend-rust/`: `AppError`, `money` (Decimal, half-up por linha), dual pool, `/healthz` + `/readyz`. A única entrada para a BD de um tenant é `tenancy::begin_tenant_tx` → `TenantTx`; o outbox usa `append` / `append_global`. Logs mascaram valores sensíveis e falham fechado. Prova: `DATABASE_URL=postgres://ptmarket_migrator:dev_migrator@127.0.0.1:5432/ptmarket cargo test -p ptmarket-api`.
+- **Go** `workers-go/`: publicador outbox → Asynq (TaskID = id do evento), provado de ponta a ponta. Toolchain fixado em 1.27.4. Prova: `go test ./...`.
+- **Web** `frontend-web/`: Next 16 + React 19, CSP com nonce, tokens, Modal / Confirm / Drawer / Popover / Toast. Prova: `npm run verify && npm run test:e2e` (axe a 375/1440 px, claro e escuro). Screenshots em `proofs/` (fora do git).
+- **Auditorias:** ASVS sem nenhum achado crítico ou alto; os médios estão corrigidos. `cargo audit`, `govulncheck` e `npm audit` dão 0 vulnerabilidades.
+- **UX:** aprovado depois das correções. Nu validator 0 erros. Orçamento de JS redefinido como "runtime + 30 KB" (o runtime mede ~135 KB).
 
-## 25/11/2026 — Revisão da Fase 0 (commit `c3a37bc`)
-- Hooks corrigidos para worktrees; PostgreSQL **18**; arredondamento half-up com paridade Moloni; ASVS 5.0.
-- A sessão principal corre em **Opus** (`/model opus`); Fable só no `architect-master`.
+## Próximo passo — Fase 2 (épico `02-identidade-tenancy`, a confirmar pelo `architect-master`)
+- Extractor de tenant pelo `Host`: o `TenantId::new` é `pub(crate)` e está à espera dele. Inclui a policy do portal nacional (`publish_to_national_portal`).
+- Épico identity: abrir `customers` (hoje sem policies nem grants), Argon2id/passkeys, RBAC, `super_admin` + 2FA.
+- Cliente TS gerado a partir do `openapi.json`.
 
-## Próximo passo — Fase 1: fundação (épico `01-fundacao`)
-1. `architect-master` cria os cartões do épico a partir de 02 §4 + 11 §1–2 + 12 §3:
-   - esqueleto do workspace Rust (módulos de domínio, `AppError`, `money`, config, dual pool);
-   - migrations base (tenants, stores, categories, products + `product_variants`, `customers`, `outbox_events`) com RLS;
-   - esqueleto Go (publicador do outbox + Asynq);
-   - esqueleto Next.js (design system com tokens, Modal/Toast/Popover/Drawer, ESLint `no-alert`);
-   - `infra/` docker-compose de desenvolvimento.
-2. Execução em paralelo por pasta, com worktrees.
+## Decisões do owner (pendentes; até lá vale o default)
+1. Histórico de preços: `ON DELETE RESTRICT`, por isso variante/loja/tenant com histórico não se apaga, só se desativa. Prazo de retenção por definir.
+2. IVA ES/Açores/Madeira e equivalentes legais ES (hoje só PT continente 23%). Decidir antes do 1.º tenant espanhol.
+3. Marca: ≤ 2 fontes + paleta final (hoje `#0F4C81`/`#111827`, fontes do sistema; muda-se só nos tokens).
+
+## Dívida técnica conhecida
+- API sem graceful shutdown no SIGTERM; o worker Go já o tem.
+- `dev-check.sh`: falta testar o caso de erro.
+- HSTS com `includeSubDomains`/`preload` só nos nossos domínios (épico domínios). `eupago_split_key` em claro até confirmar se é segredo.
+- WebKit: aviso intermitente de CSP em `<link nonce>` (bfcache?). `--toast-reserve: 20rem` é alto em mobile; ponderar 1 toast visível a 375 px.
+- `split_vat` PROVISÓRIO até ao teste de paridade com o Moloni (1.º cartão de payments).
 
 ## Pendentes
-- **Push:** `git push origin main` funciona pela regra de `settings.local.json` (confirmado 25/11). Antes de cada push: `git remote -v`.
-- `seed-and-verify.md` (workflow AGY) por definir.
-- Fase 2: Cloudflare Tunnel como origem dos domínios SaaS (por confirmar).
+- **Push:** o classificador do auto mode bloqueia o meu `git push`. O owner corre `! git push origin main` (remote pessoal `Rhandyx`; antes, `git remote -v`).
+- Worktrees partem do último commit enviado: sem push, os executores correm no checkout principal, um por pasta e sem commits.
+- `seed-and-verify.md` (workflow AGY) por definir. Cloudflare Tunnel como origem dos domínios SaaS (por confirmar).
