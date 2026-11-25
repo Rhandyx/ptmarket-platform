@@ -1,15 +1,18 @@
-// Comando worker: publicador do outbox + servidor Asynq.
+// Comando worker: publicador do outbox + servidor Asynq + escritor do stream de auditoria.
 package main
 
 import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
+	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/segjar/ptmarket/workers-go/internal/audit"
 	"github.com/segjar/ptmarket/workers-go/internal/config"
 	"github.com/segjar/ptmarket/workers-go/internal/logx"
 	"github.com/segjar/ptmarket/workers-go/internal/outbox"
@@ -20,6 +23,11 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuração inválida", "err", err.Error())
+		os.Exit(1)
+	}
+	ropts, err := goredis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Error("REDIS_URL inválido", "err", err.Error())
 		os.Exit(1)
 	}
 	redis, err := asynq.ParseRedisURI(cfg.RedisURL)
@@ -52,8 +60,21 @@ func main() {
 		Batch:    cfg.Batch,
 		Log:      log,
 	}
+	rdb := goredis.NewClient(ropts)
+	defer rdb.Close()
+	// Sem interruptor: o escritor da caixa negra arranca sempre com o worker.
+	auditor := &audit.Consumer{
+		Redis: rdb,
+		Store: audit.PgStore{DB: pool},
+		Batch: cfg.AuditBatch,
+		Name:  audit.ConsumerName(),
+		Log:   log,
+	}
 	log.Info("worker iniciado")
+	var wg sync.WaitGroup
+	wg.Go(func() { auditor.Run(ctx) })
 	pub.Run(ctx, cfg.PollInterval)
 	log.Info("a parar")
+	wg.Wait() // acaba o lote de auditoria em curso
 	srv.Shutdown()
 }

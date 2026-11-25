@@ -13,6 +13,7 @@ type Config struct {
 	RedisURL     string
 	PollInterval time.Duration
 	Batch        int
+	AuditBatch   int // AUDIT_BATCH: mensagens por lote do stream de auditoria
 }
 
 func Load() (Config, error) {
@@ -21,6 +22,7 @@ func Load() (Config, error) {
 		RedisURL:     os.Getenv("REDIS_URL"),
 		PollInterval: time.Second,
 		Batch:        100,
+		AuditBatch:   200,
 	}
 	if c.DatabaseURL == "" || c.RedisURL == "" {
 		return c, errors.New("WORKER_DATABASE_URL e REDIS_URL são obrigatórias")
@@ -38,6 +40,13 @@ func Load() (Config, error) {
 			return c, errors.New("OUTBOX_BATCH inválido")
 		}
 		c.Batch = n
+	}
+	if v := os.Getenv("AUDIT_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return c, errors.New("AUDIT_BATCH inválido")
+		}
+		c.AuditBatch = n
 	}
 	return c, nil
 }
