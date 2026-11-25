@@ -19,7 +19,7 @@ path = "src/bin/openapi.rs"
 
 [dependencies]
 axum = "=0.8.9"
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 sqlx = { version = "=0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json", "macros", "migrate"] }
 deadpool-redis = "=0.23.1"
 secrecy = "=0.10.3"
@@ -36,6 +36,10 @@ uuid = { version = "=1.29.3", features = ["v7", "serde"] }
 async-trait = "=0.1.92"
 regex = "=1.13.1"
 rust_decimal = { version = "=1.43.0", default-features = false, features = ["std"] }
+argon2 = { version = "=0.6.0", features = ["zeroize"] }
+sha1 = { version = "=0.11.0", default-features = false }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
+zeroize = { version = "=1.9.2", features = ["std"] }
 
 [features]
 # Construtores só para testes (ex.: TenantId::for_tests); ligado apenas pela dev-dependency abaixo,
