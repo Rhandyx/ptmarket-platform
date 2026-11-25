@@ -27,12 +27,12 @@ func main() {
 	}
 	ropts, err := goredis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		log.Error("REDIS_URL inválido", "err", err.Error())
+		log.Error("REDIS_URL inválido") // sem err: o texto pode citar o URL (com a password)
 		os.Exit(1)
 	}
 	redis, err := asynq.ParseRedisURI(cfg.RedisURL)
 	if err != nil {
-		log.Error("REDIS_URL inválido", "err", err.Error())
+		log.Error("REDIS_URL inválido") // sem err: o texto pode citar o URL (com a password)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

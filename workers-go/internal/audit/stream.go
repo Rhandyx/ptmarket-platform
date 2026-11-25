@@ -1,16 +1,26 @@
 // Package audit grava os eventos da caixa negra (Redis Stream audit:stream) em audit_events.
-// ACK só depois do COMMIT; nada se perde (pendentes reclamados, venenosos na fila morta) e nada se
-// duplica (audit_append_event é idempotente pelo id).
+// ACK só depois do COMMIT; nada se perde (pendentes reclamados, venenosos e esgotados na fila morta) e
+// nada se duplica (audit_append_event é idempotente pelo id).
+//
+// Concorrência com as transações de negócio: cada transação do escritor bloqueia as cabeças de cadeia
+// sempre pela mesma ordem (chain_key, classe) e dura no máximo 1 s (PgStore.MaxTx); 55P03/40P01 repetem
+// com backoff. Logs e fila morta só levam SQLSTATE e ids do stream, nunca a mensagem da BD nem valores.
 package audit
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,32 +32,40 @@ const (
 	GroupName  = "audit-writers"
 	EventField = "event"
 
-	defaultBatch   = 200
-	defaultBlock   = 2 * time.Second
-	defaultMinIdle = 60 * time.Second
-	metricsEvery   = time.Minute
-	retryPause     = time.Second
+	defaultBatch         = 200
+	defaultBlock         = 2 * time.Second
+	defaultMinIdle       = 60 * time.Second
+	defaultMaxDeliveries = 5
+	deadMaxLen           = 100000 // XADD MAXLEN ~
+	metricsEvery         = time.Minute
+	retryPause           = time.Second
 )
 
-// Writer grava lotes (PgStore em produção).
+// Writer grava lotes (PgStore em produção); ver PgStore.Write.
 type Writer interface {
-	WriteAll(ctx context.Context, events [][]byte) (int, error)
-	WriteEach(ctx context.Context, events [][]byte) (int, map[int]*PoisonError, error)
+	Write(ctx context.Context, events [][]byte) (WriteResult, error)
 }
 
 // Consumer consome audit:stream no grupo audit-writers. Campos vazios = valores por omissão.
 type Consumer struct {
-	Redis   redis.UniversalClient
-	Store   Writer
-	Batch   int           // AUDIT_BATCH (200)
-	Name    string        // hostname-pid
-	Block   time.Duration // 2 s
-	MinIdle time.Duration // 60 s (XAUTOCLAIM)
-	Stream  string        // audit:stream
-	Dead    string        // audit:stream:dead
-	Group   string        // audit-writers
-	Log     *slog.Logger
+	Redis         redis.UniversalClient
+	Store         Writer
+	Batch         int           // AUDIT_BATCH (200)
+	Name          string        // hostname-pid
+	Block         time.Duration // 2 s
+	MinIdle       time.Duration // 60 s (XAUTOCLAIM)
+	MaxDeliveries int64         // 5: entregas falhadas (XPENDING) até à fila morta
+	Stream        string        // audit:stream
+	Dead          string        // audit:stream:dead
+	Group         string        // audit-writers
+	Log           *slog.Logger
+
+	deadTotal atomic.Int64
 }
+
+// DeadTotal: mensagens enviadas para a fila morta por este consumidor desde o arranque
+// (o cartão 09 liga-o ao alerta).
+func (c *Consumer) DeadTotal() int64 { return c.deadTotal.Load() }
 
 // ConsumerName devolve hostname-pid.
 func ConsumerName() string {
@@ -85,6 +103,12 @@ func (c *Consumer) minIdle() time.Duration {
 	}
 	return c.MinIdle
 }
+func (c *Consumer) maxDeliveries() int64 {
+	if c.MaxDeliveries <= 0 {
+		return defaultMaxDeliveries
+	}
+	return c.MaxDeliveries
+}
 
 func or(v, d string) string {
 	if v == "" {
@@ -116,6 +140,8 @@ func (c *Consumer) RunOnce(ctx context.Context) (int, error) {
 	return c.process(ctx, msgs)
 }
 
+// next: cada leitura (incluindo a releitura dos pendentes com "0" e o XAUTOCLAIM) soma 1 ao contador de
+// entregas da mensagem no XPENDING.
 func (c *Consumer) next(ctx context.Context) ([]redis.XMessage, error) {
 	// 1) Pendentes deste consumidor (ex.: a BD falhou no ciclo anterior).
 	msgs, err := c.read(ctx, "0", -1)
@@ -160,90 +186,294 @@ func (c *Consumer) read(ctx context.Context, id string, block time.Duration) ([]
 	return out, nil
 }
 
+// Motivos da fila morta (texto fixo: nunca a mensagem da BD).
+const (
+	deadMissing   = "missing_event"
+	deadJSON      = "invalid_json"
+	deadPoison    = "poison"
+	deadExhausted = "deliveries_exhausted"
+)
+
+var deadReason = map[string]string{
+	deadMissing:   "campo event em falta ou não texto",
+	deadJSON:      "JSON ilegível",
+	deadPoison:    "recusado pelo contrato da BD",
+	deadExhausted: "falhou em todas as entregas",
+}
+
 type deadMsg struct {
-	msg    redis.XMessage
-	code   string
-	reason string
+	msg        redis.XMessage
+	kind       string // deadMissing, deadJSON, deadPoison, deadExhausted
+	code       string // SQLSTATE ou = kind
+	deliveries int64
+}
+
+// item: evento a gravar, com a chave de ordenação dos bloqueios.
+type item struct {
+	msg   redis.XMessage
+	raw   []byte
+	chain [16]byte // COALESCE(tenant_id, uuid zero)
+	class string   // audit.audit_retention_class(action, outcome)
 }
 
 func (c *Consumer) process(ctx context.Context, msgs []redis.XMessage) (int, error) {
 	var (
-		events  [][]byte
-		eventID []string // id da mensagem de cada evento enviado à BD
-		dead    []deadMsg
+		items []item
+		dead  []deadMsg
 	)
 	for _, m := range msgs {
 		raw, ok := m.Values[EventField].(string)
 		switch {
 		case !ok:
-			dead = append(dead, deadMsg{m, "missing_event", "campo event em falta ou não texto"})
+			dead = append(dead, deadMsg{msg: m, kind: deadMissing, code: deadMissing})
 		case !json.Valid([]byte(raw)):
-			dead = append(dead, deadMsg{m, "invalid_json", "JSON ilegível"})
+			dead = append(dead, deadMsg{msg: m, kind: deadJSON, code: deadJSON})
 		default:
-			events = append(events, []byte(raw))
-			eventID = append(eventID, m.ID)
+			chain, class := chainOrder([]byte(raw))
+			items = append(items, item{msg: m, raw: []byte(raw), chain: chain, class: class})
 		}
 	}
+	sortItems(items)
 
-	written := eventID
-	if len(events) > 0 {
-		_, err := c.Store.WriteAll(ctx, events)
-		var p *PoisonError
-		if errors.As(err, &p) {
-			var poison map[int]*PoisonError
-			_, poison, err = c.Store.WriteEach(ctx, events)
-			if err == nil && len(poison) > 0 {
-				written = make([]string, 0, len(eventID))
-				byID := make(map[string]redis.XMessage, len(msgs))
-				for _, m := range msgs {
-					byID[m.ID] = m
-				}
-				for i, id := range eventID {
-					if pe, bad := poison[i]; bad {
-						dead = append(dead, deadMsg{byID[id], pe.Code, pe.Msg})
-						continue
-					}
-					written = append(written, id)
-				}
-			}
-		}
-		if err != nil {
-			return 0, err // antes do COMMIT: sem ACK, tudo fica pendente
-		}
-	}
+	ack, deadMore, err := c.write(ctx, items)
+	dead = append(dead, deadMore...)
 
-	// Venenosos: XADD na fila morta e só então ACK. Se o XADD falhar, fica pendente (nunca se descarta).
-	ack := written
-	var deadErr error
+	// Fila morta: XADD e só então ACK. Se o XADD falhar, fica pendente (nunca se descarta).
 	for _, d := range dead {
-		if err := c.toDead(ctx, d); err != nil {
-			deadErr = errors.Join(deadErr, err)
+		if derr := c.toDead(ctx, d); derr != nil {
+			err = errors.Join(err, derr)
 			continue
 		}
 		ack = append(ack, d.msg.ID)
 	}
-	if err := c.ack(ctx, ack); err != nil {
-		return 0, errors.Join(err, deadErr)
+	if aerr := c.ack(ctx, ack); aerr != nil {
+		return 0, errors.Join(aerr, err)
 	}
-	return len(ack), deadErr
+	return len(ack), err
 }
 
-func (c *Consumer) toDead(ctx context.Context, d deadMsg) error {
-	vals := make(map[string]any, len(d.msg.Values)+3)
-	for k, v := range d.msg.Values {
-		vals[k] = v
+// write grava os itens (já ordenados) em transações curtas. Devolve os ids gravados (para ACK) e os que
+// vão para a fila morta. O que não está em nenhum dos dois fica pendente (reentregue depois).
+//   - Venenoso (PTA02/PTA03/22P02/22P05): fila morta já; o resto repete sem ele.
+//   - Erro de infraestrutura (ligação, BD parada): para tudo; nada conta para a fila morta.
+//   - Outro erro (ex.: 55P03/40P01 depois das tentativas): passa a um evento por transação, para isolar
+//     o culpado; o culpado fica pendente até MaxDeliveries entregas e depois vai para a fila morta.
+func (c *Consumer) write(ctx context.Context, items []item) (ack []string, dead []deadMsg, err error) {
+	var (
+		single     bool
+		deliveries map[string]int64
+	)
+	for len(items) > 0 {
+		n := len(items)
+		if single {
+			n = 1
+		}
+		payloads := make([][]byte, n)
+		for i := range n {
+			payloads[i] = items[i].raw
+		}
+		res, werr := c.Store.Write(ctx, payloads)
+		if werr == nil {
+			if res.Done <= 0 || res.Done > n {
+				return ack, dead, fmt.Errorf("audit: Store.Write devolveu Done=%d para %d eventos", res.Done, n)
+			}
+			for _, it := range items[:res.Done] {
+				ack = append(ack, it.msg.ID)
+			}
+			items = items[res.Done:]
+			continue
+		}
+		var p *PoisonError
+		if errors.As(werr, &p) && p.Index >= 0 && p.Index < n {
+			dead = append(dead, deadMsg{msg: items[p.Index].msg, kind: deadPoison, code: p.Code})
+			items = slices.Delete(items, p.Index, p.Index+1)
+			continue
+		}
+		if isInfra(werr) {
+			return ack, dead, werr
+		}
+		if !single {
+			single = true // isolar o culpado
+			continue
+		}
+		// Evento único com erro não venenoso: conta as entregas.
+		if deliveries == nil {
+			deliveries = c.deliveries(ctx, items)
+		}
+		it := items[0]
+		items = items[1:]
+		if d := deliveries[it.msg.ID]; d >= c.maxDeliveries() {
+			dead = append(dead, deadMsg{msg: it.msg, kind: deadExhausted, code: errCode(werr), deliveries: d})
+			continue
+		}
+		err = errors.Join(err, werr) // fica pendente; os seguintes avançam
 	}
-	vals["error"] = d.reason
-	vals["error_code"] = d.code
-	vals["source_id"] = d.msg.ID
+	return ack, dead, err
+}
+
+// isInfra: erros que não são culpa do evento (rede, BD parada, prazo, cancelamento).
+func isInfra(err error) bool {
+	var db *DBError
+	if errors.As(err, &db) {
+		return db.Infra()
+	}
+	return true
+}
+
+func errCode(err error) string {
+	var db *DBError
+	if errors.As(err, &db) {
+		return db.Code
+	}
+	return "unknown"
+}
+
+// deliveries: contador de entregas (XPENDING) de cada item deste consumidor. Em erro devolve vazio
+// (sem contador não se manda nada para a fila morta).
+func (c *Consumer) deliveries(ctx context.Context, items []item) map[string]int64 {
+	out := make(map[string]int64, len(items))
+	if len(items) == 0 {
+		return out
+	}
+	lo, hi := items[0].msg.ID, items[0].msg.ID
+	for _, it := range items[1:] {
+		if streamIDLess(it.msg.ID, lo) {
+			lo = it.msg.ID
+		}
+		if streamIDLess(hi, it.msg.ID) {
+			hi = it.msg.ID
+		}
+	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	if err := c.Redis.XAdd(cctx, &redis.XAddArgs{Stream: c.dead(), Values: vals}).Err(); err != nil {
+	res, err := c.Redis.XPendingExt(cctx, &redis.XPendingExtArgs{
+		Stream: c.stream(), Group: c.group(), Consumer: c.name(),
+		Start: lo, End: hi, Count: c.batch(),
+	}).Result()
+	if err != nil {
+		c.logErr("XPENDING do stream de auditoria", err)
+		return out
+	}
+	for _, p := range res {
+		out[p.ID] = p.RetryCount
+	}
+	return out
+}
+
+// streamIDLess compara ids "ms-seq" do Redis.
+func streamIDLess(a, b string) bool {
+	am, as := splitStreamID(a)
+	bm, bs := splitStreamID(b)
+	if am != bm {
+		return am < bm
+	}
+	return as < bs
+}
+
+func splitStreamID(id string) (uint64, uint64) {
+	ms, seq, _ := strings.Cut(id, "-")
+	m, _ := strconv.ParseUint(ms, 10, 64)
+	s, _ := strconv.ParseUint(seq, 10, 64)
+	return m, s
+}
+
+// sortItems: ordem total e igual em todos os escritores (chain_key, classe) — evita 40P01 entre
+// escritores e com as transações de negócio; estável para manter a ordem do stream dentro da cadeia.
+func sortItems(items []item) {
+	slices.SortStableFunc(items, func(a, b item) int {
+		if r := bytes.Compare(a.chain[:], b.chain[:]); r != 0 {
+			return r
+		}
+		return strings.Compare(a.class, b.class)
+	})
+}
+
+// chainOrder calcula (chain_key, classe) como audit._chain_insert (migration 0008):
+// chain_key = COALESCE(tenant_id, uuid zero); classe = audit.audit_retention_class(action, outcome).
+// Eventos com campos ilegíveis são recusados pela BD antes de bloquear, por isso a ordem deles é
+// indiferente. Mapa (e não struct) porque o jsonb distingue maiúsculas nas chaves e o encoding/json não.
+func chainOrder(raw []byte) (chain [16]byte, class string) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return chain, "standard"
+	}
+	var tenant, action, outcome string
+	_ = json.Unmarshal(m["tenant_id"], &tenant)
+	_ = json.Unmarshal(m["action"], &action)
+	_ = json.Unmarshal(m["outcome"], &outcome)
+	if u, ok := parseUUID(tenant); ok {
+		chain = u
+	}
+	return chain, retentionClass(action, outcome)
+}
+
+// parseUUID aceita tudo o que o tipo uuid do PostgreSQL aceita (maiúsculas, chavetas, hífenes
+// opcionais), para a ordem do Go coincidir com o bloqueio feito pela BD.
+func parseUUID(s string) ([16]byte, bool) {
+	var u [16]byte
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+		s = s[1 : len(s)-1]
+	}
+	s = strings.ReplaceAll(s, "-", "")
+	if len(s) != 32 {
+		return u, false
+	}
+	if _, err := hex.Decode(u[:], []byte(s)); err != nil {
+		return u, false
+	}
+	return u, true
+}
+
+// fiscalPrefixes: cópia de audit.audit_retention_class (migration 0008). Mudar lá = mudar aqui.
+var fiscalPrefixes = []string{
+	"orders.", "sub_orders.", "sub_order_items.", "payments.", "refunds.", "payouts.",
+	"invoices.", "loyalty_ledger.", "product_price_history.", "product_variants.",
+	"order.", "payment.", "refund.", "payout.", "invoice.", "price.",
+}
+
+func retentionClass(action, outcome string) string {
+	if outcome == "denied" {
+		return "security"
+	}
+	for _, p := range fiscalPrefixes {
+		if strings.HasPrefix(action, p) {
+			return "fiscal"
+		}
+	}
+	return "standard"
+}
+
+// toDead: XADD na fila morta (MAXLEN ~ 100000): id de origem, código, motivo fixo, hash, tamanho e o
+// payload inteiro (spec 13: um evento recusado continua a ser uma ação que aconteceu). O payload já vem
+// mascarado pela app e já estava no stream principal: a fila morta tem a mesma sensibilidade. O log
+// leva só id, código e motivo, nunca o payload.
+func (c *Consumer) toDead(ctx context.Context, d deadMsg) error {
+	raw, _ := d.msg.Values[EventField].(string)
+	sum := sha256.Sum256([]byte(raw))
+	vals := map[string]any{
+		"source_id":      d.msg.ID,
+		"error_code":     d.code,
+		"error":          deadReason[d.kind],
+		"field":          EventField,
+		"payload_sha256": hex.EncodeToString(sum[:]),
+		"payload_bytes":  len(raw),
+		"deliveries":     d.deliveries,
+	}
+	if _, ok := d.msg.Values[EventField].(string); ok {
+		vals[EventField] = raw
+	}
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	if err := c.Redis.XAdd(cctx, &redis.XAddArgs{
+		Stream: c.dead(), MaxLen: deadMaxLen, Approx: true, Values: vals,
+	}).Err(); err != nil {
 		return err
 	}
+	n := c.deadTotal.Add(1)
 	if c.Log != nil {
-		c.Log.Error("evento de auditoria venenoso enviado para a fila morta",
-			"stream_id", d.msg.ID, "code", d.code, "err", d.reason)
+		c.Log.Error("evento de auditoria enviado para a fila morta",
+			"stream_id", d.msg.ID, "code", d.code, "reason", d.kind, "deliveries", d.deliveries, "dead_total", n)
 	}
 	return nil
 }
@@ -293,7 +523,7 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 		if _, err := c.RunOnce(ctx); err != nil {
 			c.logErr("ciclo do stream de auditoria falhou", err)
-			if strings.HasPrefix(err.Error(), "NOGROUP") {
+			if strings.Contains(err.Error(), "NOGROUP") {
 				ready = false
 			}
 			pause(ctx)
@@ -303,12 +533,13 @@ func (c *Consumer) Run(ctx context.Context) {
 			if p, d, err := c.Metrics(ctx); err != nil {
 				c.logErr("métricas do stream de auditoria", err)
 			} else if c.Log != nil {
-				c.Log.Info("stream de auditoria", "pending", p, "dead", d)
+				c.Log.Info("stream de auditoria", "pending", p, "dead", d, "dead_total", c.DeadTotal())
 			}
 		}
 	}
 }
 
+// logErr: os erros da BD chegam aqui já reduzidos ao SQLSTATE (DBError/PoisonError).
 func (c *Consumer) logErr(msg string, err error) {
 	if c.Log != nil {
 		c.Log.Error(msg, "err", err.Error())

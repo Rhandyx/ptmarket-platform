@@ -201,25 +201,24 @@ func TestCrashAfterCommitBeforeAck(t *testing.T) {
 	for i, m := range msgs {
 		payloads[i] = []byte(m.Values[EventField].(string))
 	}
-	if n, err := store.WriteAll(context.Background(), payloads); err != nil || n != 3 {
-		t.Fatalf("1.ª gravação n=%d err=%v", n, err)
+	if r, err := store.Write(context.Background(), payloads); err != nil || r.Done != 3 || r.Inserted != 3 {
+		t.Fatalf("1.ª gravação r=%+v err=%v", r, err)
 	}
 
 	// Outro consumidor reclama (XAUTOCLAIM) e reentrega: nada é duplicado e o ACK acontece.
-	alive := *dead
-	alive.Name = "vivo"
+	alive := clone(dead, "vivo")
 	time.Sleep(2 * alive.MinIdle)
-	if n := drain(t, &alive); n != 3 {
+	if n := drain(t, alive); n != 3 {
 		t.Fatalf("confirmadas %d, esperado 3", n)
 	}
-	if n, err := store.WriteAll(context.Background(), payloads); err != nil || n != 0 {
-		t.Fatalf("reentrega gravou n=%d err=%v (esperado 0)", n, err)
+	if r, err := store.Write(context.Background(), payloads); err != nil || r.Done != 3 || r.Inserted != 0 {
+		t.Fatalf("reentrega r=%+v err=%v (esperado 0 novos)", r, err)
 	}
 	if n := rows(t, e, tenant); n != 3 {
 		t.Fatalf("linhas %d, esperado 3", n)
 	}
 	assertChain(t, e, tenant)
-	assertDrained(t, &alive)
+	assertDrained(t, alive)
 }
 
 // killBeginner: a k-ésima chamada à BD na transação mata a própria ligação (falha real da BD a meio).
@@ -304,14 +303,19 @@ func TestPoisonMidBatch(t *testing.T) {
 	if err != nil || len(dl) != 2 {
 		t.Fatalf("fila morta=%d err=%v", len(dl), err)
 	}
-	want := map[string]string{string(badJSON): "PTA02", "{ilegível": "invalid_json"}
+	want := map[string]string{sha(string(badJSON)): "PTA02", sha("{ilegível"): "invalid_json"}
 	for _, m := range dl {
-		orig, _ := m.Values[EventField].(string)
-		code, ok := want[orig]
+		code, ok := want[m.Values["payload_sha256"].(string)]
 		if !ok || m.Values["error_code"] != code || m.Values["error"] == "" || m.Values["source_id"] == "" {
 			t.Errorf("entrada morta inesperada: code=%v", m.Values["error_code"])
 		}
-		delete(want, orig)
+		if orig, _ := m.Values[EventField].(string); sha(orig) != m.Values["payload_sha256"] {
+			t.Errorf("payload em falta ou alterado na fila morta (code=%v)", m.Values["error_code"])
+		}
+		delete(want, m.Values["payload_sha256"].(string))
+	}
+	if c.DeadTotal() != 2 {
+		t.Errorf("DeadTotal=%d, esperado 2", c.DeadTotal())
 	}
 }
 
