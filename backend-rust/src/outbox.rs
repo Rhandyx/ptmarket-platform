@@ -2,15 +2,26 @@
 //! de negócio. Um worker publica-o depois; um handler nunca publica no Redis.
 //!
 //! O tenant do evento nunca vem do chamador: `append` usa o da `TenantTx`; `append_global`
-//! (módulos de sistema) recebe uma transação sem contexto de tenant. O RLS recusa (42501)
+//! (módulos de sistema) só aceita uma `PlatformTx` (sem contexto de tenant). O RLS recusa (42501)
 //! evento global com contexto de tenant e evento de tenant fora do seu contexto.
+//!
+//! Uma `TenantTx` não serve para evento global (não compila):
+//! ```compile_fail
+//! # use ptmarket_api::{outbox::{NewEvent, append_global}, tenancy::TenantTx};
+//! # async fn f(tx: &mut TenantTx, ev: NewEvent) {
+//! let _ = append_global(tx, ev).await;
+//! # }
+//! ```
 
-use sqlx::{PgConnection, Postgres, Transaction};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    tenancy::{TenantTx, db::db_error},
+    tenancy::{
+        TenantTx,
+        db::{PlatformTx, db_error},
+    },
 };
 
 /// Evento a gravar (o tenant vem da transação, não daqui).
@@ -28,12 +39,9 @@ pub async fn append(tx: &mut TenantTx, ev: NewEvent) -> Result<Uuid, AppError> {
     insert(tx, Some(tenant_id), ev).await
 }
 
-/// Grava um evento global (`tenant_id = NULL`) numa transação SEM contexto de tenant.
-/// Uma `TenantTx` não é aceite por tipo; numa transação com contexto o RLS devolve `Err`.
-pub async fn append_global(
-    tx: &mut Transaction<'_, Postgres>,
-    ev: NewEvent,
-) -> Result<Uuid, AppError> {
+/// Grava um evento global (`tenant_id = NULL`) numa `PlatformTx` (sem contexto de tenant).
+/// Uma `TenantTx` não é aceite por tipo; com contexto de tenant o RLS devolve `Err`.
+pub async fn append_global(tx: &mut PlatformTx, ev: NewEvent) -> Result<Uuid, AppError> {
     insert(tx, None, ev).await
 }
 

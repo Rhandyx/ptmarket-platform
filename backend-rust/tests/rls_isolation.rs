@@ -4,13 +4,14 @@
 //! não prova nada. Os tenants semeiam-se como dono (tabela global, sem RLS); as lojas só
 //! podem ser criadas pela app dentro de `begin_tenant_tx`.
 //!
-//! Evento global numa `TenantTx`: impossível por tipo (`append_global` só aceita `Transaction`,
-//! que a `TenantTx` não expõe); a BD recusa-o também (42501), provado abaixo com SQL direto.
+//! Evento global numa `TenantTx`: impossível por tipo (`append_global` só aceita `PlatformTx`);
+//! a BD recusa-o também (42501), provado abaixo com SQL direto. Todas as transações levam `AuditCtx`.
 
 use ptmarket_api::{
+    audit::{ActorType, AuditCtx},
     error::AppError,
     outbox::{NewEvent, append, append_global},
-    tenancy::{TenantId, begin_tenant_tx},
+    tenancy::{TenantId, begin_tenant_tx, db::begin_platform_tx},
 };
 use sqlx::{
     PgConnection, PgPool, Postgres,
@@ -20,6 +21,10 @@ use sqlx::{
 use uuid::Uuid;
 
 type TestResult = anyhow::Result<()>;
+
+fn actor() -> AuditCtx {
+    AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None)
+}
 
 /// SQLSTATE devolvido pelo PostgreSQL quando uma linha viola a política RLS.
 const RLS_VIOLATION: &str = "42501";
@@ -96,7 +101,7 @@ async fn insert_store(conn: &mut PgConnection, tenant: TenantId, slug: &str) -> 
 }
 
 async fn seed_store(app: &PgPool, tenant: TenantId, slug: &str) -> anyhow::Result<()> {
-    let mut tx = begin_tenant_tx(app, tenant).await?;
+    let mut tx = begin_tenant_tx(app, tenant, &actor()).await?;
     insert_store(&mut tx, tenant, slug).await?;
     tx.commit().await?;
     Ok(())
@@ -154,7 +159,7 @@ async fn tenant_sees_only_its_own_stores(
     seed_store(&app, a, "a2").await?;
     seed_store(&app, b, "b1").await?;
 
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     let tenants = sqlx::query_scalar!("SELECT tenant_id FROM stores")
         .fetch_all(&mut *tx)
         .await?;
@@ -162,7 +167,7 @@ async fn tenant_sees_only_its_own_stores(
     assert!(tenants.iter().all(|t| *t == a.as_uuid()));
     tx.rollback().await?;
 
-    let mut tx = begin_tenant_tx(&app, b).await?;
+    let mut tx = begin_tenant_tx(&app, b, &actor()).await?;
     assert_eq!(count_stores(&mut tx).await?, 1);
     tx.rollback().await?;
 
@@ -183,7 +188,7 @@ async fn other_tenant_rows_are_rejected_inside_tenant_tx(
     seed_store(&app, b, "b1").await?;
 
     // INSERT com tenant_id de B na transação de A: Err (sem panic).
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     let res = insert_store(&mut tx, b, "intrusa").await;
     assert!(
         res.as_ref().is_err_and(is_rls_violation),
@@ -192,7 +197,7 @@ async fn other_tenant_rows_are_rejected_inside_tenant_tx(
     tx.rollback().await?;
 
     // UPDATE às lojas de B a partir de A não toca em nada.
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     let b_uuid = b.as_uuid();
     let updated = sqlx::query!(
         "UPDATE stores SET name = 'roubada' WHERE tenant_id = $1",
@@ -203,7 +208,7 @@ async fn other_tenant_rows_are_rejected_inside_tenant_tx(
     assert_eq!(updated.rows_affected(), 0);
     tx.commit().await?;
 
-    let mut tx = begin_tenant_tx(&app, b).await?;
+    let mut tx = begin_tenant_tx(&app, b, &actor()).await?;
     let names = sqlx::query_scalar!("SELECT name FROM stores")
         .fetch_all(&mut *tx)
         .await?;
@@ -229,7 +234,7 @@ async fn tenant_context_does_not_leak_after_commit_or_rollback(
     drop(c);
 
     // Fim por COMMIT.
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     insert_store(&mut tx, a, "a1").await?;
     assert_eq!(count_stores(&mut tx).await?, 1);
     tx.commit().await?;
@@ -250,7 +255,7 @@ async fn tenant_context_does_not_leak_after_commit_or_rollback(
     drop(c);
 
     // Fim por ROLLBACK.
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     assert_eq!(count_stores(&mut tx).await?, 1);
     tx.rollback().await?;
 
@@ -299,7 +304,7 @@ async fn outbox_append_respects_tenant_and_transaction(
 
     // Tenant A grava o seu evento; o tenant vem da TenantTx.
     let agg = Uuid::now_v7();
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     let id = append(&mut tx, event(agg)).await?;
     tx.commit().await?;
     assert_eq!(count_events(&worker, agg).await?, 1);
@@ -315,7 +320,7 @@ async fn outbox_append_respects_tenant_and_transaction(
 
     // Evento global numa transação sem contexto: OK.
     let agg_g = Uuid::now_v7();
-    let mut tx = app.begin().await?;
+    let mut tx = begin_platform_tx(&app, &actor()).await?;
     let gid = append_global(&mut tx, event(agg_g)).await?;
     tx.commit().await?;
     let tenant_of_global =
@@ -327,7 +332,7 @@ async fn outbox_append_respects_tenant_and_transaction(
     // Na BD, dentro da transação de A: evento de B e evento global são recusados (42501).
     let agg_x = Uuid::now_v7();
     for target in [Some(b.as_uuid()), None] {
-        let mut tx = begin_tenant_tx(&app, a).await?;
+        let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
         let res = insert_raw_event(&mut tx, target, agg_x).await;
         assert!(
             res.as_ref().is_err_and(is_rls_violation),
@@ -336,8 +341,8 @@ async fn outbox_append_respects_tenant_and_transaction(
         tx.rollback().await?;
     }
 
-    // append_global numa transação com contexto de tenant montada à mão: Err (sem panic).
-    let mut tx = app.begin().await?;
+    // append_global numa PlatformTx com contexto de tenant forçado à mão: Err (sem panic).
+    let mut tx = begin_platform_tx(&app, &actor()).await?;
     let a_text = a.as_uuid().to_string();
     sqlx::query!(
         "SELECT set_config('app.current_tenant_id', $1, true)",
@@ -355,7 +360,7 @@ async fn outbox_append_respects_tenant_and_transaction(
 
     // Rollback não deixa evento.
     let agg_rb = Uuid::now_v7();
-    let mut tx = begin_tenant_tx(&app, a).await?;
+    let mut tx = begin_tenant_tx(&app, a, &actor()).await?;
     append(&mut tx, event(agg_rb)).await?;
     tx.rollback().await?;
     assert_eq!(count_events(&worker, agg_rb).await?, 0);

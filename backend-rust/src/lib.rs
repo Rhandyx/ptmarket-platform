@@ -1,6 +1,7 @@
 //! `ptmarket-api`: monólito modular (lib + bin).
 
 pub mod admin;
+pub mod audit;
 pub mod catalog;
 pub mod config;
 pub mod error;
