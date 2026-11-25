@@ -10,6 +10,10 @@
 - Hooks: Rust fmt+check · Go fmt+vet · frontend typecheck+lint. A leitura de `docs/business/` e das pastas geradas está bloqueada.
 - Método: épico → `architect-master` escreve cartões (`docs/plans/<épico>/`, modelo `_CARTAO.md`) → executores fazem um cartão cada → `security-auditor` + `ux-reviewer` → o supervisor revê o diff e integra.
 
+## 25/11/2026 — Revisão da Fase 0 (commit `c3a37bc`)
+- Hooks corrigidos para worktrees; PostgreSQL **18**; arredondamento half-up com paridade Moloni; ASVS 5.0.
+- A sessão principal corre em **Opus** (`/model opus`); Fable só no `architect-master`.
+
 ## Próximo passo — Fase 1: fundação (épico `01-fundacao`)
 1. `architect-master` cria os cartões do épico a partir de 02 §4 + 11 §1–2 + 12 §3:
    - esqueleto do workspace Rust (módulos de domínio, `AppError`, `money`, config, dual pool);
@@ -20,6 +24,6 @@
 2. Execução em paralelo por pasta, com worktrees.
 
 ## Pendentes
-- **Push:** o GitHub está em dia até `b0b0abb`; este último ajuste ao ESTADO ficou só em local. No próximo push, testar se `git push origin main` passa com a regra de `settings.local.json`; se o classificador bloquear, o owner corre `! git push origin main`.
+- **Push:** `git push origin main` funciona pela regra de `settings.local.json` (confirmado 25/11). Antes de cada push: `git remote -v`.
 - `seed-and-verify.md` (workflow AGY) por definir.
 - Fase 2: Cloudflare Tunnel como origem dos domínios SaaS (por confirmar).
