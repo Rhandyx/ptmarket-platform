@@ -1,0 +1,47 @@
+[package]
+name = "ptmarket-api"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "ptmarket-api"
+
+[lib]
+name = "ptmarket_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ptmarket-api"
+path = "src/main.rs"
+
+[[bin]]
+name = "openapi"
+path = "src/bin/openapi.rs"
+
+[dependencies]
+axum = "=0.8.9"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+sqlx = { version = "=0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid"] }
+deadpool-redis = "=0.23.1"
+secrecy = "=0.10.3"
+utoipa = "=6.0.0"
+tower = "=0.5.3"
+tower-http = { version = "=0.7.1", features = ["request-id", "trace", "timeout", "limit", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
+anyhow = "=1.0.105"
+thiserror = "=2.0.21"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+uuid = { version = "=1.29.3", features = ["v7", "serde"] }
+async-trait = "=0.1.92"
+
+[dev-dependencies]
+http-body-util = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
