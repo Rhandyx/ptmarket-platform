@@ -40,11 +40,41 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   de papéis com LOGIN. Se falhar, a migration é desfeita.
 - **Nova função SECURITY DEFINER em `audit` (duas pessoas):** o autor da migration pede; quem revê edita a
   ALLOWLIST (`v_allow_sig` + `v_allow_owner`, assinatura como `regprocedure` com `search_path=pg_catalog`, ex.:
-  `audit.audit_day_root(date)`) em `init/03-audit-bootstrap.sh` e aplica-o como superuser no cluster existente,
+  `audit.audit_day_root(date)`; a função tem de ter `SET search_path = pg_catalog, pg_temp`) em `init/03-audit-bootstrap.sh` e aplica-o como superuser no cluster existente,
   antes da migration:
   `docker compose -f infra/docker-compose.dev.yml exec -T -e PTM_BOOTSTRAP_DBS='template1 ptmarket' postgres bash -s < infra/postgres/init/03-audit-bootstrap.sh`
   (em produção, o mesmo ficheiro com `psql -U postgres` e a lista de BDs certa). É idempotente: papéis
   `IF NOT EXISTS`, GRANTs repetíveis, `CREATE OR REPLACE` da `audit_seal`. O pgaudit regista as duas coisas.
+- `audit_seal()` e `audit_upgrade()` correm com `search_path = pg_catalog, pg_temp` e catálogos qualificados
+  (`pg_catalog.pg_proc`, …): sem o `pg_temp` na lista, o PostgreSQL pesquisa-o **primeiro** para relações e
+  tipos, e quem migra (`CREATE TEMP TABLE pg_proc …`) fazia a selagem ler catálogos falsos. Pela mesma razão a
+  selagem recusa DEFINER de `audit.*` cujo `search_path` fixo não termine em `pg_temp`.
+- **Alterar um objeto selado** (`ALTER TABLE audit.audit_events`, `CREATE OR REPLACE` de `_chain_insert`, …;
+  duas pessoas): o migrator não é dono de nada em `audit.*`, por isso só o `audit_admin.audit_upgrade(nome,
+  sha256)` (dono `postgres`, EXECUTE só do migrator) o faz, e só com SQL aprovado.
+  1. O autor da migration escreve o SQL (nomes qualificados, tipos exatos) e pede a aprovação.
+  2. Quem revê cola-o no bootstrap como uma nova entrada `INSERT INTO pg_temp.ptm_sealed_changes_new … $chg_<n>$
+     … $chg_<n>$` (ver `0011_db_user`) e reaplica o bootstrap como superuser no cluster existente (comando acima).
+     O sha256 é calculado na BD: `SELECT sha256 FROM audit_admin.sealed_changes WHERE name = '<nome>'` (como
+     superuser) ou `sha256` do texto entre os dois `$chg_<n>$`, em UTF-8.
+  3. Só depois a migration: `SELECT audit_admin.audit_upgrade('<nome>'::text, '<sha256>'::text);` e, no fim,
+     `SELECT audit_admin.audit_seal();`. Nome inexistente, sha256 diferente ou já aplicada nesta BD → erro e a
+     migration é desfeita. O sqlx fixa o checksum da migration e o superuser fixa o texto: os dois têm de bater.
+  `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem
+  passa-os para owner/writer) e grava em `audit_admin.sealed_changes_applied`. Mudar o texto de uma alteração
+  já aplicada numa BD faz o bootstrap falhar (corrigir = nova alteração com outro nome). As tabelas
+  `audit_admin.sealed_changes*` são do `postgres`, sem GRANT a ninguém.
+  Na BD de dev (depois de mudar o bootstrap): reaplicar o bootstrap (comando acima) e só então
+  `sqlx migrate run --source migrations --database-url <URL do migrator>`.
+- **`db_user` (0011):** o migrator tem SET em `ptmarket_app`/`_worker`/`_price_writer` (precisa dele para os
+  GRANT/OWNER e para os testes) e, com `SET ROLE` + `app.actor_type`, gravava eventos iguais aos da app. O
+  `session_user` não muda com `SET ROLE` nem dentro de uma DEFINER (só o superuser o muda), por isso
+  `_chain_insert` grava-o em `audit_events.db_user`, dentro do hash (linhas antigas, NULL, mantêm a fórmula
+  antiga). `audit.audit_verify_actors(chain_key, classe, de, até)` (worker) assinala `actor_db_user_mismatch`
+  (ator de pessoa/`system` gravado por um LOGIN que não é `ptmarket_app` nem `ptmarket_worker`),
+  `db_label_mismatch` e `db_user_missing`. Em dev/CI os testes ligam como migrator e fazem `SET ROLE
+  ptmarket_app`: esses eventos SÃO assinalados (o verify corre só na BD real). `audit_append` recusa
+  `app.actor_type = 'db'` e qualquer valor fora da lista (PTA01): `'db'` só nasce em `audit_append_db`.
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

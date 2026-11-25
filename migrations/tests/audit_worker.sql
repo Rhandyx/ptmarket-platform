@@ -63,13 +63,13 @@ $$;
 
 -- Hash recalculado em SQL, independente das funções (fórmula do cartão 01; ip::text com máscara, cartão 01b).
 CREATE TEMP VIEW audit_hash_check WITH (security_invoker = true) AS
-SELECT e.*, sha256(e.prev_hash || convert_to(jsonb_build_array(
+SELECT e.*, sha256(e.prev_hash || convert_to((jsonb_build_array(
         e.id, e.tenant_id, e.store_id, e.actor_type, e.actor_id, e.actor_label, e.impersonator_id,
         e.action, e.target_type, e.target_id, e.outcome, e.reason, e.changes, e.request_id, e.ip::text,
         encode(e.user_agent_hash, 'hex'), e.retention_class,
         (extract(epoch FROM e.occurred_at) * 1000000)::bigint,
         (extract(epoch FROM e.created_at) * 1000000)::bigint,
-        e.chain_seq)::text, 'UTF8')) AS recomputed
+        e.chain_seq) || CASE WHEN e.db_user IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(e.db_user) END)::text, 'UTF8')) AS recomputed
 FROM audit.audit_events e;
 GRANT SELECT ON audit_hash_check TO ptmarket_audit_writer;
 
