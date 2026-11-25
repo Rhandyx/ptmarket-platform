@@ -16,7 +16,7 @@
 - Extractor de tenant pelo `Host`: o `TenantId::new` é `pub(crate)` e está à espera dele. Inclui a policy do portal nacional (`publish_to_national_portal`).
 - Épico identity: abrir `customers` (hoje sem policies nem grants), Argon2id/passkeys, RBAC, `super_admin` + 2FA.
 - Cliente TS gerado a partir do `openapi.json`.
-- **Caixa negra (spec 13), pedido do owner:** `audit_events` particionada, cadeia de hash + raiz diária em WORM, `AuditCtx` obrigatório e triggers nas tabelas críticas. Primeiro cartão da Fase 2, antes de qualquer mutação nova; o `admin_audit_logs` da spec 07 passa a ser a categoria `admin` desta tabela.
+- **Caixa negra (spec 13), pedido do owner:** `audit_events` particionada, trigger em TODAS as tabelas (INSERT/UPDATE/DELETE, antes/depois, ator obrigatório na BD), event trigger de DDL, `pgaudit`, cadeia de hash + raiz diária em WORM, `AuditCtx` obrigatório. Inclui retrofit das tabelas 0002–0007. Primeiro cartão da Fase 2, antes de qualquer mutação nova; o `admin_audit_logs` da spec 07 passa a ser a categoria `admin` desta tabela.
 
 ## Decisões do owner (pendentes; até lá vale o default)
 1. Histórico de preços: `ON DELETE RESTRICT`, por isso variante/loja/tenant com histórico não se apaga, só se desativa. Prazo de retenção por definir.

@@ -2,6 +2,15 @@
 
 > Pedido do owner (25/11/2026). Prevalece sobre a spec 07 §3.4 e a 12 §3, que só cobriam ações de admin: `admin_audit_logs` passa a ser a categoria `admin` desta tabela única.
 
+## 0. Princípio (owner): "mega auditoria", logs de tudo na base de dados
+- **Todas as tabelas da BD**, sem exceção, registam cada INSERT, UPDATE e DELETE em `audit_events`: quem, quando, de onde, o quê e os valores antes/depois. Isto inclui produtos, variantes, lojas, utilizadores, clientes, papéis, encomendas, pagamentos e definições.
+- As únicas exceções são técnicas e estão numa allowlist fixa no teste: o próprio `audit_events` e `outbox_events`, cujo conteúdo já está no evento de negócio auditado. Não há opt-in: uma tabela nova sem trigger chumba os testes.
+- Há 4 camadas, para nada escapar:
+  - **L1, trigger de linha genérico em todas as tabelas:** captura tudo o que muda dados, venha da app, do Data Studio, de SQL manual ou de um worker.
+  - **L2, event trigger de DDL:** `CREATE`/`ALTER`/`DROP` de tabelas, funções, policies, papéis e grants vão para `audit_events` (`action = 'ddl.*'`). Uma tabela criada por migration recebe logo o trigger da L1 automaticamente.
+  - **L3, `pgaudit`** (logs do Postgres, enviados para WORM): sessões de superuser e manutenção, que podem passar ao lado dos triggers.
+  - **L4, eventos semânticos da app:** login/logout, 2FA, recusas, exportações e leituras de dados pessoais. São coisas que a BD não vê como mudança de dados.
+
 ## 1. Âmbito: tudo o que altera estado ou é recusado
 - **Atores:**
   - cliente, lojista, staff da Câmara e admin (incluindo quem está em impersonation);
@@ -33,7 +42,11 @@
 
 ## 3. Garantias
 1. **Na mesma transação** que a alteração de negócio, como o outbox. Em Rust as mutações recebem um `AuditCtx` obrigatório (ator, ip, request_id) vindo do extractor; sem `AuditCtx` não compila. Os workers Go usam `actor_type = 'system'`.
-2. **Rede de segurança na BD:** triggers nas tabelas críticas (preços, stock, encomendas, pagamentos, payouts, IBAN/comissões, papéis) registam mesmo alterações feitas fora da app (Data Studio, SQL manual).
+2. **Quem fez (contexto de ator na BD):**
+   - Na mesma transação, a app faz `set_config('app.actor_type' | 'app.actor_id' | 'app.impersonator_id' | 'app.request_id' | 'app.ip', …, true)`, tal como o tenant (`TenantTx` passa a exigir o `AuditCtx`).
+   - O trigger da L1 lê esse contexto.
+   - **Falha fechado:** uma mutação de `ptmarket_app`/`ptmarket_worker` sem `app.actor_type` → `RAISE` e a transação aborta. Uma alteração sem autor não entra.
+   - Fora da app (SQL manual, Data Studio), o trigger regista `actor_type = 'db'` com o `session_user`, e o `pgaudit` (L3) guarda o SQL completo.
 3. **Só de acréscimo:**
    - a escrita é feita só por uma função `SECURITY DEFINER` cujo dono é o papel `ptmarket_audit_writer`;
    - nenhum papel tem UPDATE ou DELETE;
