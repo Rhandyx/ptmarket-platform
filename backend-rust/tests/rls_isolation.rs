@@ -3,10 +3,13 @@
 //! As pools da app fazem `SET ROLE ptmarket_app` em cada ligação nova: o dono das tabelas
 //! não prova nada. Os tenants semeiam-se como dono (tabela global, sem RLS); as lojas só
 //! podem ser criadas pela app dentro de `begin_tenant_tx`.
+//!
+//! Evento global numa `TenantTx`: impossível por tipo (`append_global` só aceita `Transaction`,
+//! que a `TenantTx` não expõe); a BD recusa-o também (42501), provado abaixo com SQL direto.
 
 use ptmarket_api::{
     error::AppError,
-    outbox::{NewEvent, append},
+    outbox::{NewEvent, append, append_global},
     tenancy::{TenantId, begin_tenant_tx},
 };
 use sqlx::{
@@ -74,7 +77,7 @@ async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<TenantId> {
     )
     .execute(owner)
     .await?;
-    Ok(TenantId::new(id))
+    Ok(TenantId::for_tests(id))
 }
 
 async fn insert_store(conn: &mut PgConnection, tenant: TenantId, slug: &str) -> sqlx::Result<()> {
@@ -129,9 +132,8 @@ fn app_error_is_rls_violation(e: &AppError) -> bool {
     }
 }
 
-fn event(tenant: Option<TenantId>, aggregate_id: Uuid) -> NewEvent {
+fn event(aggregate_id: Uuid) -> NewEvent {
     NewEvent {
-        tenant_id: tenant,
         aggregate: "store".into(),
         aggregate_id,
         event_type: "store.created".into(),
@@ -265,6 +267,25 @@ async fn tenant_context_does_not_leak_after_commit_or_rollback(
     Ok(())
 }
 
+/// INSERT direto (contorna o `outbox`) para provar a política da BD.
+async fn insert_raw_event(
+    conn: &mut PgConnection,
+    tenant: Option<Uuid>,
+    aggregate_id: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO outbox_events (id, tenant_id, aggregate, aggregate_id, event_type, payload)
+         VALUES ($1, $2, 'store', $3, 'store.raw', $4)",
+        Uuid::now_v7(),
+        tenant,
+        aggregate_id,
+        serde_json::json!({})
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 #[sqlx::test(migrations = "../migrations")]
 async fn outbox_append_respects_tenant_and_transaction(
     opts: PgPoolOptions,
@@ -276,13 +297,12 @@ async fn outbox_append_respects_tenant_and_transaction(
     let app = app_pool(&opts, &conn, 2).await?;
     let worker = worker_pool(&opts, &conn).await?;
 
-    // Tenant A grava o seu evento (e um global) na transação de A.
+    // Tenant A grava o seu evento; o tenant vem da TenantTx.
     let agg = Uuid::now_v7();
     let mut tx = begin_tenant_tx(&app, a).await?;
-    let id = append(&mut tx, event(Some(a), agg)).await?;
-    append(&mut tx, event(None, agg)).await?;
+    let id = append(&mut tx, event(agg)).await?;
     tx.commit().await?;
-    assert_eq!(count_events(&worker, agg).await?, 2);
+    assert_eq!(count_events(&worker, agg).await?, 1);
     let row = sqlx::query!(
         r#"SELECT tenant_id, payload, published_at IS NULL AS "unpublished!" FROM outbox_events WHERE id = $1"#,
         id
@@ -293,21 +313,50 @@ async fn outbox_append_respects_tenant_and_transaction(
     assert_eq!(row.payload["nested"]["ok"], serde_json::json!(true));
     assert!(row.unpublished);
 
-    // Evento com tenant B na transação de A: Err.
-    let agg_b = Uuid::now_v7();
-    let mut tx = begin_tenant_tx(&app, a).await?;
-    let res = append(&mut tx, event(Some(b), agg_b)).await;
+    // Evento global numa transação sem contexto: OK.
+    let agg_g = Uuid::now_v7();
+    let mut tx = app.begin().await?;
+    let gid = append_global(&mut tx, event(agg_g)).await?;
+    tx.commit().await?;
+    let tenant_of_global =
+        sqlx::query_scalar!("SELECT tenant_id FROM outbox_events WHERE id = $1", gid)
+            .fetch_one(&worker)
+            .await?;
+    assert_eq!(tenant_of_global, None);
+
+    // Na BD, dentro da transação de A: evento de B e evento global são recusados (42501).
+    let agg_x = Uuid::now_v7();
+    for target in [Some(b.as_uuid()), None] {
+        let mut tx = begin_tenant_tx(&app, a).await?;
+        let res = insert_raw_event(&mut tx, target, agg_x).await;
+        assert!(
+            res.as_ref().is_err_and(is_rls_violation),
+            "esperado erro RLS para {target:?}, obtido {res:?}"
+        );
+        tx.rollback().await?;
+    }
+
+    // append_global numa transação com contexto de tenant montada à mão: Err (sem panic).
+    let mut tx = app.begin().await?;
+    let a_text = a.as_uuid().to_string();
+    sqlx::query!(
+        "SELECT set_config('app.current_tenant_id', $1, true)",
+        a_text
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let res = append_global(&mut tx, event(agg_x)).await;
     assert!(
         res.as_ref().is_err_and(app_error_is_rls_violation),
         "esperado erro RLS, obtido {res:?}"
     );
     tx.rollback().await?;
-    assert_eq!(count_events(&worker, agg_b).await?, 0);
+    assert_eq!(count_events(&worker, agg_x).await?, 0);
 
     // Rollback não deixa evento.
     let agg_rb = Uuid::now_v7();
     let mut tx = begin_tenant_tx(&app, a).await?;
-    append(&mut tx, event(Some(a), agg_rb)).await?;
+    append(&mut tx, event(agg_rb)).await?;
     tx.rollback().await?;
     assert_eq!(count_events(&worker, agg_rb).await?, 0);
     Ok(())

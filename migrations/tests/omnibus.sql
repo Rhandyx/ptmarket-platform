@@ -1,7 +1,7 @@
 -- Teste Omnibus (0007): histórico de preços só de acréscimo e lowest_price_30d_cents calculado pela BD.
 -- Alterações de preço e asserções com SET ROLE ptmarket_app + contexto de tenant;
--- só os tenants e o recuo de datas do histórico são feitos pelo superuser (RESET ROLE).
--- Tudo numa transação com ROLLBACK (now() é constante dentro dela).
+-- só os tenants e o recuo de datas do histórico são feitos pelo dono das migrations (RESET ROLE,
+-- não superuser). Tudo numa transação com ROLLBACK (now() é constante dentro dela).
 
 BEGIN;
 
@@ -41,6 +41,39 @@ $$;
 INSERT INTO tenants (id, slug, custom_domain, name) VALUES
     ('00000000-0000-7000-8000-00000000100a', 'omni-teste-a', 'omni-a.teste.invalid', 'Omni A'),
     ('00000000-0000-7000-8000-00000000100b', 'omni-teste-b', 'omni-b.teste.invalid', 'Omni B');
+
+-- ---------------------------------------------------------------------------
+-- Dono do trigger DEFINER: papel próprio, nunca superuser nem quem migra; só INSERT no histórico.
+-- ---------------------------------------------------------------------------
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+       WHERE p.oid = 'public.product_variants_record_price_history()'::regprocedure
+         AND p.prosecdef
+         AND r.rolname = 'ptmarket_price_writer'
+         AND r.rolname <> current_user
+         AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT r.rolcanlogin$q$,
+    1, 'função DEFINER pertence a ptmarket_price_writer (sem super/bypassrls/login)');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a
+       WHERE a.grantee = 'ptmarket_price_writer'::regrole$q$,
+    1, 'ptmarket_price_writer só tem 1 privilégio em tabelas');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a
+       WHERE a.grantee = 'ptmarket_price_writer'::regrole
+         AND c.oid = 'public.product_price_history'::regclass AND a.privilege_type = 'INSERT'$q$,
+    1, 'esse privilégio é INSERT em product_price_history');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM pg_namespace n
+       WHERE n.nspname = 'public' AND has_schema_privilege('ptmarket_price_writer', n.oid, 'CREATE')$q$,
+    0, 'ptmarket_price_writer sem CREATE no schema public');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM pg_roles r
+       WHERE r.rolname IN ('ptmarket_app', 'ptmarket_worker')
+         AND pg_has_role(r.oid, 'ptmarket_price_writer', 'MEMBER')$q$,
+    0, 'app e worker não são membros de ptmarket_price_writer');
+
+-- Só nesta transação (ROLLBACK): com FORCE RLS nem o dono altera o histórico; precisa disto para recuar datas.
+ALTER TABLE product_price_history NO FORCE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- Dados do tenant B (para o teste de isolamento).

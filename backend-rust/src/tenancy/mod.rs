@@ -4,4 +4,4 @@
 
 pub mod db;
 
-pub use db::{TenantId, begin_tenant_tx};
+pub use db::{TenantId, TenantTx, begin_tenant_tx};

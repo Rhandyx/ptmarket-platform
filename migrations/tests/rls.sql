@@ -175,11 +175,30 @@ SELECT pg_temp.expect_error(
        VALUES ('00000000-0000-7000-8000-00000000000b', 'store',
                '00000000-0000-7000-8000-0000000000b1', 'store.updated', '{}')$q$,
     '42501', 'app não insere evento do tenant B');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO outbox_events (tenant_id, aggregate, aggregate_id, event_type, payload)
+       VALUES (NULL, 'system', '00000000-0000-7000-8000-0000000000a1', 'system.ping', '{}')$q$,
+    '42501', 'app no contexto do tenant A não insere evento global');
 INSERT INTO outbox_events (id, tenant_id, aggregate, aggregate_id, event_type, payload) VALUES
     ('00000000-0000-7000-8000-0000000000e1', '00000000-0000-7000-8000-00000000000a', 'store',
-     '00000000-0000-7000-8000-0000000000a1', 'store.created', '{"v":1}'),
+     '00000000-0000-7000-8000-0000000000a1', 'store.created', '{"v":1}');
+
+-- Sem contexto de tenant: evento global OK; evento de tenant recusado.
+RESET app.current_tenant_id;
+INSERT INTO outbox_events (id, tenant_id, aggregate, aggregate_id, event_type, payload) VALUES
     ('00000000-0000-7000-8000-0000000000e2', NULL, 'system',
      '00000000-0000-7000-8000-0000000000a1', 'system.ping', '{"v":1}');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO outbox_events (tenant_id, aggregate, aggregate_id, event_type, payload)
+       VALUES ('00000000-0000-7000-8000-00000000000a', 'store',
+               '00000000-0000-7000-8000-0000000000a1', 'store.updated', '{}')$q$,
+    '42501', 'app sem contexto não insere evento de tenant');
+SET app.current_tenant_id = '';
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO outbox_events (tenant_id, aggregate, aggregate_id, event_type, payload)
+       VALUES ('00000000-0000-7000-8000-00000000000a', 'store',
+               '00000000-0000-7000-8000-0000000000a1', 'store.updated', '{}')$q$,
+    '42501', 'app com contexto vazio não insere evento de tenant');
 
 RESET app.current_tenant_id;
 RESET ROLE;
@@ -201,6 +220,14 @@ SELECT pg_temp.expect_count(
                   WHERE id = '00000000-0000-7000-8000-0000000000e1' RETURNING 1)
        SELECT count(*) FROM u$q$,
     1, 'worker marca published_at');
+SELECT pg_temp.expect_error(
+    $q$UPDATE outbox_events SET published_at = NULL
+       WHERE id = '00000000-0000-7000-8000-0000000000e1'$q$,
+    '42501', 'worker não repõe published_at = NULL (replay)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM outbox_events
+       WHERE id = '00000000-0000-7000-8000-0000000000e1' AND published_at IS NOT NULL$q$,
+    1, 'evento continua publicado');
 SELECT pg_temp.expect_error('SELECT count(*) FROM stores', '42501', 'worker não lê stores');
 SELECT pg_temp.expect_error('SELECT count(*) FROM customers', '42501', 'worker não lê customers');
 SELECT pg_temp.expect_error(
