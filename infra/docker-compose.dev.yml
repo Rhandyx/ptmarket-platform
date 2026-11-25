@@ -1,7 +1,29 @@
 name: ptmarket-dev
 services:
   postgres:
-    image: postgres:18.1
+    build: ./postgres
+    image: ptmarket-dev/postgres:18.1-pgaudit
+    # Spec 13 §0 L3: pgaudit para toda a gente com 'ddl,role'; parâmetros fora dos logs (dados pessoais).
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pgaudit
+      - -c
+      - pgaudit.log=ddl,role
+      - -c
+      - pgaudit.log_catalog=off
+      - -c
+      - pgaudit.log_parameter=off
+      - -c
+      - pgaudit.log_relation=on
+      - -c
+      - log_destination=jsonlog
+      - -c
+      - logging_collector=on
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
     environment:
       POSTGRES_DB: ptmarket
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_postgres}
@@ -30,6 +52,56 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  # WORM local (S3 com Object Lock). MinIO está arquivado: Versity Gateway, ver README.
+  worm:
+    image: versity/versitygw:v1.11.0
+    entrypoint: ["sh", "-c", "mkdir -p /data/gw /data/versions && exec versitygw --port :7070 --health /health posix --versioning-dir /data/versions /data/gw"]
+    environment:
+      ROOT_ACCESS_KEY: ${WORM_ACCESS_KEY:-dev_worm_access}
+      ROOT_SECRET_KEY: ${WORM_SECRET_KEY:-dev_worm_secret}
+      VGW_REGION: ${WORM_REGION:-us-east-1}
+    ports:
+      - "127.0.0.1:7070:7070"
+    volumes:
+      - wormdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7070/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  # Passo de init: cria o bucket com Object Lock + retenção COMPLIANCE por omissão (idempotente) e
+  # fica parado à espera (saudável = bucket pronto), para `up --wait` não falhar com um contentor terminado.
+  # Também serve de cliente S3 ao dev-check.
+  worm-init:
+    image: amazon/aws-cli:2.42.4
+    depends_on:
+      worm:
+        condition: service_healthy
+    init: true
+    environment:
+      AWS_ACCESS_KEY_ID: ${WORM_ACCESS_KEY:-dev_worm_access}
+      AWS_SECRET_ACCESS_KEY: ${WORM_SECRET_KEY:-dev_worm_secret}
+      AWS_DEFAULT_REGION: ${WORM_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: http://worm:7070
+      WORM_BUCKET: ${WORM_BUCKET:-ptmarket-audit-worm}
+      WORM_RETENTION_DAYS: ${WORM_RETENTION_DAYS:-1}
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        aws s3api head-bucket --bucket "$$WORM_BUCKET" 2>/dev/null \
+          || aws s3api create-bucket --bucket "$$WORM_BUCKET" --object-lock-enabled-for-bucket >/dev/null
+        aws s3api put-object-lock-configuration --bucket "$$WORM_BUCKET" --object-lock-configuration \
+          "{\"ObjectLockEnabled\":\"Enabled\",\"Rule\":{\"DefaultRetention\":{\"Mode\":\"COMPLIANCE\",\"Days\":$$WORM_RETENTION_DAYS}}}"
+        echo "bucket $$WORM_BUCKET pronto (Object Lock COMPLIANCE $$WORM_RETENTION_DAYS d)"
+        touch /tmp/worm-ready
+        exec sleep infinity
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/worm-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 volumes:
   pgdata:
   redisdata:
+  wormdata:
