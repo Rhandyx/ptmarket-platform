@@ -7,6 +7,12 @@
 
 BEGIN;
 
+-- Base: eventos que já existiam antes deste teste (ex.: os do sqlx em _sqlx_migrations, L1 da 0010).
+-- As asserções contam só o que este teste grava (id fora da base).
+CREATE TEMP TABLE audit_base AS
+SELECT id, chain_key, retention_class::text AS retention_class, chain_seq FROM audit.audit_events;
+GRANT SELECT ON audit_base TO ptmarket_app, ptmarket_worker, ptmarket_audit_writer, ptmarket_audit_owner;
+
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
@@ -264,7 +270,10 @@ RESET ROLE;
 SET ROLE ptmarket_audit_writer;
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events WHERE tenant_id IS NULL AND action = 'jobs.run'
-       AND chain_key = '00000000-0000-0000-0000-000000000000' AND chain_seq = 1
+       AND chain_key = '00000000-0000-0000-0000-000000000000'
+       AND chain_seq = 1 + (SELECT count(*) FROM audit_base
+                            WHERE chain_key = '00000000-0000-0000-0000-000000000000'
+                              AND retention_class = 'standard')
        AND actor_label = 'job:teste'$q$,
     1, 'evento de plataforma: tenant NULL, chain_key zero, seq 1');
 SELECT pg_temp.expect_value(
@@ -272,7 +281,7 @@ SELECT pg_temp.expect_value(
        AND chain_key = tenant_id AND chain_seq = 1 AND actor_type = 'system' AND target_id = 'j2'$q$,
     1, 'system com p_tenant_id ⇒ grava na cadeia do tenant D (seq 1)');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM audit_hash_check WHERE hash = recomputed$q$,
+    $q$SELECT count(*) FROM audit_hash_check WHERE hash = recomputed AND id NOT IN (SELECT id FROM audit_base)$q$,
     8, 'todas as linhas: hash recalculado = gravado (8/8)');
 RESET ROLE;
 
@@ -525,13 +534,17 @@ BEGIN
     END LOOP;
 END
 $$;
-SELECT pg_temp.expect_value($q$SELECT count(*) FROM audit.audit_events$q$, 10, 'dono sem FORCE vê as 10 linhas');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM audit.audit_events WHERE id NOT IN (SELECT id FROM audit_base)$q$,
+    10, 'dono sem FORCE vê as 10 linhas');
 SELECT pg_temp.expect_error($q$UPDATE audit.audit_events SET reason = 'x'$q$, 'P0001', 'trigger: UPDATE recusado ao dono');
 SELECT pg_temp.expect_error($q$DELETE FROM audit.audit_events$q$, 'P0001', 'trigger: DELETE recusado ao dono');
 SELECT pg_temp.expect_error($q$TRUNCATE audit.audit_events$q$, 'P0001', 'trigger: TRUNCATE do pai recusado ao dono');
 SELECT pg_temp.expect_error(
     $q$TRUNCATE audit.audit_events_standard_default$q$, 'P0001', 'trigger: TRUNCATE de partição recusado ao dono');
-SELECT pg_temp.expect_value($q$SELECT count(*) FROM audit.audit_events$q$, 10, 'as 10 linhas continuam lá');
+SELECT pg_temp.expect_value(
+    $q$SELECT count(*) FROM audit.audit_events WHERE id NOT IN (SELECT id FROM audit_base)$q$,
+    10, 'as 10 linhas continuam lá');
 
 
 -- DEFAULT: sem a partição do mês corrente, o evento cai na DEFAULT (o INSERT não falha).

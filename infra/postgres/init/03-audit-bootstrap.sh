@@ -90,7 +90,11 @@ GRANT USAGE ON SCHEMA audit_admin TO ptmarket_migrator;
 --   Sem sobrecargas: um nome de função = uma assinatura (uma sobrecarga plantada podia ganhar a resolução).
 --   Donos: relações e tipos → ptmarket_audit_owner; DEFINER → o dono da allowlist; INVOKER → ptmarket_audit_owner.
 --   Privilégios: REVOKE ALL a quem migra (e a quem chama, se não for superuser) e a PUBLIC em tudo em audit.*
---     (ficam só os GRANTs explícitos das migrations). O migrator mantém USAGE + CREATE no schema: pode criar
+--     (ficam só os GRANTs explícitos das migrations a papéis NOLOGIN).
+--   ALLOWLIST DE GRANTS: lista fixa (assinatura, papel) que a selagem volta a conceder e aceita na verificação;
+--     qualquer outro privilégio de quem migra em audit.* = RAISE. Hoje: EXECUTE do migrator em
+--     audit.audit_append_db (as suas mutações ficam como 'db' com o session_user; app/worker/price_writer sem
+--     EXECUTE) e em audit.audit_row_trigger (só para CREATE TRIGGER em tabelas novas; não se chama diretamente). O migrator mantém USAGE + CREATE no schema: pode criar
 --     objetos novos, mas depois da selagem não são dele e não lhes mexe.
 --   Verifica: donos certos; DEFINER com search_path fixo; quem chama sem privilégios em audit.*; nenhum papel
 --     com LOGIN (não superuser) é membro de owner/writer/retention; nenhum objeto de audit.* (colunas, defaults,
@@ -117,7 +121,8 @@ DECLARE
         'audit.audit_verify_chain(uuid,text,timestamp with time zone,timestamp with time zone)',
         'audit.audit_day_root(date)',
         'audit.audit_chains()',
-        'audit.audit_default_partition_rows()'
+        'audit.audit_default_partition_rows()',
+        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)'
     ];
     v_allow_owner text[] := ARRAY[
         'ptmarket_audit_writer',
@@ -127,7 +132,17 @@ DECLARE
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
+        'ptmarket_audit_writer',
         'ptmarket_audit_writer'
+    ];
+    -- ALLOWLIST DE GRANTS: EXECUTE (assinatura regprocedure, papel) mantido pela selagem.
+    v_grant_sig   text[] := ARRAY[
+        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
+        'audit.audit_row_trigger()'
+    ];
+    v_grant_role  text[] := ARRAY[
+        'ptmarket_migrator',
+        'ptmarket_migrator'
     ];
     v_callers oid[];
     v_c       oid;
@@ -226,6 +241,14 @@ BEGIN
         END LOOP;
     END LOOP;
 
+    -- 2b. Allowlist de grants: volta a conceder só estes pares (se a função existir).
+    FOR i IN 1 .. array_length(v_grant_sig, 1) LOOP
+        IF to_regprocedure(v_grant_sig[i]) IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
+                to_regprocedure(v_grant_sig[i]), v_grant_role[i]);
+        END IF;
+    END LOOP;
+
     -- 3. Verificação (qualquer falha desfaz a migration inteira).
     SELECT string_agg(c.oid::regclass::text, ', ') INTO v_bad
     FROM pg_class c WHERE c.relnamespace = v_ns AND c.relowner <> v_owner;
@@ -294,7 +317,10 @@ BEGIN
         END IF;
         SELECT string_agg(p.oid::regprocedure::text, ', ') INTO v_bad
         FROM pg_proc p
-        WHERE p.pronamespace = v_ns AND has_function_privilege(v_c, p.oid, 'EXECUTE');
+        WHERE p.pronamespace = v_ns AND has_function_privilege(v_c, p.oid, 'EXECUTE')
+          AND NOT EXISTS (SELECT 1 FROM generate_subscripts(v_grant_sig, 1) g(i)
+                          WHERE v_grant_sig[g.i] = p.oid::regprocedure::text
+                            AND v_grant_role[g.i] = pg_get_userbyid(v_c));
         IF v_bad IS NOT NULL THEN
             RAISE EXCEPTION 'audit_seal: % mantém EXECUTE (direto ou via PUBLIC) em: %', pg_get_userbyid(v_c), v_bad;
         END IF;

@@ -5,6 +5,11 @@
 
 BEGIN;
 
+-- Caixa negra L1 (0010): mutações da app exigem ator; fixado para a transação inteira.
+-- (As do dono das migrations ficam como 'db' com o session_user, sem depender disto.)
+SELECT set_config('app.actor_type', 'system', true);
+SELECT set_config('app.actor_label', 'test', true);
+
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE

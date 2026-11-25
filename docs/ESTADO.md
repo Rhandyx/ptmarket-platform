@@ -3,35 +3,32 @@
 > Nova conversa: o owner escreve **"começa aqui"**. Lê este ficheiro primeiro, depois só o que a próxima tarefa pede.
 > Mantido pelo supervisor (sessão principal, Opus). Secções recentes no topo. Máx. ~40 linhas: o histórico está no git.
 
-## 25/11/2026 — Fase 1 concluída (épico `01-fundacao`, 9 cartões + auditorias)
-- **Dev:** `infra/scripts/dev-check.sh` sobe PG 18.1 + Redis 8 (127.0.0.1). Papéis: `ptmarket_migrator` (dono), `ptmarket_app` (API), `ptmarket_worker` (outbox), `ptmarket_price_writer` (só trigger Omnibus). Nenhum é superuser.
-- **BD** `migrations/0001–0007`: RLS FORCE com contexto `app.current_tenant_id`. Omnibus calculado por triggers (a app só lê). Outbox global só sem contexto de tenant. Prova: `migrations/tests/run.sh` (corre sem superuser).
-- **Rust** `backend-rust/`: `AppError`, `money` (Decimal, half-up por linha), dual pool, `/healthz` + `/readyz`. A única entrada para a BD de um tenant é `tenancy::begin_tenant_tx` → `TenantTx`; o outbox usa `append` / `append_global`. Logs mascaram valores sensíveis e falham fechado. Prova: `DATABASE_URL=postgres://ptmarket_migrator:dev_migrator@127.0.0.1:5432/ptmarket cargo test -p ptmarket-api`.
-- **Go** `workers-go/`: publicador outbox → Asynq (TaskID = id do evento), provado de ponta a ponta. Toolchain fixado em 1.27.4. Prova: `go test ./...`.
-- **Web** `frontend-web/`: Next 16 + React 19, CSP com nonce, tokens, Modal / Confirm / Drawer / Popover / Toast. Prova: `npm run verify && npm run test:e2e` (axe a 375/1440 px, claro e escuro). Screenshots em `proofs/` (fora do git).
-- **Auditorias:** ASVS sem nenhum achado crítico ou alto; os médios estão corrigidos. `cargo audit`, `govulncheck` e `npm audit` dão 0 vulnerabilidades.
-- **UX:** aprovado depois das correções. Nu validator 0 erros. Orçamento de JS redefinido como "runtime + 30 KB" (o runtime mede ~135 KB).
+## 26/11/2026 — Fase 2 em curso (épico `02-identidade-tenancy`, cartões em `docs/plans/02-identidade-tenancy/`)
+- **Feitos:** 01 `audit_events` + cadeia de hash · 01b caixa negra SELADA (schema `audit`, dono NOLOGIN, `audit_admin.audit_seal()` com allowlist de DEFINER e de grants, `audit.audit_alerts`) · 02 funções do worker · 03 trigger L1 em todas as tabelas · 05 pgaudit + WORM local (Versity) · 08 escritor do Redis Stream · 15 Argon2id + HIBP (+ correções da auditoria ASVS da onda 1).
+- **Próxima onda:** 04 (DDL L2) ∥ 06 (AuditCtx Rust) ∥ 09a (eventos críticos + índices da timeline, migration 0012). Depois 07 → 09 → 10 → 11 → 12–14, 16–21, 22, 23 (API da timeline). Grafo de ondas no relatório do architect: cada cartão tem "Depende de".
+- **Regras novas (ler antes de mexer em `audit.*`):** o topo da 0008 e `infra/README.md`. O migrator tem USAGE+CREATE em `audit`, mas não manda em nada selado. Cada migration que toca em `audit` termina com `SELECT audit_admin.audit_seal();`. Uma DEFINER nova só entra pela allowlist em `infra/postgres/init/03-audit-bootstrap.sh` (aplicada pelo superuser = duas pessoas). Chamar `audit.*` sempre com o schema e com tipos exatos.
+- **1.º cartão da próxima sessão (03b, a escrever pelo supervisor):** o migrator tem SET em `ptmarket_app` (precisa dele para os GRANT da 0001/0007) e por isso consegue forjar eventos com ator da app. Correção: cada evento grava `db_user = session_user` (dentro do hash), e o verify assinala eventos com ator de app/worker cujo `db_user` não seja o papel LOGIN esperado. O pgaudit 'misc' já regista o SET ROLE. Avaliar também retirar o SET depois do bootstrap.
+- **Re-provar:** o 5.º critério do cartão 08 contra uma tabela real com `zz_audit_row`. A auditoria ASVS das ondas 2+ (01b, 02, 03, 08) ainda não correu: fazer antes do 06.
+- **BD de dev** recriada a 26/11 com o bootstrap novo (0001–0009). Depois de cada migration nova: `sqlx migrate run`.
 
-## Próximo passo — Fase 2 (épico `02-identidade-tenancy`, a confirmar pelo `architect-master`)
-- Extractor de tenant pelo `Host`: o `TenantId::new` é `pub(crate)` e está à espera dele. Inclui a policy do portal nacional (`publish_to_national_portal`).
-- Épico identity: abrir `customers` (hoje sem policies nem grants), Argon2id/passkeys, RBAC, `super_admin` + 2FA.
-- Cliente TS gerado a partir do `openapi.json`.
-- **Caixa negra (spec 13), pedido do owner:** `audit_events` particionada, trigger em TODAS as tabelas (INSERT/UPDATE/DELETE, antes/depois, ator obrigatório na BD), event trigger de DDL, `pgaudit`, cadeia de hash + raiz diária em WORM, `AuditCtx` obrigatório. Inclui retrofit das tabelas 0002–0007 e middleware que audita TODA a ação de qualquer utilizador autenticado (cliente, lojista, Câmara, admin, superadmin; leituras do admin síncronas); ninguém desliga a auditoria, nem o superadmin. Primeiro cartão da Fase 2, antes de qualquer mutação nova; o `admin_audit_logs` da spec 07 passa a ser a categoria `admin` desta tabela.
-
-## Decisões do owner (pendentes; até lá vale o default)
-1. Histórico de preços: `ON DELETE RESTRICT`, por isso variante/loja/tenant com histórico não se apaga, só se desativa. Prazo de retenção por definir.
-2. IVA ES/Açores/Madeira e equivalentes legais ES (hoje só PT continente 23%). Decidir antes do 1.º tenant espanhol.
-3. Marca: ≤ 2 fontes + paleta final (hoje `#0F4C81`/`#111827`, fontes do sistema; muda-se só nos tokens).
-4. Retenção da caixa negra: o default é 10 anos para eventos financeiros/fiscais, 2 anos para os restantes e 1 ano para recusas de segurança.
+## Decisões do owner (25–26/11; a fonte é a spec 13 + `docs/CUSTOS.md`)
+1. WORM: um só bucket da plataforma, Backblaze B2, Object Lock GOVERNANCE, prefixo por tenant. Eventos 2 anos, raízes 10 anos. O pgaudit não vai para o WORM. Sem buckets das Câmaras (override futuro desligado).
+2. Alertas imediatos Telegram + Discord, só para eventos críticos (IBAN, falhas de pagamento/faturação, login de superadmin, falha do verify-audit).
+3. Timeline no Super-Admin, filtrável por tenant/loja/utilizador/encomenda: a API é o cartão 23; a UI é o 1.º cartão do épico de backoffice.
+4. 429: o 1.º por chave/minuto é gravado de forma síncrona; os restantes contam-se e saem num resumo; Redis em baixo → 503. Sessões: cliente 7 dias no máximo; staff 12 h/30 min; plataforma 8 h/15 min.
+5. Pendentes: textos dos Termos/Privacidade (o owner traz um documento antigo; agente jurídico, só local; bloqueia a produção). IVA ES / NIF ES no futuro. Marca (fontes/paleta). Retenção da BD: default 10/2/1 anos.
 
 ## Dívida técnica conhecida
-- API sem graceful shutdown no SIGTERM; o worker Go já o tem.
-- `dev-check.sh`: falta testar o caso de erro.
-- HSTS com `includeSubDomains`/`preload` só nos nossos domínios (épico domínios). `eupago_split_key` em claro até confirmar se é segredo.
-- WebKit: aviso intermitente de CSP em `<link nonce>` (bfcache?). `--toast-reserve: 20rem` é alto em mobile; ponderar 1 toast visível a 375 px.
-- `split_vat` PROVISÓRIO até ao teste de paridade com o Moloni (1.º cartão de payments).
+- `cargo deny` não instalado e sem `deny.toml`. API sem graceful shutdown no SIGTERM.
+- 0001/0007 criam papéis (a corrida está resolvida pelo bootstrap, que cria todos os papéis antes). Em produção, a BD deve ter dono `postgres` e o migrator não deve ter CREATEDB.
+- Filtro por `store_id` na leitura da auditoria pelo lojista (anti-IDOR entre lojas): pô-lo no cartão desse endpoint.
+- `run.sh` no modo `MIGRATIONS_TEST_URL` não verificado (o host não tem psql). HSTS preload só nos nossos domínios. `split_vat` PROVISÓRIO até haver paridade com o Moloni.
+- WebKit: aviso intermitente de CSP em `<link nonce>`. `--toast-reserve` alto em mobile.
 
-## Pendentes
-- **Push:** o classificador do auto mode bloqueia o meu `git push`. O owner corre `! git push origin main` (remote pessoal `Rhandyx`; antes, `git remote -v`).
-- Worktrees partem do último commit enviado: sem push, os executores correm no checkout principal, um por pasta e sem commits.
-- `seed-and-verify.md` (workflow AGY) por definir. Cloudflare Tunnel como origem dos domínios SaaS (por confirmar).
+## Fase 1 (25/11/2026, concluída)
+Fundação: PG 18.1 + Redis 8, papéis sem superuser, RLS FORCE, Omnibus por triggers, Rust (TenantTx, money, logs mascarados), Go (outbox → Asynq), Next 16 (CSP com nonce, componentes acessíveis). Provas e comandos: `infra/README.md`, `migrations/tests/run.sh`, `cargo test`, `go test ./...`, `npm run verify`.
+
+## Pendentes operacionais
+- **Push:** o classificador bloqueia o meu `git push`. O owner corre `! git push origin main` (remote pessoal `Rhandyx`; antes, `git remote -v`).
+- **Backup:** `git bundle` em `/Volumes/NVME-externo/Projetos_backup/ptmarket-platform-<data>/` no fim de cada ronda (sem `.env` nem memórias).
+- Worktrees partem do último commit enviado: depois de um push, os executores podem usar `isolation: worktree`.

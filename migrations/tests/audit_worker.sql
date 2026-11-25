@@ -7,6 +7,12 @@
 
 BEGIN;
 
+-- Base: eventos que já existiam antes deste teste (ex.: os do sqlx em _sqlx_migrations, L1 da 0010).
+-- As asserções contam só o que este teste grava (id fora da base).
+CREATE TEMP TABLE audit_base AS
+SELECT id, chain_key, retention_class::text AS retention_class, chain_seq FROM audit.audit_events;
+GRANT SELECT ON audit_base TO ptmarket_app, ptmarket_worker, ptmarket_audit_writer, ptmarket_audit_owner;
+
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
@@ -125,15 +131,20 @@ SELECT audit.audit_append_event(pg_temp.ev(uuidv7(), '00000000-0000-7000-8000-00
 SELECT audit.audit_append_event(pg_temp.ev(uuidv7(), '00000000-0000-7000-8000-00000000d00d', 'customer', 'customers.login'));
 RESET ROLE;
 SET ROLE ptmarket_audit_writer;
-SELECT (created_at AT TIME ZONE 'UTC')::date AS root_day FROM audit.audit_events ORDER BY created_at LIMIT 1 \gset
+SELECT (created_at AT TIME ZONE 'UTC')::date AS root_day FROM audit.audit_events
+WHERE id NOT IN (SELECT id FROM audit_base) ORDER BY created_at LIMIT 1 \gset
 CREATE TEMP TABLE expected_root AS
 SELECT DISTINCT ON (chain_key, retention_class) chain_key, retention_class::text, chain_seq, hash
-FROM audit.audit_events ORDER BY chain_key, retention_class, chain_seq DESC;
+FROM audit.audit_events e
+WHERE NOT EXISTS (SELECT 1 FROM audit_base b WHERE b.chain_key = e.chain_key AND b.retention_class = e.retention_class)
+ORDER BY chain_key, retention_class, chain_seq DESC;
 GRANT SELECT ON expected_root TO ptmarket_worker;
 RESET ROLE;
 SET ROLE ptmarket_worker;
 SELECT pg_temp.expect_value(
-    format($q$SELECT count(*) FROM audit.audit_day_root(%L::date)$q$, :'root_day'), 2, 'audit_day_root: 2 cadeias');
+    format($q$SELECT count(*) FROM audit.audit_day_root(%L::date) r
+       WHERE NOT EXISTS (SELECT 1 FROM audit_base b WHERE b.chain_key = r.chain_key AND b.retention_class = r.retention_class)$q$, :'root_day'),
+    2, 'audit_day_root: 2 cadeias');
 SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM audit.audit_day_root(%L::date) r JOIN expected_root x
          ON x.chain_key = r.chain_key AND x.retention_class = r.retention_class
@@ -141,7 +152,9 @@ SELECT pg_temp.expect_value(
          AND r.events = x.chain_seq$q$, :'root_day'),
     2, 'audit_day_root: last_hash/last_seq da última linha de cada cadeia, first_seq 1, events certos');
 SELECT pg_temp.expect_value(
-    format($q$SELECT sum(events) FROM audit.audit_day_root(%L::date)$q$, :'root_day'), 3, 'audit_day_root: 3 eventos');
+    format($q$SELECT sum(events) FROM audit.audit_day_root(%L::date) r
+       WHERE NOT EXISTS (SELECT 1 FROM audit_base b WHERE b.chain_key = r.chain_key AND b.retention_class = r.retention_class)$q$, :'root_day'),
+    3, 'audit_day_root: 3 eventos');
 SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM audit.audit_day_root(%L::date - 1)$q$, :'root_day'), 0, 'dia anterior: 0 linhas');
 
@@ -197,13 +210,16 @@ SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events cur JOIN audit.audit_events prv
          ON prv.chain_key = cur.chain_key AND prv.retention_class = cur.retention_class
         AND prv.chain_seq = cur.chain_seq - 1
-       WHERE cur.prev_hash = prv.hash AND cur.created_at > prv.created_at$q$,
+       WHERE cur.prev_hash = prv.hash AND cur.created_at > prv.created_at
+         AND cur.id NOT IN (SELECT id FROM audit_base)$q$,
     3, 'elos certos: C seq 2, A seq 2 e 3');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM audit.audit_events WHERE chain_seq = 1 AND prev_hash = decode(repeat('00', 32), 'hex')$q$,
+    $q$SELECT count(*) FROM audit.audit_events WHERE chain_seq = 1 AND prev_hash = decode(repeat('00', 32), 'hex')
+       AND id NOT IN (SELECT id FROM audit_base)$q$,
     3, 'génese a zeros nas cadeias C, D e A');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM audit_hash_check WHERE hash = recomputed$q$, 6, 'hash recalculado = gravado (6/6)');
+    $q$SELECT count(*) FROM audit_hash_check WHERE hash = recomputed AND id NOT IN (SELECT id FROM audit_base)$q$,
+    6, 'hash recalculado = gravado (6/6)');
 SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM audit.audit_events WHERE id = %L
        AND actor_type = 'merchant' AND actor_id = '00000000-0000-7000-8000-00000000b0a1'
@@ -220,7 +236,9 @@ SELECT pg_temp.expect_value(
        JOIN LATERAL (SELECT e.chain_seq, e.hash FROM audit.audit_events e
                      WHERE e.chain_key = h.chain_key AND e.retention_class = h.retention_class
                      ORDER BY e.chain_seq DESC LIMIT 1) l ON true
-       WHERE h.last_seq = l.chain_seq AND h.last_hash = l.hash$q$,
+       WHERE h.last_seq = l.chain_seq AND h.last_hash = l.hash
+         AND NOT EXISTS (SELECT 1 FROM audit_base b
+                         WHERE b.chain_key = h.chain_key AND b.retention_class = h.retention_class)$q$,
     3, 'cabeças = última linha de cada cadeia');
 RESET ROLE;
 

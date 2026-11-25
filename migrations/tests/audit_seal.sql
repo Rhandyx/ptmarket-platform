@@ -7,6 +7,12 @@
 
 BEGIN;
 
+-- Base: eventos que já existiam antes deste teste (ex.: os do sqlx em _sqlx_migrations, L1 da 0010).
+-- O migrator não lê audit.*: a soma das cabeças vem de audit_chains() como worker.
+SET ROLE ptmarket_worker;
+SELECT set_config('ptm.base_seq_sum', (SELECT COALESCE(sum(last_seq), 0) FROM audit.audit_chains())::text, false);
+RESET ROLE;
+
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
@@ -294,7 +300,8 @@ SELECT pg_temp.expect_value(
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_chains() WHERE last_seq = 999$q$, 0, 'nenhuma cabeça forjada (999)');
 SELECT pg_temp.expect_value(
-    $q$SELECT sum(last_seq) FROM audit.audit_chains()$q$, 3, 'cabeças: 3 eventos gravados, nenhum a mais');
+    $q$SELECT sum(last_seq) - current_setting('ptm.base_seq_sum')::bigint FROM audit.audit_chains()$q$,
+    3, 'cabeças: 3 eventos gravados, nenhum a mais');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_chains() c,
             audit.audit_verify_chain(c.chain_key, c.retention_class, now() - interval '1 day', now() + interval '1 day')$q$,
