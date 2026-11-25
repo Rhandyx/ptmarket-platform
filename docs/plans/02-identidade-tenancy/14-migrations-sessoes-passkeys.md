@@ -6,10 +6,10 @@
 Ficam as tabelas de sessão (token nunca guardado em claro), passkeys de staff e códigos de recuperação do 2FA, cada uma legível só pelo próprio titular.
 
 ## Pode alterar
-- `migrations/0015_sessions_passkeys.sql`, `migrations/tests/sessions.sql` (criar)
+- `migrations/0016_sessions_passkeys.sql`, `migrations/tests/sessions.sql` (criar)
 
 ## Não tocar
-- `migrations/0001–0014` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
+- `migrations/0001–0015` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
 
 ## Contexto exato (colado da spec; não ler a spec)
 ```

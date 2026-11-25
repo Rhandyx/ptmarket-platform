@@ -1,15 +1,15 @@
 # 09a — `audit.worm_targets`: cada Câmara guarda a prova no seu próprio bucket (épico: 02-identidade-tenancy)
 
-**Agente:** db-architect · **Modelo:** opus · **Depende de:** 01b · **Paralelo com:** 03, 08
+**Agente:** db-architect · **Modelo:** opus · **Depende de:** 01b, 04 (numeração 0012) · **Paralelo com:** 06, 08
 
 ## Objetivo
 A raiz diária e os alertas de superadmin de cada tenant-Câmara vão para o bucket WORM da própria Câmara, que é ela que paga e que controla (decisão do owner, 25/11/2026: "quanto menos responsabilidades para nós, melhor"). Os eventos de plataforma e os tenants de comércio direto (onde a plataforma recebe comissão) usam o bucket da plataforma.
 
 ## Pode alterar
-- `migrations/0010_audit_worm_targets.sql`, `migrations/tests/audit_worm_targets.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste)
+- `migrations/0012_audit_worm_targets.sql`, `migrations/tests/audit_worm_targets.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste)
 
 ## Não tocar
-- `migrations/0001–0009`, `infra/`, `backend-rust/`, `workers-go/`; nunca ler `.env`
+- `migrations/0001–0011`, `infra/`, `backend-rust/`, `workers-go/`; nunca ler `.env`
 
 ## Contexto exato
 ```
