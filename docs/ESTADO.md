@@ -20,6 +20,6 @@
 2. Execução em paralelo por pasta, com worktrees.
 
 ## Pendentes
-- **Push:** os commits locais ainda não estão no GitHub. Na nova conversa, testar `git push origin main` (a regra está em `settings.local.json`); se o classificador bloquear, o owner corre `! git push origin main`.
+- **Push:** o GitHub está em dia até `b0b0abb`; este último ajuste ao ESTADO ficou só em local. No próximo push, testar se `git push origin main` passa com a regra de `settings.local.json`; se o classificador bloquear, o owner corre `! git push origin main`.
 - `seed-and-verify.md` (workflow AGY) por definir.
 - Fase 2: Cloudflare Tunnel como origem dos domínios SaaS (por confirmar).
