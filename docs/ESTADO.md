@@ -30,5 +30,5 @@ Fundação: PG 18.1 + Redis 8, papéis sem superuser, RLS FORCE, Omnibus por tri
 
 ## Pendentes operacionais
 - **Push:** o classificador bloqueia o meu `git push`. O owner corre `! git push origin main` (remote pessoal `Rhandyx`; antes, `git remote -v`).
-- **Backup:** `git bundle` em `/Volumes/NVME-externo/Projetos_backup/ptmarket-platform-<data>/` no fim de cada ronda (sem `.env` nem memórias).
+- **Backup:** o owner faz duplo clique em `infra/scripts/backup-nvme.command` no fim de cada ronda (git bundle verificado para o NVMe; o macOS bloqueia o acesso ao disco a partir do Claude Code).
 - Worktrees partem do último commit enviado: depois de um push, os executores podem usar `isolation: worktree`.
