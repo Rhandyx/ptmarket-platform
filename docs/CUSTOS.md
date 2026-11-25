@@ -23,6 +23,10 @@
 - **Os dados acumulam:** com retenção de 10 anos, nada se apaga durante esse prazo. Com 1 GB/ano, ao fim de 10 anos são ~10 GB, ou seja ≈ 0,25 $/mês. Os objetos com mais de 90 dias podem passar para Glacier Instant Retrieval, que também suporta Object Lock, se o volume crescer.
 - **Atenção:** em modo COMPLIANCE, o que se grava paga-se até ao fim do prazo, mesmo que se feche o projeto. Por isso, gravar só o necessário e nunca dados de teste no bucket de produção.
 
+### S3 WORM: quem paga (decisão do owner, pendente)
+- **Default:** a plataforma paga um só bucket para todos os tenants (cêntimos por mês) e o valor entra no preço dos planos como custo de infraestrutura. Faturar cêntimos à parte custa mais em gestão do que o próprio serviço.
+- **Opção para Câmaras (premium/conformidade):** a Câmara tem o seu próprio bucket WORM, na conta dela, e paga-o ela. Argumento de venda forte: a prova fica do lado da Câmara e nem o operador da plataforma a consegue apagar. Tecnicamente, a raiz diária já é calculada por tenant (uma cadeia por tenant), por isso dá para replicar só a parte dessa Câmara para o bucket dela. Fica para depois do 1.º contrato.
+
 ## Manutenção recorrente
 
 | Tarefa | Frequência | Quem |
