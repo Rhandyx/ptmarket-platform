@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET ROLE ptmarket_app",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ef7c2e760a5a732a718c4bbeaa2786209ca25cad57694f08b998601905a8c564"
+}

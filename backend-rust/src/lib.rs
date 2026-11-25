@@ -9,6 +9,7 @@ pub mod http;
 pub mod identity;
 pub mod money;
 pub mod orders;
+pub mod outbox;
 pub mod payments;
 pub mod search;
 pub mod state;

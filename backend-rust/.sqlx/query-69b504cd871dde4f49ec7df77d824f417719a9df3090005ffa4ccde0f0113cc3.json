@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET ROLE ptmarket_worker",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "69b504cd871dde4f49ec7df77d824f417719a9df3090005ffa4ccde0f0113cc3"
+}

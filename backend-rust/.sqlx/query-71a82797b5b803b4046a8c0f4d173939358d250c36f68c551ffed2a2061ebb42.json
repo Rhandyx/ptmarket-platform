@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT current_setting('app.current_tenant_id', true)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "current_setting",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "71a82797b5b803b4046a8c0f4d173939358d250c36f68c551ffed2a2061ebb42"
+}
