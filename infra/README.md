@@ -9,7 +9,7 @@ Só desenvolvimento. Postgres 18 (+ pgaudit) + Redis + WORM local (S3 com Object
 - Passwords e chaves: ver `infra/.env.example` (omissões de dev; `.env` real nunca versionado)
 
 ## Recriar a BD de dev (obrigatório depois de mudar `postgres/init/` ou o Dockerfile)
-Os scripts de `postgres/init/` (papéis, pgaudit) só correm com volume novo. Para os aplicar:
+Os scripts de `postgres/init/` (papéis, pgaudit, caixa negra) só correm com volume novo. Para os aplicar:
 `docker compose -f infra/docker-compose.dev.yml down -v && docker compose -f infra/docker-compose.dev.yml up -d --build --wait`
 — **apaga os dados de dev** (BD, Redis e WORM local); depois correr as migrations. Os nomes dos volumes
 (`pgdata`, `redisdata`, `wormdata`) mantêm-se.
@@ -22,6 +22,40 @@ URLs de ligação por papel:
 - WORM (S3): `http://127.0.0.1:7070`, bucket `ptmarket-audit-worm`, região `us-east-1`
 
 O superuser `postgres` serve só o init; nenhuma aplicação liga com ele.
+
+## Caixa negra: bootstrap e selagem (spec 13; `init/03-audit-bootstrap.sh`)
+Corre como superuser no 1.º arranque, em `template1` (as BDs do `sqlx::test` herdam) e em `ptmarket`;
+o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável. É idempotente.
+- Papéis `ptmarket_audit_owner`, `ptmarket_audit_writer` e `ptmarket_audit_retention`: NOLOGIN, sem
+  SUPERUSER/BYPASSRLS/CREATEROLE, **sem membros** (nem o migrator, nem com ADMIN). Cria também
+  `ptmarket_price_writer` (e app/worker, se faltarem) e dá ao migrator SET neles (sem INHERIT nem ADMIN), para
+  as migrations seguirem sempre pelo ramo "já existe" (sem 23505 com `sqlx::test` em paralelo).
+- Schema `audit` (dono `ptmarket_audit_owner`): o migrator tem USAGE + CREATE (cria objetos novos nas
+  migrations; o CREATE não lhe dá poder sobre objetos selados, que não são dele).
+  Schema `audit_admin` (dono `postgres`): `audit_seal()`, SECURITY DEFINER, EXECUTE só para o migrator.
+- **Cada migration que cria ou altera objetos em `audit` termina com `SELECT audit_admin.audit_seal();`**:
+  recusa funções SECURITY DEFINER fora da allowlist e sobrecargas; passa todos os objetos para
+  `ptmarket_audit_owner`/`_writer`; tira ao migrator e a PUBLIC todos os privilégios em `audit.*` (ficam os
+  GRANTs explícitos da migration); verifica donos, search_path das DEFINER, membros e dependências de objetos
+  de papéis com LOGIN. Se falhar, a migration é desfeita.
+- **Nova função SECURITY DEFINER em `audit` (duas pessoas):** o autor da migration pede; quem revê edita a
+  ALLOWLIST (`v_allow_sig` + `v_allow_owner`, assinatura como `regprocedure` com `search_path=pg_catalog`, ex.:
+  `audit.audit_day_root(date)`) em `init/03-audit-bootstrap.sh` e aplica-o como superuser no cluster existente,
+  antes da migration:
+  `docker compose -f infra/docker-compose.dev.yml exec -T -e PTM_BOOTSTRAP_DBS='template1 ptmarket' postgres bash -s < infra/postgres/init/03-audit-bootstrap.sh`
+  (em produção, o mesmo ficheiro com `psql -U postgres` e a lista de BDs certa). É idempotente: papéis
+  `IF NOT EXISTS`, GRANTs repetíveis, `CREATE OR REPLACE` da `audit_seal`. O pgaudit regista as duas coisas.
+- Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
+  que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
+- Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono
+  poderia pôr lá triggers que correm como `ptmarket_audit_writer`). Os alertas de admin/impersonação ficam
+  em `audit.audit_alerts` (o worker só marca `published_at`), não no outbox.
+- Risco residual: o superuser pode tudo (mitigação: `pgaudit.log='all'` no `postgres` e raiz diária em WORM,
+  cartão 09). O dono da BD pode fazer `DROP DATABASE`: **em produção a BD tem dono `postgres` e o migrator não
+  tem CREATEDB** (o CREATEDB do migrator só existe em dev/CI, para o `sqlx::test`). Com o CREATE no schema
+  `audit`, o migrator pode plantar uma sobrecarga com argumentos DEFAULT que torna ambígua uma chamada interna
+  (erro "is not unique" → as escritas da caixa negra falham, fechado; não forja nada). Fica no pgaudit (DDL) e a
+  `audit_seal()` seguinte recusa-a. O resto fica no pgaudit.
 
 ## pgaudit (spec 13 §0 L3)
 Imagem própria (`postgres/Dockerfile`): `postgres:18.1` + `postgresql-18-pgaudit` com versão fixada.

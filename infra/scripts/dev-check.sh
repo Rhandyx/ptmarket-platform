@@ -20,6 +20,22 @@ done
   || fail "ptmarket_migrator não é dono da BD ptmarket"
 "${DC[@]}" exec -T postgres psql -U ptmarket_migrator -d ptmarket -At \
   -c "SET ROLE ptmarket_app" -c "SET ROLE ptmarket_worker" >/dev/null || fail "migrator não consegue SET ROLE"
+# Caixa negra (init/03-audit-bootstrap.sh): papéis NOLOGIN sem membros, schemas em ptmarket e template1.
+for r in ptmarket_audit_owner ptmarket_audit_writer ptmarket_audit_retention ptmarket_price_writer; do
+  row=$(q "SELECT rolcanlogin||','||rolsuper||','||rolbypassrls||','||rolcreaterole FROM pg_roles WHERE rolname='$r'")
+  [ "$row" = "false,false,false,false" ] || fail "papel $r em falta ou com LOGIN/SUPERUSER/BYPASSRLS/CREATEROLE ($row) — volume antigo? ver README: down -v"
+done
+[ "$(q "SELECT count(*) FROM pg_auth_members WHERE roleid IN ('ptmarket_audit_owner'::regrole, 'ptmarket_audit_writer'::regrole, 'ptmarket_audit_retention'::regrole)")" = 0 ] \
+  || fail "há membros dos papéis de auditoria (ninguém pode ser)"
+for db in ptmarket template1; do
+  [ "$("${DC[@]}" exec -T postgres psql -U postgres -d "$db" -At -c \
+      "SELECT pg_get_userbyid(n.nspowner)||','||pg_get_userbyid(p.proowner)||','||p.prosecdef
+       FROM pg_namespace n, pg_proc p WHERE n.nspname='audit' AND p.oid=to_regprocedure('audit_admin.audit_seal()')")" \
+      = "ptmarket_audit_owner,postgres,true" ] || fail "bootstrap da caixa negra em falta na BD $db (schema audit / audit_seal)"
+done
+if "${DC[@]}" exec -T postgres psql -U ptmarket_migrator -d ptmarket -At -c "SET ROLE ptmarket_audit_writer" >/dev/null 2>&1; then
+  fail "migrator consegue SET ROLE ptmarket_audit_writer (devia ser recusado)"
+fi
 [ "$("${DC[@]}" exec -T redis redis-cli ping | tr -d '\r')" = PONG ] || fail "Redis não responde PONG"
 
 # pgaudit (spec 13 §0 L3)

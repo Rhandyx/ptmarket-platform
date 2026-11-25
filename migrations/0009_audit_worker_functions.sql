@@ -1,16 +1,17 @@
 -- 0009 — Caixa negra: funções do worker (gravação assíncrona do Redis Stream, verificação e raiz diária).
--- Rollback mental (só em dev; em produção exportar e verificar a cadeia antes):
---   SET ROLE ptmarket_audit_writer;
---   DROP FUNCTION audit_append_event(jsonb);
---   DROP FUNCTION audit_verify_chain(uuid, text, timestamptz, timestamptz);
---   DROP FUNCTION audit_day_root(date); DROP FUNCTION audit_chains(); DROP FUNCTION audit_default_partition_rows();
---   RESET ROLE;
+-- Rollback mental (só em dev, como superuser — depois da selagem quem migra não é dono de nada em audit.*;
+-- em produção exportar e verificar a cadeia antes):
+--   DROP FUNCTION audit.audit_append_event(jsonb);
+--   DROP FUNCTION audit.audit_verify_chain(uuid, text, timestamptz, timestamptz);
+--   DROP FUNCTION audit.audit_day_root(date); DROP FUNCTION audit.audit_chains();
+--   DROP FUNCTION audit.audit_default_partition_rows();
 --   (as linhas gravadas por audit_append_event ficam: são caixa negra, nunca se apagam.)
--- Todas: SECURITY DEFINER, dono ptmarket_audit_writer, EXECUTE só para ptmarket_worker (a app não as chama).
+-- Todas: SECURITY DEFINER, dono ptmarket_audit_writer (pela selagem), EXECUTE só para ptmarket_worker.
 -- Nenhuma apaga, altera ou filtra eventos; nenhuma tem parâmetro para saltar a cadeia.
--- audit_append_event usa a MESMA cabeça (audit_chain_heads, SELECT … FOR UPDATE), o mesmo hash e a mesma
--- regra de outbox de audit_append (0008); nunca procura a última linha nas partições.
--- Sem papéis novos (os de 0001/0008 bastam).
+-- audit_append_event grava por audit._chain_insert (0008): a mesma cabeça, o mesmo hash e o mesmo alerta de
+-- audit_append; nunca procura a última linha nas partições. A verificação usa o mesmo audit._event_hash.
+-- REGRA da 0008: nenhuma destas funções toca em objetos cujo dono tenha LOGIN (só audit.*).
+-- Última instrução: SELECT audit_admin.audit_seal() (as funções novas estão na allowlist do bootstrap).
 
 -- ---------------------------------------------------------------------------
 -- audit_append_event: grava um evento do Redis Stream dentro da cadeia. true = gravou; false = já existia.
@@ -19,14 +20,14 @@
 -- nunca valores (podem conter dados pessoais).
 -- Chaves com "|null" no contrato podem vir a null ou ausentes; as restantes são obrigatórias e não nulas.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION audit_append_event(p_event jsonb)
+CREATE FUNCTION audit.audit_append_event(p_event jsonb)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
-    v_row      public.audit_events%ROWTYPE;
+    v_row      audit.audit_events;
     v_bad      text;
     v_occurred text;
     v_ua       text;
@@ -126,74 +127,8 @@ BEGIN
             USING ERRCODE = 'PTA02';
     END IF;
 
-    v_row.chain_key       := COALESCE(v_row.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid);
-    v_row.retention_class := public.audit_retention_class(v_row.action, v_row.outcome);
-
-    -- Mesma cabeça de audit_append (génese: seq 0 + 32 bytes a zero); bloqueio até ao fim da transação.
-    INSERT INTO public.audit_chain_heads (chain_key, retention_class, last_seq, last_hash)
-    VALUES (v_row.chain_key, v_row.retention_class, 0, decode(repeat('00', 32), 'hex'))
-    ON CONFLICT DO NOTHING;
-
-    SELECT h.last_seq + 1, h.last_hash INTO STRICT v_row.chain_seq, v_row.prev_hash
-    FROM public.audit_chain_heads h
-    WHERE h.chain_key = v_row.chain_key
-      AND h.retention_class = v_row.retention_class
-    FOR UPDATE;
-
-    -- Idempotência (depois do bloqueio: uma reentrega concorrente vê a linha já confirmada).
-    -- A PK inclui created_at: a janela de 1 dia permite a poda de partições no índice por id.
-    IF EXISTS (
-        SELECT 1 FROM public.audit_events e
-        WHERE e.id = v_row.id
-          AND e.created_at >= v_row.occurred_at - interval '1 day'
-    ) THEN
-        RETURN false;
-    END IF;
-
-    -- Depois do lock: created_at cresce com chain_seq dentro de cada cadeia.
-    v_row.created_at := clock_timestamp();
-
-    -- Linha canónica idêntica à de audit_append (0008).
-    v_row.hash := sha256(v_row.prev_hash || convert_to(jsonb_build_array(
-        v_row.id, v_row.tenant_id, v_row.store_id, v_row.actor_type, v_row.actor_id, v_row.actor_label,
-        v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id, v_row.outcome,
-        v_row.reason, v_row.changes, v_row.request_id, host(v_row.ip), encode(v_row.user_agent_hash, 'hex'),
-        v_row.retention_class,
-        (extract(epoch FROM v_row.occurred_at) * 1000000)::bigint,
-        (extract(epoch FROM v_row.created_at) * 1000000)::bigint,
-        v_row.chain_seq
-    )::text, 'UTF8'));
-
-    INSERT INTO public.audit_events (
-        id, tenant_id, chain_key, store_id, actor_type, actor_id, actor_label, impersonator_id,
-        action, target_type, target_id, outcome, reason, changes, request_id, ip, user_agent_hash,
-        retention_class, occurred_at, created_at, chain_seq, prev_hash, hash
-    ) VALUES (
-        v_row.id, v_row.tenant_id, v_row.chain_key, v_row.store_id, v_row.actor_type, v_row.actor_id,
-        v_row.actor_label, v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id,
-        v_row.outcome, v_row.reason, v_row.changes, v_row.request_id, v_row.ip, v_row.user_agent_hash,
-        v_row.retention_class, v_row.occurred_at, v_row.created_at, v_row.chain_seq, v_row.prev_hash,
-        v_row.hash
-    );
-
-    UPDATE public.audit_chain_heads
-       SET last_seq = v_row.chain_seq, last_hash = v_row.hash
-     WHERE chain_key = v_row.chain_key
-       AND retention_class = v_row.retention_class;
-
-    -- Mesma regra de audit_append: admin ou impersonação → sinal imediato fora da BD (mesma transação).
-    IF v_row.actor_type = 'admin' OR v_row.impersonator_id IS NOT NULL THEN
-        INSERT INTO public.outbox_events (tenant_id, aggregate, aggregate_id, event_type, payload)
-        VALUES (
-            NULL, 'audit', v_row.id, 'audit.superadmin_action',
-            to_jsonb(v_row) || jsonb_build_object(
-                'prev_hash', encode(v_row.prev_hash, 'hex'),
-                'hash', encode(v_row.hash, 'hex'),
-                'user_agent_hash', encode(v_row.user_agent_hash, 'hex'))
-        );
-    END IF;
-
-    RETURN true;
+    -- Cadeia, hash, idempotência (id já gravado ⇒ NULL) e alerta: a mesma implementação de audit_append.
+    RETURN audit._chain_insert(v_row, true) IS NOT NULL;
 END
 $$;
 
@@ -205,12 +140,12 @@ $$;
 --   'link' — prev_hash ≠ hash da linha anterior
 -- A 1.ª linha do intervalo aceita o prev_hash gravado (âncora = raiz diária publicada em WORM).
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION audit_verify_chain(p_chain_key uuid, p_class text, p_from timestamptz, p_to timestamptz)
+CREATE FUNCTION audit.audit_verify_chain(p_chain_key uuid, p_class text, p_from timestamptz, p_to timestamptz)
 RETURNS TABLE (broken_id uuid, broken_seq bigint, problem text)
 LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $$
 #variable_conflict use_column
 BEGIN
@@ -226,17 +161,10 @@ BEGIN
     SELECT x.id, x.chain_seq, q.problem
     FROM (
         SELECT e.id, e.chain_seq, e.prev_hash, e.hash,
-               sha256(e.prev_hash || convert_to(jsonb_build_array(
-                   e.id, e.tenant_id, e.store_id, e.actor_type, e.actor_id, e.actor_label, e.impersonator_id,
-                   e.action, e.target_type, e.target_id, e.outcome, e.reason, e.changes, e.request_id,
-                   host(e.ip), encode(e.user_agent_hash, 'hex'), e.retention_class,
-                   (extract(epoch FROM e.occurred_at) * 1000000)::bigint,
-                   (extract(epoch FROM e.created_at) * 1000000)::bigint,
-                   e.chain_seq
-               )::text, 'UTF8')) AS recomputed,
+               audit._event_hash(e) AS recomputed,
                lag(e.hash) OVER w      AS prior_hash,
                lag(e.chain_seq) OVER w AS prior_seq
-        FROM public.audit_events e
+        FROM audit.audit_events e
         WHERE e.chain_key = p_chain_key
           AND e.retention_class = p_class
           AND e.created_at >= p_from
@@ -257,12 +185,12 @@ $$;
 -- ---------------------------------------------------------------------------
 -- audit_day_root: por cadeia, os eventos com created_at no dia UTC p_day; last_hash = hash da última linha.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION audit_day_root(p_day date)
+CREATE FUNCTION audit.audit_day_root(p_day date)
 RETURNS TABLE (chain_key uuid, retention_class text, first_seq bigint, last_seq bigint, last_hash bytea, events bigint)
 LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $$
 #variable_conflict use_column
 DECLARE
@@ -280,13 +208,13 @@ BEGIN
     FROM (
         SELECT e.chain_key, e.retention_class, min(e.chain_seq) AS first_seq, max(e.chain_seq) AS last_seq,
                count(*) AS events
-        FROM public.audit_events e
+        FROM audit.audit_events e
         WHERE e.created_at >= v_from AND e.created_at < v_to
         GROUP BY e.chain_key, e.retention_class
     ) a
     JOIN LATERAL (
         SELECT e.hash
-        FROM public.audit_events e
+        FROM audit.audit_events e
         WHERE e.chain_key = a.chain_key
           AND e.retention_class = a.retention_class
           AND e.chain_seq = a.last_seq
@@ -301,15 +229,15 @@ $$;
 -- ---------------------------------------------------------------------------
 -- audit_chains: as cadeias existentes, lidas das cabeças (não das partições).
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION audit_chains()
+CREATE FUNCTION audit.audit_chains()
 RETURNS TABLE (chain_key uuid, retention_class text, last_seq bigint)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $$
     SELECT h.chain_key, h.retention_class::text, h.last_seq
-    FROM public.audit_chain_heads h
+    FROM audit.audit_chain_heads h
     ORDER BY h.chain_key, h.retention_class;
 $$;
 
@@ -318,12 +246,12 @@ $$;
 -- O escritor não tem privilégios nas partições: conta pelo pai, filtrando por tableoid (exato) e com o
 -- complemento dos intervalos mensais da classe (poda as partições mensais; só a DEFAULT é lida).
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION audit_default_partition_rows()
+CREATE FUNCTION audit.audit_default_partition_rows()
 RETURNS bigint
 LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     v_class   text;
@@ -335,7 +263,7 @@ DECLARE
     v_total   bigint := 0;
 BEGIN
     FOREACH v_class IN ARRAY ARRAY['fiscal', 'standard', 'security'] LOOP
-        v_parent := to_regclass(format('public.%I', 'audit_events_' || v_class));
+        v_parent := to_regclass(format('audit.%I', 'audit_events_' || v_class));
         CONTINUE WHEN v_parent IS NULL;
 
         SELECT c.oid INTO v_default
@@ -361,7 +289,7 @@ BEGIN
         END IF;
 
         EXECUTE format(
-            'SELECT count(*) FROM public.audit_events e '
+            'SELECT count(*) FROM audit.audit_events e '
             'WHERE e.retention_class = %L AND e.tableoid = %s::oid AND NOT (%s)',
             v_class, v_default, v_ranges)
         INTO v_n;
@@ -373,27 +301,23 @@ END
 $$;
 
 -- ---------------------------------------------------------------------------
--- Privilégios: só ptmarket_worker executa. Dono = ptmarket_audit_writer (quem migra deixa de ter EXECUTE).
--- O novo dono precisa de CREATE no schema só durante o ALTER; retira-se logo a seguir.
+-- Privilégios: só ptmarket_worker executa. O dono passa a ptmarket_audit_writer na selagem (o ACL de quem
+-- migra transfere-se para o novo dono e a selagem retira-lhe o resto).
 -- ---------------------------------------------------------------------------
-REVOKE ALL ON FUNCTION audit_append_event(jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit_verify_chain(uuid, text, timestamptz, timestamptz) FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit_day_root(date) FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit_chains() FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit_default_partition_rows() FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.audit_append_event(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.audit_verify_chain(uuid, text, timestamptz, timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.audit_day_root(date) FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.audit_chains() FROM PUBLIC;
+REVOKE ALL ON FUNCTION audit.audit_default_partition_rows() FROM PUBLIC;
 
-GRANT EXECUTE ON FUNCTION audit_append_event(jsonb) TO ptmarket_worker;
-GRANT EXECUTE ON FUNCTION audit_verify_chain(uuid, text, timestamptz, timestamptz) TO ptmarket_worker;
-GRANT EXECUTE ON FUNCTION audit_day_root(date) TO ptmarket_worker;
-GRANT EXECUTE ON FUNCTION audit_chains() TO ptmarket_worker;
-GRANT EXECUTE ON FUNCTION audit_default_partition_rows() TO ptmarket_worker;
+GRANT EXECUTE ON FUNCTION audit.audit_append_event(jsonb) TO ptmarket_worker;
+GRANT EXECUTE ON FUNCTION audit.audit_verify_chain(uuid, text, timestamptz, timestamptz) TO ptmarket_worker;
+GRANT EXECUTE ON FUNCTION audit.audit_day_root(date) TO ptmarket_worker;
+GRANT EXECUTE ON FUNCTION audit.audit_chains() TO ptmarket_worker;
+GRANT EXECUTE ON FUNCTION audit.audit_default_partition_rows() TO ptmarket_worker;
 
-GRANT CREATE ON SCHEMA public TO ptmarket_audit_writer;
-ALTER FUNCTION audit_append_event(jsonb) OWNER TO ptmarket_audit_writer;
-ALTER FUNCTION audit_verify_chain(uuid, text, timestamptz, timestamptz) OWNER TO ptmarket_audit_writer;
-ALTER FUNCTION audit_day_root(date) OWNER TO ptmarket_audit_writer;
-ALTER FUNCTION audit_chains() OWNER TO ptmarket_audit_writer;
-ALTER FUNCTION audit_default_partition_rows() OWNER TO ptmarket_audit_writer;
-REVOKE CREATE ON SCHEMA public FROM ptmarket_audit_writer;
-
--- O dono (DEFINER) fica com EXECUTE implícito; quem migra não (o ACL transfere-se para o novo dono).
+-- ---------------------------------------------------------------------------
+-- Selagem de audit.*: donos NOLOGIN, migrator e PUBLIC sem privilégios, allowlist, verificação.
+-- Tem de ser a última instrução.
+-- ---------------------------------------------------------------------------
+SELECT audit_admin.audit_seal();
