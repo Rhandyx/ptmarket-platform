@@ -10,30 +10,26 @@
 | VPS (1, depois 2) | API, workers, Postgres, Redis | spec 08 | a preencher quando se escolher o fornecedor | por contratar |
 | Backup da BD (WAL-G / pg_dump encriptado) num bucket externo (B2 ou R2) | recuperar a BD se o disco falhar | spec 08 | < 2 € | por contratar |
 | Cloudflare for SaaS | domínios das Câmaras | spec 12 | 0 € até 100 hostnames; depois 0,10 $ por hostname | conta Cloudflare |
-| **Amazon S3 com Object Lock (COMPLIANCE)**, numa conta AWS separada | caixa negra: raiz diária, ações de superadmin e, mais tarde, os logs do pgaudit, sem que ninguém os possa apagar | spec 13, épico 02 cartão 09 (decisão do owner, 25/11/2026) | < 1 € nos primeiros anos (ver abaixo) | por contratar antes de produção |
-| Email (SMTP) para alertas | alertas de superadmin; emails aos clientes mais tarde | épico 02 cartão 09 | a definir (há planos gratuitos para volumes baixos) | por escolher |
-| Telegram e Discord | alertas de superadmin | épico 02 cartão 09 | 0 € | — |
+| **Backblaze B2 com Object Lock (GOVERNANCE)**, um só bucket da plataforma, com prefixo por tenant | caixa negra: raiz diária e eventos críticos (o pgaudit não vai) | spec 13, épico 02 cartões 09/09a (decisão do owner, 26/11/2026) | 0 € (cabe nos 10 GB gratuitos do B2 durante anos) | por contratar antes de produção |
+| Telegram e Discord | alertas imediatos de eventos críticos | épico 02 cartão 09 | 0 € | — |
 
-### S3 WORM: como se chega ao valor
-- **Preço:** armazenamento S3 Standard ≈ 0,023 $/GB/mês; os pedidos de escrita custam cêntimos por milhar. O Object Lock não tem custo próprio: paga-se o espaço ocupado durante o período de bloqueio.
+### WORM: como se chega ao valor (decisão do owner, 26/11/2026)
+- **Fornecedor:** Backblaze B2 (compatível com S3, Object Lock em modo GOVERNANCE, nunca COMPLIANCE). É o mesmo fornecedor previsto para os backups (spec 08), mas num bucket e com chaves separadas.
+- **Preço:** ≈ 6 $/TB/mês (0,006 $/GB) e os primeiros 10 GB são gratuitos.
 - **Volume:**
-  - raiz diária: alguns KB por dia;
-  - ações de superadmin: poucas por dia, alguns KB cada;
-  - logs do pgaudit (quando forem enviados): talvez centenas de MB a 1 GB por ano.
-- **Os dados acumulam:** com retenção de 10 anos, nada se apaga durante esse prazo. Com 1 GB/ano, ao fim de 10 anos são ~10 GB, ou seja ≈ 0,25 $/mês. Os objetos com mais de 90 dias podem passar para Glacier Instant Retrieval, que também suporta Object Lock, se o volume crescer.
-- **Atenção:** em modo COMPLIANCE, o que se grava paga-se até ao fim do prazo, mesmo que se feche o projeto. Por isso, gravar só o necessário e nunca dados de teste no bucket de produção.
-
-### S3 WORM: quem paga (decisão do owner, 25/11/2026)
-- **Câmaras:** cada Câmara tem o seu próprio bucket WORM, na conta dela, e paga-o ela. A plataforma só tem permissão para escrever e ler, nunca para apagar; a prova fica do lado da Câmara (cartões 09 e 09a). Faz parte da lista de onboarding de cada Câmara, antes de entrar em produção.
-- **Comércio direto** (lojistas onde a plataforma recebe comissão), eventos de plataforma, dev e demo: bucket da plataforma, com custo nosso (cêntimos por mês).
-- **Retenção no nosso bucket** (default até à revisão jurídica): raízes 10 anos, porque são KB por dia e mantêm a prova da cadeia fiscal; detalhes de superadmin 2 anos. O Object Lock deixa prolongar mas nunca encurtar. As faturas em si ficam no software de faturação certificado (Moloni), que trata da sua própria retenção legal.
+  - raízes diárias: alguns KB por dia, guardadas 10 anos;
+  - eventos críticos e ações de superadmin: poucos por dia, guardados 2 anos;
+  - o pgaudit não vai para o WORM: fica no servidor, com rotação.
+- **Total:** bem abaixo de 1 GB em vários anos, ou seja 0 € dentro do plano gratuito.
+- **Quem paga:** a plataforma. Não há contas de armazenamento para as Câmaras. Um bucket externo por tenant fica como opção futura, desligada por defeito.
+- **GOVERNANCE vs COMPLIANCE:** em GOVERNANCE, um administrador da conta B2 com a permissão de bypass consegue apagar antes do prazo. A chave da app nunca tem essa permissão, e a chave mestra da conta B2 fica só com o owner, fora do servidor. Aceite pelo owner em troca de menos responsabilidade e menos atrito.
 
 ## Manutenção recorrente
 
 | Tarefa | Frequência | Quem |
 |---|---|---|
-| Alerta de faturação na AWS (ex.: > 5 $/mês) e na Cloudflare | configurar uma vez; rever por mês | owner (contas) |
-| Rodar as chaves do S3 WORM (utilizador IAM só com `PutObject`/`GetObject` naquele bucket, sem `Delete`) | a cada 90 dias | supervisor prepara, owner aplica |
+| Alerta de faturação no Backblaze (ex.: > 5 $/mês) e na Cloudflare | configurar uma vez; rever por mês | owner (contas) |
+| Rodar a chave de aplicação do B2 WORM (só leitura e escrita naquele bucket, sem delete nem bypass de governance) | a cada 90 dias | supervisor prepara, owner aplica |
 | Confirmar que a raiz diária chegou ao WORM e que o `verify-audit` passa | diário (automático, com alerta se falhar) | worker (cartão 09) |
 | Testar a reposição de um backup da BD | por trimestre | supervisor |
 | Renovação dos domínios próprios | anual | owner |

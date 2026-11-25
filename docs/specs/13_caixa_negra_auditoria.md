@@ -8,7 +8,7 @@
 - Há 4 camadas, para nada escapar:
   - **L1, trigger de linha genérico em todas as tabelas:** captura tudo o que muda dados, venha da app, do Data Studio, de SQL manual ou de um worker.
   - **L2, event trigger de DDL:** `CREATE`/`ALTER`/`DROP` de tabelas, funções, policies, papéis e grants vão para `audit_events` (`action = 'ddl.*'`). Uma tabela criada por migration recebe logo o trigger da L1 automaticamente.
-  - **L3, `pgaudit`** (logs do Postgres, enviados para WORM): sessões de superuser e manutenção, que podem passar ao lado dos triggers.
+  - **L3, `pgaudit`** (logs do Postgres, ficam no servidor com rotação; NÃO vão para o WORM, para não explodir o volume (decisão do owner, 26/11/2026)): sessões de superuser e manutenção, que podem passar ao lado dos triggers.
   - **L4, eventos semânticos da app:** login/logout, 2FA, recusas, exportações e leituras de dados pessoais. São coisas que a BD não vê como mudança de dados.
 
 ## 1. Âmbito: tudo o que altera estado ou é recusado
@@ -38,8 +38,9 @@
   - O que não tem utilizador autenticado (navegação anónima no catálogo) fica nos logs e métricas. Passa à caixa negra quando é uma mudança ou uma recusa (ex.: tentativa de login, checkout de convidado).
 - **Ninguém está acima da auditoria (superadmin incluído):**
   - não existe papel, flag ou endpoint para desligar, filtrar ou editar a auditoria;
-  - as ações de superadmin são enviadas também para WORM quase em tempo real (minutos, não só a raiz diária);
-  - cada ação de superadmin gera um alerta, um por ação, enviado para email, Telegram e Discord (WhatsApp mais tarde); o sinal vem da tabela `audit.audit_alerts` e não do outbox (decisão do owner, 25/11/2026);
+  - as ações de superadmin e os eventos críticos são exportados para o WORM quase em tempo real (minutos, não só a raiz diária);
+  - **alertas imediatos no Telegram e no Discord** só para eventos críticos: mudança de IBAN, falhas de pagamento e de faturação, login de superadmin e falha do `verify-audit`. A lista vive numa função da caixa negra; o sinal vem da tabela `audit.audit_alerts` e não do outbox (decisão do owner, 26/11/2026);
+  - **timeline no Super-Admin:** vista filtrável por tenant, loja, utilizador e encomenda, com antes/depois e o estado da cadeia; a própria consulta é auditada (leitura de admin, síncrona) (decisão do owner, 26/11/2026);
   - mexer na retenção ou nos papéis de auditoria exige duas pessoas (2 superadmins com 2FA), e esse próprio ato é auditado.
 
 ## 2. Modelo (PG 18, particionado por mês desde o início, `created_at`)
@@ -66,8 +67,8 @@
    - **Selagem** (decisão do owner, 25/11/2026): a caixa negra vive no schema `audit`, cujo dono é um papel NOLOGIN. O migrator não é membro nem tem privilégios nele, depois de `audit_admin.audit_seal()`. Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Mudar o schema `audit` exige o superuser.
 4. **À prova de adulteração:**
    - uma cadeia de hash por tenant: `hash = sha256(prev_hash ‖ linha canónica)`;
-   - um job diário publica a raiz do dia num armazenamento WORM externo (Amazon S3 com Object Lock em modo COMPLIANCE; os bucket locks do R2 não servem, porque o admin da conta Cloudflare os pode remover) (decisão do owner, 25/11/2026);
-   - **Quem guarda a prova** (decisão do owner, 25/11/2026): cada Câmara guarda a prova no bucket dela, na conta dela, e paga-o ela. A plataforma só tem PutObject/GetObject por bucket policy, sem segredos por tenant. Destinos em `audit.worm_targets`, que só o superuser altera (regra das duas pessoas). O comércio direto, os eventos de plataforma, dev e demo usam o bucket da plataforma. Se o bucket de uma Câmara falhar, não há fallback para o da plataforma;
+   - um job diário publica a raiz do dia e os eventos críticos num único bucket WORM gerido pela plataforma, com prefixo por `tenant_id`: Backblaze B2 com Object Lock em modo **GOVERNANCE** (nunca COMPLIANCE). A credencial da app/worker só tem PutObject/GetObject, sem Delete nem bypass de governance (decisão do owner, 26/11/2026);
+   - **Sem contas de armazenamento para as Câmaras:** todos os tenants usam o bucket da plataforma. Fica previsto, para o futuro, um override opcional de bucket externo na tabela `tenants`, desligado por defeito e alterável só pelo superuser (decisão do owner, 26/11/2026).
    - um comando `verify-audit` recalcula a cadeia e assinala qualquer quebra.
 5. **RGPD:**
    - nunca se gravam segredos, passwords, PAN ou IBAN completo (aplica-se a redação de `telemetry`);
@@ -80,4 +81,4 @@
 - A exportação é assinada (CSV/JSON + hash da cadeia) para a ASAE, tribunal ou titular dos dados (RGPD art. 15).
 
 ## 5. Retenção (decisão do owner; default até lá)
-- O default é 10 anos para eventos financeiros e fiscais, 2 anos para os restantes e 1 ano para as recusas de segurança. No WORM: raízes diárias 10 anos; detalhes de ações de superadmin 2 anos, prolongáveis mas nunca encurtáveis. Por confirmar com revisão jurídica (decisão do owner, 25/11/2026).
+- O default é 10 anos para eventos financeiros e fiscais, 2 anos para os restantes e 1 ano para as recusas de segurança (na BD). No WORM: eventos 2 anos; raízes diárias 10 anos (KB por dia; o limite superior do intervalo 5–10 anos indicado pelo owner, para cobrir a retenção fiscal da BD) (decisão do owner, 26/11/2026).
