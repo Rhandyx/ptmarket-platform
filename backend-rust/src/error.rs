@@ -26,6 +26,9 @@ pub enum AppError {
     Validation(Vec<FieldError>),
     #[error("conflict")]
     Conflict,
+    /// Capacidade esgotada (ex.: fila de hashes de password cheia). 503 + `Retry-After`.
+    #[error("busy")]
+    Busy,
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 }
@@ -38,6 +41,7 @@ impl AppError {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict => StatusCode::CONFLICT,
+            Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -49,6 +53,7 @@ impl AppError {
             Self::Forbidden => "forbidden",
             Self::Validation(_) => "validation",
             Self::Conflict => "conflict",
+            Self::Busy => "busy",
             Self::Internal(_) => "internal",
         }
     }
@@ -60,10 +65,14 @@ impl AppError {
             Self::Forbidden => "Sem permissão.",
             Self::Validation(_) => "Dados inválidos.",
             Self::Conflict => "Conflito com o estado atual.",
+            Self::Busy => "Serviço ocupado. Tente novamente dentro de instantes.",
             Self::Internal(_) => "Erro interno.",
         }
     }
 }
+
+/// Segundos sugeridos em `Retry-After` para `AppError::Busy`.
+const RETRY_AFTER_BUSY_SECS: &str = "1";
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -74,7 +83,14 @@ impl IntoResponse for AppError {
         if let Self::Validation(fields) = &self {
             error["fields"] = serde_json::json!(fields);
         }
-        (self.status(), Json(serde_json::json!({ "error": error }))).into_response()
+        let mut resp = (self.status(), Json(serde_json::json!({ "error": error }))).into_response();
+        if matches!(self, Self::Busy) {
+            resp.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(RETRY_AFTER_BUSY_SECS),
+            );
+        }
+        resp
     }
 }
 
@@ -103,6 +119,7 @@ mod tests {
             (AppError::Forbidden, 403, "forbidden"),
             (AppError::Validation(vec![]), 422, "validation"),
             (AppError::Conflict, 409, "conflict"),
+            (AppError::Busy, 503, "busy"),
             (AppError::Internal(anyhow::anyhow!("x")), 500, "internal"),
         ];
         for (e, status, code) in cases {
@@ -111,6 +128,25 @@ mod tests {
             assert_eq!(body["error"]["code"], code);
             assert!(body["error"]["message"].is_string());
         }
+    }
+
+    #[test]
+    fn busy_sets_retry_after() {
+        let r = AppError::Busy.into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            r.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert!(
+            AppError::NotFound
+                .into_response()
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
     }
 
     #[tokio::test]

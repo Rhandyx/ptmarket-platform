@@ -4,6 +4,7 @@
 //! logs, erros nem eventos de auditoria.
 
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use argon2::password_hash::{self, PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, PasswordHash, Version};
@@ -32,6 +33,9 @@ pub const PASSWORD_MIN_CHARS: usize = 8;
 pub const PASSWORD_MAX_CHARS: usize = 128;
 /// Máximo de hashes/verificações em simultâneo (anti-DoS).
 const MAX_CONCURRENT_HASHES: usize = 4;
+/// Espera máxima por uma vaga; depois disso → `AppError::Busy` (503 + `Retry-After`).
+/// Evita fila sem limite (latência e cópias da password em memória à espera).
+const HASH_PERMIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Hash fictício fixo (parâmetros atuais) usado quando a conta não existe ou só tem passkey,
 /// para que o tempo de resposta não revele se a conta existe.
@@ -110,15 +114,32 @@ fn hasher() -> Result<Argon2<'static>, AppError> {
     ))
 }
 
-/// Corre `f` numa thread de bloqueio, no máximo `MAX_CONCURRENT_HASHES` em simultâneo.
+/// Corre `f` numa thread de bloqueio, no máximo `MAX_CONCURRENT_HASHES` em simultâneo;
+/// sem vaga em `HASH_PERMIT_TIMEOUT` → `AppError::Busy`.
 async fn run_limited<T, F>(f: F) -> Result<T, AppError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let permit = Arc::clone(&HASH_PERMITS)
-        .acquire_owned()
+    run_limited_with(&HASH_PERMITS, HASH_PERMIT_TIMEOUT, f).await
+}
+
+/// `run_limited` com semáforo e espera injetáveis (testes).
+async fn run_limited_with<T, F>(
+    permits: &Arc<Semaphore>,
+    wait: Duration,
+    f: F,
+) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = tokio::time::timeout(wait, Arc::clone(permits).acquire_owned())
         .await
+        .map_err(|_| {
+            tracing::warn!("fila de hashes de password cheia; pedido recusado (503)");
+            AppError::Busy
+        })?
         .map_err(|_| internal())?;
     tokio::task::spawn_blocking(move || {
         let out = f();
@@ -177,9 +198,14 @@ fn verify_blocking(bytes: &[u8], phc: Option<&str>) -> Result<Verified, AppError
         });
     };
     let ok = hasher()?.verify_password(bytes, &parsed).is_ok();
+    let weaker = is_weaker_than_current(&parsed);
+    if weaker {
+        // Hash antigo verifica mais depressa: completa o custo para o tempo não o revelar.
+        burn_dummy(bytes)?;
+    }
     Ok(Verified {
         ok,
-        needs_rehash: ok && is_weaker_than_current(&parsed),
+        needs_rehash: ok && weaker,
     })
 }
 
@@ -332,6 +358,30 @@ mod tests {
                 needs_rehash: true
             }
         );
+        // Password errada contra hash fraco: recusa e não pede rehash.
+        let wrong = verify(&pw("wrong password"), Some(&phc)).await.unwrap();
+        assert_eq!(
+            wrong,
+            Verified {
+                ok: false,
+                needs_rehash: false
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn full_queue_returns_busy_after_timeout() {
+        // Semáforo próprio: não interfere com os outros testes em paralelo.
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES));
+        let held: Vec<_> = (0..MAX_CONCURRENT_HASHES)
+            .map(|_| Arc::clone(&sem).try_acquire_owned().unwrap())
+            .collect();
+        let r = run_limited_with(&sem, Duration::from_millis(20), || 1u8).await;
+        assert!(matches!(r, Err(AppError::Busy)), "{r:?}");
+
+        drop(held);
+        let r = run_limited_with(&sem, Duration::from_millis(20), || 1u8).await;
+        assert_eq!(r.unwrap(), 1);
     }
 
     #[test]
