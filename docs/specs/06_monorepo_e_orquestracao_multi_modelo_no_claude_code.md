@@ -1,61 +1,67 @@
 # 06. Estrutura do Monorepo e Orquestração Multi-Modelo no Claude Code
 
-**Objetivo:** Estruturar o repositório e o sistema de subagentes para trabalhar com velocidade máxima e custo controlado no **Claude Code**, usando uma hierarquia rigorosa de modelos:
-- **Cérebro Mestre (Arquitetura, Planeamento e Decisões Críticas):** Fable 5.2 (`claude-fable-5-2`)
-- **Programação Pesada & Core Engineering:** `opus` (Claude Opus)
-- **Leitura, Revisão, Auditoria e Documentação:** `sonnet` (Claude Sonnet)
-- **Tarefas Triviais, Boilerplate e Scripts Simples:** `haiku` (Claude Haiku)
-
-> As regras mestras estão em `CLAUDE.md` (raiz) e as definições dos 8 subagentes em `.claude/agents/*.md`. Este documento guarda o resto do plano original: estrutura do monorepo, matriz de roteamento e fluxo diário.
+**Revisto em 25/11/2026 (Fase 0, aprovado pelo owner):** economia máxima de tokens. Os agentes leem só o cartão da sua tarefa, Sonnet é o modelo por defeito e o supervisor revê cada diff.
 
 ---
 
-## 1. Estrutura Completa do Monorepo (`ptmarket-platform`)
+## 1. Estrutura do monorepo
 
 ```text
 ptmarket-platform/
-├── CLAUDE.md                             # Regras absolutas lidas em todas as sessões
-├── .claudeignore                         # Ignora .agent/ e docs/business/
+├── CLAUDE.md                 # Regras universais (≤ 500 tokens) + método + índice das specs
 ├── .claude/
-│   ├── settings.json                     # Permissões, hooks automáticos (cargo check/fmt) — por criar
-│   └── agents/
-│       ├── architect-master.md           # [fable]    Cérebro Mestre, especificações e decisões
-│       ├── db-architect.md               # [opus]     PostgreSQL 17, RLS e migrations SQL
-│       ├── rust-core.md                  # [opus]     Backend Rust (Axum, SQLx, Ledger, Admin)
-│       ├── go-integrations.md            # [opus]     Workers Go (Eupago, Moloni, CTT, IA, Sync)
-│       ├── frontend-ui.md                # [opus]     Next.js White-Label, WCAG 2.1 AA, Data Studio
-│       ├── codebase-reader.md            # [sonnet]   Leitura profunda, investigação e docs
-│       ├── security-auditor.md           # [sonnet]   Auditoria Read-Only (RLS, Auth, Webhooks)
-│       └── quick-helper.md               # [haiku]    Boilerplate, renomeações, traduções, CSS simples
-├── .agent/                               # Configuração AGY (Antigravity) — ver 09
+│   ├── settings.json         # Hooks (fmt/check/vet/typecheck/lint) + leituras bloqueadas
+│   ├── settings.local.json   # Pessoal (fora do git): permissão de push
+│   ├── rules/                # Regras por pasta, carregam só ao tocar nela: rust, go, sql, frontend
+│   └── agents/               # 9 agentes (ver §2)
+├── .agent/                   # Configuração AGY (Antigravity) — ver 09
 ├── docs/
-│   ├── business/                         # 01 — estratégia de negócio (ignorado pelo Claude Code)
-│   └── specs/                            # 02 a 10 — especificações técnicas
-├── migrations/                           # Migrações SQL sequenciais (sqlx migrate)
-├── backend-rust/                         # Core API, Ledger Financeiro, Storage, Data Studio
-├── workers-go/                           # Workers Redis/Asynq, Conectores externos e Migração
-├── frontend-web/                         # Next.js (Lojas Municipais, lojaportugal.pt, Admin)
-├── landing-pages/                        # HTML/Tailwind estático (segjarsolucoes, ptsolucoes, ptmarket)
-├── seeds/                                # Taxonomia PT/ES e assets/script da Demo Municipal
-└── infra/                                # Caddyfile, docker-compose (1 VPS & 2 VPS), scripts backup
+│   ├── ESTADO.md             # "COMEÇA AQUI" — passagem de estado entre conversas
+│   ├── plans/                # Cartões de tarefa por épico (modelo: _CARTAO.md)
+│   ├── business/             # 01 — estratégia (leitura bloqueada ao Claude)
+│   └── specs/                # 02–12 — especificações técnicas
+├── migrations/ · backend-rust/ · workers-go/ · frontend-web/ · landing-pages/ · seeds/ · infra/
+└── proofs/                   # Screenshots de prova de UX (fora do git)
 ```
 
----
+## 2. Equipa e modelos
 
-## 2. Matriz de Roteamento de Modelos (Como Poupar Tokens sem Perder Qualidade)
+| Agente | Modelo base | Limite de passos | Papel |
+|---|---|---|---|
+| Sessão principal (supervisor) | Opus | — | Plano, divisão em cartões, revisão de cada diff, integração, memória, `ESTADO.md` |
+| `architect-master` | Fable | 30 | Só épicos e decisões de arquitetura; escreve cartões, nunca código |
+| `db-architect` · `rust-core` · `go-integrations` · `frontend-ui` | Sonnet (Opus nos cartões críticos) | 60 | Um cartão cada, num branch/worktree próprio |
+| `security-auditor` | Sonnet | 30 | Revê o diff contra a checklist ASVS da spec 12 (só leitura) |
+| `ux-reviewer` | Sonnet | 30 | Prova em browser real: W3C, axe, WCAG 2.2, 375/1440 px |
+| `codebase-reader` | Haiku | 15 | Pesquisas que devolvem `ficheiro:linha` |
+| `quick-helper` | Haiku | 15 | Tarefas mecânicas com instruções exatas |
 
-| Papel / Tipo de Tarefa | Modelo Atribuído | Exemplos Concretos de Utilização |
-| :--- | :--- | :--- |
-| **Cérebro Mestre / Orquestrador** | **Fable 5.2** | Desenhar novas funcionalidades, quebrar épicos em tarefas atómicas, resolver conflitos arquiteturais entre Rust/Go/DB, rever contratos de API e aprovar planos antes de escrever código. |
-| **Programação Core & Complexa** | **`opus`** | Escrever código Rust (`Axum`, `SQLx`, *split* financeiro, concorrência de stock, RLS), workers idempotentes em Go, Data Studio com transações *dry-run*, arquitetura Next.js SSR. |
-| **Leitura, Pesquisa & Auditoria** | **`sonnet`** | Ler ficheiros extensos da codebase para explicar fluxos, procurar bugs sem alterar ficheiros, fazer auditorias de segurança RLS/Webhooks/WCAG, atualizar documentação `.md`. |
-| **Tarefas Triviais & Rotineiras** | **`haiku`** | Gerar ficheiros `.env.example`, criar tipos simples, ajustar margens/cores Tailwind, renomear variáveis, formatar JSON/SQL, escrever textos *placeholder* e mensagens de erro PT/ES. |
+**Cartões críticos = Opus:** dinheiro/ledger/split, RLS, stock, autenticação e sessões, webhooks de pagamento. O supervisor escolhe o modelo em cada chamada; não há agentes duplicados.
 
----
+## 3. Regras de economia de tokens
 
-## 3. Como Trabalhar no Dia a Dia (Fluxo Prático em 4 Passos)
+1. **O custo vem das instruções, não dos agentes.** Cada tarefa é um cartão de ≤ 40 linhas com o excerto exato da spec já colado. O executor nunca lê specs inteiras.
+2. **Agentes curtos.** O custo cresce com o quadrado do número de passos, por isso o `maxTurns` está definido em todos. Um cartão grande divide-se por camada.
+3. **Relatórios curtos** (≤ 10–15 linhas): tudo o que um agente devolve entra no contexto do supervisor.
+4. **Verificação automática:** os hooks fazem fmt/check/lint a cada edição. Os agentes correm só os testes do módulo; o conjunto completo corre uma vez, na integração.
+5. **Paralelo por pasta**, com worktrees; nunca dois agentes no mesmo ficheiro.
+6. **Uma conversa por tema.** No fim de cada fase o supervisor atualiza o `docs/ESTADO.md`, as memórias e faz commit; a conversa seguinte começa com "começa aqui".
+7. **Não delegar o que são 2–3 chamadas de ferramenta:** o supervisor faz isso diretamente.
+8. **Leituras bloqueadas** (`permissions.deny`): `docs/business/`, `node_modules/`, `target/`, `.next/`.
 
-1. **Planeamento (Fable 5.2):** Pedes ao `architect-master`: *"Lê `docs/specs/02_arquitetura_tecnica_rust_go_postgresql_e_tls.md` e `docs/specs/03_pagamentos_split_faturacao_at_e_logistica.md` e cria o plano de implementação do endpoint de Checkout Multi-Loja com Split."*
-2. **Investigação (`sonnet`):** Se o projeto já cresceu, o `codebase-reader` recolhe os ficheiros relevantes e entrega um resumo limpo.
-3. **Execução (`opus` + `haiku`):** Ativas `db-architect` -> `rust-core` -> `go-integrations` -> `frontend-ui` em sequência (ou paralelo em pastas separadas). Usas `quick-helper` (`haiku`) para textos, traduções e ajustes rápidos de UI.
-4. **Revisão Final (`sonnet`):** Antes de fazer `git commit`, corres o `security-auditor` sobre o diff.
+## 4. Fluxo de um épico
+
+1. **Plano:** o `architect-master` lê as secções das specs e escreve os cartões em `docs/plans/<épico>/`. O supervisor revê-os.
+2. **Execução:** um agente por cartão, por ordem de dependência; os independentes correm em paralelo, em worktrees.
+3. **Revisão:** o `security-auditor` revê o diff do backend e o `ux-reviewer` prova a UI.
+4. **Integração:** o supervisor revê cada diff, junta os branches, corre o conjunto completo de testes uma vez e faz commit.
+5. **Fecho:** atualizar o `ESTADO.md` e as memórias.
+
+## 5. Lições incorporadas (de projetos anteriores do owner)
+
+- O plano é aprovado em `.md` antes de haver código.
+- Cada cartão diz o que **não** se pode tocar e que funcionalidades aprovadas têm de voltar a ser provadas.
+- Nenhuma UI entra sem prova em browser real.
+- Provar antes de afirmar; suspeitar primeiro das próprias mudanças.
+- Os agentes fazem commit do trabalho em curso; nada fica só no scratchpad.
+- Staging antes de produção, com backup e rollback; nunca editar no servidor.

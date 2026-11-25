@@ -1,4 +1,12 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(./docs/business/**)",
+      "Read(**/node_modules/**)",
+      "Read(**/target/**)",
+      "Read(**/.next/**)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {

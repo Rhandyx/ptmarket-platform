@@ -1,5 +1,7 @@
 # 10. Auditoria de Pontos Cegos: Tudo o que Faltava Prever (Legal, Técnico e Operacional)
 
+> **Revisto em 25/11/2026:** TLS e domínios das Câmaras passam para a **spec 12 §1** (Cloudflare for SaaS); a segurança técnica detalhada está na **spec 12 §3** (ASVS).
+
 **Objetivo:** Antecipar problemas jurídicos, fiscais, operacionais e de engenharia que normalmente só aparecem depois de o sistema estar em produção ou durante a assinatura do primeiro contrato com uma Câmara Municipal.
 
 ---

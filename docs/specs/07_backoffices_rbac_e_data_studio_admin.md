@@ -1,5 +1,7 @@
 # 07. Ecossistema de Backoffices (RBAC) e Data Studio Admin
 
+> **Revisto em 25/11/2026:** apontar domínios customizados = registar um custom hostname na Cloudflare pela API (**spec 12 §1**); a Câmara cria só um CNAME.
+
 **Objetivo:** Centralizar numa única aplicação Next.js (`admin.ptmarket.pt`) a operação diária dos comerciantes, a governação das Câmaras/Associações e uma consola técnica completa para a **Segjar Soluções, Lda**, incluindo um explorador visual avançado de PostgreSQL (com os recursos de um phpMyAdmin/Supabase Studio, mas com interface moderna e travões anti-erro).
 
 ---

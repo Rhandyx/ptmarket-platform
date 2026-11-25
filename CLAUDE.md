@@ -1,32 +1,19 @@
 # PT Market & Loja Portugal (Segjar Soluções)
 
-## Stack
-- `backend-rust/` Axum 0.8, SQLx, rust_decimal, utoipa
-- `workers-go/` pgx, Asynq, Redis
-- `migrations/` PostgreSQL 17 (RLS, JSONB, UUID)
-- `frontend-web/` Next.js App Router, TS estrito, Tailwind, shadcn/ui
-- `infra/` Caddy, Compose
+Rust/Axum/SQLx `backend-rust/` · Go/Asynq `workers-go/` · PostgreSQL 17 `migrations/` · Next.js `frontend-web/` · `infra/`
 
 ## Regras inegociáveis
-1. Dinheiro: nunca float. SQL `BIGINT` cêntimos / `INT` bps; Rust `rust_decimal::Decimal`.
-2. Multi-tenant: toda a query filtra `tenant_id` ou define `app.current_tenant_id` (RLS). Portal nacional só lê lojas com `publish_to_national_portal = true`.
-3. Rust: zero `.unwrap()`/`.expect()`; devolver `Result<T, AppError>`.
-4. Leituras públicas → `db_replica`; escritas/checkout/stock/admin → `db_primary`.
-5. `/api/v1/superadmin/*`: `super_admin` + 2FA TOTP. Escritas no Data Studio: dry-run `BEGIN…ROLLBACK` + `admin_audit_logs`.
-6. Mudar `price_cents` → `product_price_history`. `vat_exempt_art53` → IVA 0%.
-7. Verificar: `cargo check && cargo test` · `go vet ./... && go test ./...` · `npm run typecheck && npm run lint`.
+1. Dinheiro nunca em float: cêntimos `BIGINT`/`i64`, percentagens em bps `INT`, `Decimal` em Rust.
+2. Multi-tenant: RLS + filtro `tenant_id` + verificação de dono em cada handler (anti-IDOR). Portal nacional só lojas com `publish_to_national_portal`.
+3. Segurança ASVS L2 (L3 pagamentos/admin), spec 12. Admin: `super_admin` + 2FA; Data Studio com dry-run + `admin_audit_logs`.
+4. UI: nunca `alert()`/`confirm()`/`prompt()`; WCAG 2.2 AA; sem prova em browser real não entra.
+5. Omnibus: mudar preço → `product_price_history`. Art. 53.º → IVA 0%.
 
-## Subagentes
-- Planear: `architect-master`
-- Código: `db-architect`, `rust-core`, `go-integrations`, `frontend-ui`
-- Ler/auditar: `codebase-reader`, `security-auditor`
-- Trivial: `quick-helper`
+## Método
+- Nova conversa: ler `docs/ESTADO.md` primeiro.
+- Épico → `architect-master` escreve cartões em `docs/plans/` → um agente por cartão (lê só o cartão) → `security-auditor` + `ux-reviewer` → supervisor revê o diff.
+- Sonnet por defeito; Opus em dinheiro/RLS/stock/auth/webhooks.
+- Regras por pasta em `.claude/rules/`; os hooks verificam cada edição.
 
-## Specs (`docs/specs/`, ler só o necessário)
-- `02_*` arquitetura, esquema BD, dual pool
-- `03_*` pagamentos split, IVA, faturação AT, logística
-- `04_*` catálogo IA, templates, WCAG, mobile
-- `05_*` migração, onboarding, portabilidade
-- `07_*` backoffices, RBAC, Data Studio
-- `08_*` imagens, seed demo, 2 VPS
-- `10_*` pontos cegos, checklist
+## Specs `docs/specs/` (ler só a secção necessária)
+02 arquitetura e BD · 03 pagamentos, IVA, AT, logística · 04 catálogo IA, templates, mobile · 05 migração e onboarding · 07 backoffices, RBAC, Data Studio · 08 imagens, demo, 2 VPS · 10 pontos cegos · **11 escala, dados, design, W3C** · **12 segurança, domínios** (11 e 12 prevalecem sobre a 02)

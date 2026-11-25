@@ -28,3 +28,6 @@ next-env.d.ts
 # Storage local da demo
 storage/
 uploads/
+
+# Provas de UX (screenshots) — locais
+proofs/
