@@ -2,6 +2,8 @@
 
 **Agente:** rust-core · **Modelo:** opus · **Depende de:** 03 · **Paralelo com:** 04, 09
 
+> **Mudou no 01b:** as funções da caixa negra estão no schema `audit` (ex.: `audit.audit_append`, `audit.audit_append_event`); chamar sempre com o schema e com tipos exatos (`::text`, `::uuid`), para nunca resolver para uma sobrecarga plantada. A app e o worker só têm EXECUTE nas funções previstas e USAGE no schema.
+
 ## Objetivo
 Nenhuma transação da API abre sem ator: `begin_tenant_tx` e a nova `begin_platform_tx` exigem `AuditCtx` (sem ele não compila) e fixam o contexto de ator na BD; existe a única função para eventos semânticos.
 

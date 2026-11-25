@@ -2,6 +2,8 @@
 
 **Agente:** rust-core · **Modelo:** opus · **Depende de:** 06 · **Paralelo com:** 10
 
+> **Mudou no 01b:** as funções da caixa negra estão no schema `audit` (ex.: `audit.audit_append`, `audit.audit_append_event`); chamar sempre com o schema e com tipos exatos (`::text`, `::uuid`), para nunca resolver para uma sobrecarga plantada. A app e o worker só têm EXECUTE nas funções previstas e USAGE no schema.
+
 ## Objetivo
 Todo o pedido de utilizador autenticado, toda a recusa e toda a mutação anónima geram um evento; síncrono com 503 se falhar, ou via Redis Stream nas leituras comuns. Não há interruptor.
 

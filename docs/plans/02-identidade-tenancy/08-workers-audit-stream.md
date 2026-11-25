@@ -2,6 +2,8 @@
 
 **Agente:** go-integrations · **Modelo:** opus · **Depende de:** 02 · **Paralelo com:** 03
 
+> **Mudou no 01b:** as funções da caixa negra estão no schema `audit` (ex.: `audit.audit_append`, `audit.audit_append_event`); chamar sempre com o schema e com tipos exatos (`::text`, `::uuid`), para nunca resolver para uma sobrecarga plantada. A app e o worker só têm EXECUTE nas funções previstas e USAGE no schema.
+
 ## Objetivo
 O worker consome `audit:stream`, grava em lote dentro da cadeia de hash e só então faz ACK; nenhum evento se perde nem se duplica, nem com crash a meio.
 
