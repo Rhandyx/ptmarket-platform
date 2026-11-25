@@ -10,7 +10,7 @@ paths:
 - Anti-referência de layout: Amazon/AliExpress. Limpo, editorial, hierarquia clara, espaço, tipografia forte.
 - Só **tokens** (CSS custom properties) para cor/espaço/raio/sombra/movimento/tipografia; tamanhos em `rem`/`clamp()`; nunca px fixos de layout.
 - WCAG 2.2 AA; HTML semântico e válido (Nu validator 0 erros); axe 0 violações; `prefers-reduced-motion`.
-- Server Components por defeito; `"use client"` só em folhas interativas; ≤ ~100 KB JS gzip por rota.
+- Server Components por defeito; `"use client"` só em folhas interativas; JS próprio da rota ≤ 30 KB gzip acima do runtime Next/React (runtime medido em 25/11/2026: ~135 KB gzip em browsers modernos, sem polyfills `nomodule`; a home soma ~3 KB).
 - Catálogo, carrinho e checkout funcionam sem JS (forms + Server Actions).
 - Tenant pelo header `Host`; templates `bairro`/`editorial`/`catalogo` = tokens diferentes, mesmos componentes e hooks.
 - API Rust só via cliente gerado do `openapi.json`; nunca tipos escritos à mão para respostas da API.

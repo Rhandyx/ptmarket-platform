@@ -32,10 +32,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <nav aria-label="Principal">
               <ul className={styles.nav}>
                 <li>
-                  <a href="#principios">Princípios</a>
+                  <Link href="/#principios">Princípios</Link>
                 </li>
                 <li>
-                  <a href="#lojas">Para lojas</a>
+                  <Link href="/#lojas">Para lojas</Link>
                 </li>
               </ul>
             </nav>

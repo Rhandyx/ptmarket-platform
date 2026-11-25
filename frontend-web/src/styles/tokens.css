@@ -29,6 +29,7 @@
   --blur-overlay: 0.25rem;
   --z-popover: 50;
   --z-toast: 90;
+  --toast-reserve: 20rem;
 
   /* Espaço (escala generosa) */
   --space-1: 0.25rem;
@@ -73,7 +74,7 @@
   --leading-tight: 1.05;
   --leading-snug: 1.3;
   --leading-body: 1.6;
-  --tracking-display: -0.035em;
+  --tracking-display: -0.022em;
   --measure: 38rem;
   --container: 72rem;
   --target-min: 2.75rem;
