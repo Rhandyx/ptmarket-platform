@@ -32,6 +32,7 @@ Proibido: flag, feature, variável de ambiente ou construtor que desligue ou sal
 - [ ] `audit::record` grava evento semântico na mesma transação; rollback não deixa evento; `changes` com `password`/IBAN sai mascarado; tenant A não lê o evento de B (anti-IDOR)
 - [ ] Doctest `compile_fail`: `begin_tenant_tx(&pool, tenant)` sem `AuditCtx` não compila; `append_global` com `TenantTx` não compila
 - [ ] `rls_isolation` volta a verde com `AuditCtx` (mesmas asserções); `.sqlx/` atualizado e `SQLX_OFFLINE=true cargo check` passa
+- [ ] Corrida da cadeia em REPEATABLE READ (2 ligações, mesmo tenant, `audit_append` em paralelo): uma recebe 40001 e o `audit_ctx` repete a transação; no fim `chain_seq` é contíguo e sem repetidos (no 0008 a cabeça `audit_chain_heads` é bloqueada com `FOR UPDATE`)
 
 ## Prova (um comando)
 `cd backend-rust && DATABASE_URL=postgres://ptmarket_migrator:dev_migrator@127.0.0.1:5432/ptmarket cargo test -p ptmarket-api --test audit_ctx --test rls_isolation --doc` → esperado: 0 falhas
