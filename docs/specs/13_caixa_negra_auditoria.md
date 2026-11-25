@@ -27,7 +27,7 @@
   - exportações de dados e pedidos RGPD;
   - Data Studio (o SQL executado e o resultado do dry-run);
   - início e fim de impersonation.
-- **Recusas:** também se regista o que foi negado (`outcome = 'denied'`): 401/403, tentativas IDOR, login falhado, rate-limit, CSRF e webhook com assinatura inválida.
+- **Recusas:** também se regista o que foi negado (`outcome = 'denied'`): 401/403, tentativas IDOR, login falhado, rate-limit, CSRF e webhook com assinatura inválida. **Recusas por limite de pedidos (429):** o 1.º 429 por ator ou IP e por classe de rota, em cada janela de 60 s, é gravado de forma síncrona; os seguintes vão para um contador, com um evento-resumo no fim da janela; se o Redis falhar, a resposta é 503 (decisão do owner, 25/11/2026).
 - **Todas as ações de qualquer utilizador autenticado são auditáveis (owner, 25/11), seja qual for o papel.**
   - **Cliente:** registo, login, ver encomendas, adicionar e remover do carrinho (mesmo estando no Redis), favoritos, checkout passo a passo, pagamento, devolução, avaliação, alterar dados, consentimentos, pedidos RGPD.
   - **Lojista e a sua equipa:** criar, editar e apagar produtos e variantes, preços, stock, imagens, importações e migração (com o resumo do lote e o detalhe por linha), encomendas, envios, reembolsos, definições da loja, IBAN, faturação, equipa e convites, e consultas de relatórios.
@@ -39,7 +39,7 @@
 - **Ninguém está acima da auditoria (superadmin incluído):**
   - não existe papel, flag ou endpoint para desligar, filtrar ou editar a auditoria;
   - as ações de superadmin são enviadas também para WORM quase em tempo real (minutos, não só a raiz diária);
-  - cada ação de superadmin gera um alerta para o owner;
+  - cada ação de superadmin gera um alerta, um por ação, enviado para email, Telegram e Discord (WhatsApp mais tarde); o sinal vem da tabela `audit.audit_alerts` e não do outbox (decisão do owner, 25/11/2026);
   - mexer na retenção ou nos papéis de auditoria exige duas pessoas (2 superadmins com 2FA), e esse próprio ato é auditado.
 
 ## 2. Modelo (PG 18, particionado por mês desde o início, `created_at`)
@@ -63,9 +63,11 @@
    - a escrita é feita só por uma função `SECURITY DEFINER` cujo dono é o papel `ptmarket_audit_writer`;
    - nenhum papel tem UPDATE ou DELETE;
    - a retenção é feita apagando partições inteiras (`DROP` de partição), por um papel próprio e só fora da app.
+   - **Selagem** (decisão do owner, 25/11/2026): a caixa negra vive no schema `audit`, cujo dono é um papel NOLOGIN. O migrator não é membro nem tem privilégios nele, depois de `audit_admin.audit_seal()`. Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Mudar o schema `audit` exige o superuser.
 4. **À prova de adulteração:**
    - uma cadeia de hash por tenant: `hash = sha256(prev_hash ‖ linha canónica)`;
-   - um job diário publica a raiz do dia num armazenamento WORM externo (R2/S3 Object Lock);
+   - um job diário publica a raiz do dia num armazenamento WORM externo (Amazon S3 com Object Lock em modo COMPLIANCE; os bucket locks do R2 não servem, porque o admin da conta Cloudflare os pode remover) (decisão do owner, 25/11/2026);
+   - **Quem guarda a prova** (decisão do owner, 25/11/2026): cada Câmara guarda a prova no bucket dela, na conta dela, e paga-o ela. A plataforma só tem PutObject/GetObject por bucket policy, sem segredos por tenant. Destinos em `audit.worm_targets`, que só o superuser altera (regra das duas pessoas). O comércio direto, os eventos de plataforma, dev e demo usam o bucket da plataforma. Se o bucket de uma Câmara falhar, não há fallback para o da plataforma;
    - um comando `verify-audit` recalcula a cadeia e assinala qualquer quebra.
 5. **RGPD:**
    - nunca se gravam segredos, passwords, PAN ou IBAN completo (aplica-se a redação de `telemetry`);
@@ -78,4 +80,4 @@
 - A exportação é assinada (CSV/JSON + hash da cadeia) para a ASAE, tribunal ou titular dos dados (RGPD art. 15).
 
 ## 5. Retenção (decisão do owner; default até lá)
-- O default é 10 anos para eventos financeiros e fiscais, 2 anos para os restantes e 1 ano para as recusas de segurança.
+- O default é 10 anos para eventos financeiros e fiscais, 2 anos para os restantes e 1 ano para as recusas de segurança. No WORM: raízes diárias 10 anos; detalhes de ações de superadmin 2 anos, prolongáveis mas nunca encurtáveis. Por confirmar com revisão jurídica (decisão do owner, 25/11/2026).

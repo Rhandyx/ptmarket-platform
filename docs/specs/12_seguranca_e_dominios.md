@@ -33,9 +33,10 @@
 ## 3. Checklist ASVS aplicada (o que cada cartão de backend tem de respeitar)
 
 **Identidade e sessões**
-- Passwords com **Argon2id** (parâmetros OWASP), verificação contra passwords vazadas (k-anonymity HIBP) no registo.
+- Passwords com **Argon2id** (parâmetros OWASP), verificação contra passwords vazadas (k-anonymity HIBP) no registo. O hash corre numa fila com espera máxima de 2 s; depois disso, 503 com Retry-After (decisão do owner, 25/11/2026).
 - **Passkeys (WebAuthn)** para lojistas e admin; **2FA TOTP obrigatório** para `super_admin` e `tenant_admin`.
 - Cookies de sessão `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax` (Strict no admin); rotação do ID de sessão no login; expiração por inatividade.
+- **Duração das sessões** (decisão do owner, 25/11/2026): cliente 7 dias absolutos no máximo; staff 12 h, ou 30 min de inatividade; plataforma 8 h, ou 15 min.
 - **CSRF:** token em todos os formulários que alteram estado (além de SameSite).
 
 **Autorização**

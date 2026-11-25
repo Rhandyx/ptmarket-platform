@@ -46,7 +46,7 @@ Cria automaticamente um cenário pronto a mostrar a qualquer vereador ou preside
 
 ### 3.1 Fase 1 (1 Único VPS — Demo até ~5 Câmaras)
 Tudo corre no mesmo servidor via `docker-compose.yml` (Caddy + Next.js + Rust API + Go Workers + PostgreSQL 17 + Redis).
-- **Backup de Segurança Imediato (Sem precisar de 2.º servidor):** Usar **WAL-G** ou `pg_dump` encriptado diário enviado para um bucket externo (Backblaze B2 ou Cloudflare R2 — custo inferior a 2€/mês). Garante recuperação ao segundo (*Point-in-Time Recovery*) mesmo que o disco do VPS avarie.
+- **Backup de Segurança Imediato (Sem precisar de 2.º servidor):** Usar **WAL-G** ou `pg_dump` encriptado diário enviado para um bucket externo (Backblaze B2 ou Cloudflare R2 — custo inferior a 2€/mês). Os custos recorrentes estão consolidados em `docs/CUSTOS.md` (decisão do owner, 25/11/2026). Garante recuperação ao segundo (*Point-in-Time Recovery*) mesmo que o disco do VPS avarie.
 
 ### 3.2 Fase 2 (2 VPS Separados — 6 a 20+ Câmaras)
 
