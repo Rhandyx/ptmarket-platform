@@ -16,4 +16,4 @@ Rust/Axum/SQLx `backend-rust/` · Go/Asynq `workers-go/` · PostgreSQL 18 `migra
 - Regras por pasta em `.claude/rules/`; os hooks verificam cada edição.
 
 ## Specs `docs/specs/` (ler só a secção necessária)
-02 arquitetura e BD · 03 pagamentos, IVA, AT, logística · 04 catálogo IA, templates, mobile · 05 migração e onboarding · 07 backoffices, RBAC, Data Studio · 08 imagens, demo, 2 VPS · 10 pontos cegos · **11 escala, dados, design, W3C** · **12 segurança, domínios** (11 e 12 prevalecem sobre a 02)
+02 arquitetura e BD · 03 pagamentos, IVA, AT, logística · 04 catálogo IA, templates, mobile · 05 migração e onboarding · 07 backoffices, RBAC, Data Studio · 08 imagens, demo, 2 VPS · 10 pontos cegos · **11 escala, dados, design, W3C** · **12 segurança, domínios** · **13 caixa negra (auditoria de tudo)** (11, 12 e 13 prevalecem sobre a 02 e a 07)

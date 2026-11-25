@@ -16,11 +16,13 @@
 - Extractor de tenant pelo `Host`: o `TenantId::new` é `pub(crate)` e está à espera dele. Inclui a policy do portal nacional (`publish_to_national_portal`).
 - Épico identity: abrir `customers` (hoje sem policies nem grants), Argon2id/passkeys, RBAC, `super_admin` + 2FA.
 - Cliente TS gerado a partir do `openapi.json`.
+- **Caixa negra (spec 13), pedido do owner:** `audit_events` particionada, cadeia de hash + raiz diária em WORM, `AuditCtx` obrigatório e triggers nas tabelas críticas. Primeiro cartão da Fase 2, antes de qualquer mutação nova; o `admin_audit_logs` da spec 07 passa a ser a categoria `admin` desta tabela.
 
 ## Decisões do owner (pendentes; até lá vale o default)
 1. Histórico de preços: `ON DELETE RESTRICT`, por isso variante/loja/tenant com histórico não se apaga, só se desativa. Prazo de retenção por definir.
 2. IVA ES/Açores/Madeira e equivalentes legais ES (hoje só PT continente 23%). Decidir antes do 1.º tenant espanhol.
 3. Marca: ≤ 2 fontes + paleta final (hoje `#0F4C81`/`#111827`, fontes do sistema; muda-se só nos tokens).
+4. Retenção da caixa negra: o default é 10 anos para eventos financeiros/fiscais, 2 anos para os restantes e 1 ano para recusas de segurança.
 
 ## Dívida técnica conhecida
 - API sem graceful shutdown no SIGTERM; o worker Go já o tem.
