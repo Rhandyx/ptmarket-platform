@@ -28,6 +28,8 @@ Correções da auditoria a incluir:
   p_tenant_id só é aceite quando app.actor_type = 'system'; caso contrário RAISE (a app sem tenant não injeta eventos na cadeia de outro tenant).
   O hash usa ip::text (com máscara), e não host(ip). Atualizar a recomputação nos testes.
   Corrigir o comentário "dono incluído": o dono passa a ser ptmarket_audit_owner (NOLOGIN), e mesmo esse não tem UPDATE/DELETE/TRUNCATE.
+Uma só implementação do hash: hoje o cálculo e o INSERT estão duplicados entre audit_append (0008) e audit_append_event (0009). Extrai uma função interna audit._chain_insert(...) (dono ptmarket_audit_writer, sem EXECUTE para mais ninguém), que as duas chamam; aplica o ip::text só aí. Teste: as duas entradas produzem hashes que o verify da 0009 aceita.
+Corrida do CREATE ROLE na 0001/0007 (cluster novo + sqlx::test em paralelo → 23505): o bootstrap (init e run.sh) cria também ptmarket_app, ptmarket_worker e ptmarket_price_writer com os mesmos atributos das migrations, para que estas sigam sempre pelo ramo "já existe". Prova: cargo test em paralelo num postgres descartável acabado de criar, sem aquecimento com --test-threads=1.
 Risco residual a documentar no topo da 0008: o superuser pode tudo. Mitigação: pgaudit.log='all' no postgres e a raiz para WORM (cartão 09).
 ```
 
