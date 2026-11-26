@@ -845,7 +845,14 @@ mod tests {
         for ok in ["+351 912 345 678", "(+34) 600-123-456", "912345678", ""] {
             assert!(validate_patch(&p(ok), CountryCode::Pt).is_ok(), "{ok:?}");
         }
-        for bad in ["912 abc", "912.345.678", "912/345", "+351 ９12", "912#1", "<script>"] {
+        for bad in [
+            "912 abc",
+            "912.345.678",
+            "912/345",
+            "+351 ９12",
+            "912#1",
+            "<script>",
+        ] {
             assert!(validate_patch(&p(bad), CountryCode::Pt).is_err(), "{bad:?}");
         }
     }

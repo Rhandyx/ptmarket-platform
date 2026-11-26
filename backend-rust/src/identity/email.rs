@@ -20,9 +20,7 @@ pub fn normalize(raw: &str) -> Result<String, AppError> {
     let lower = raw.trim().nfc().collect::<String>().to_lowercase();
     let email: String = lower.nfc().collect();
     if email.chars().count() > MAX_EMAIL_CHARS
-        || email
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace())
+        || email.chars().any(|c| c.is_control() || c.is_whitespace())
         || !one_at_with_both_parts(&email)
     {
         return Err(AppError::Validation(vec![FieldError {
@@ -94,10 +92,16 @@ mod tests {
             "@x",
             "@",
         ] {
-            assert!(matches!(normalize(bad), Err(AppError::Validation(_))), "{bad:?}");
+            assert!(
+                matches!(normalize(bad), Err(AppError::Validation(_))),
+                "{bad:?}"
+            );
         }
         // Espaços, TAB e CRLF só nas pontas: o trim tira-os.
-        assert_eq!(normalize("\t ana@x.pt\r\n").ok().as_deref(), Some("ana@x.pt"));
+        assert_eq!(
+            normalize("\t ana@x.pt\r\n").ok().as_deref(),
+            Some("ana@x.pt")
+        );
     }
 
     #[test]

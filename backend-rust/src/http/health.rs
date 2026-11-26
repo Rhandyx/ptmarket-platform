@@ -54,6 +54,7 @@ mod tests {
 
     fn app() -> Option<axum::Router> {
         let cfg = Config::from_lookup(|k| match k {
+            "APP_ENV" => Some("test".into()),
             "DATABASE_PRIMARY_URL" | "DATABASE_REPLICA_URL" => {
                 Some("postgres://u:segredo1@127.0.0.1:1/db".into())
             }

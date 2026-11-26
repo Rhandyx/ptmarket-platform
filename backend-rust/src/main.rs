@@ -29,14 +29,14 @@ async fn run() -> anyhow::Result<()> {
     let mut sessions = Sessions::new(state.db_primary.clone(), state.redis.clone(), csrf_key)
         .with_internal_token(cfg.internal_proxy_token.clone());
     // Sem TURNSTILE_SECRET o registo de clientes responde 503 (falha fechado; nunca sem captcha).
-    // Em produção a variável passa a ser obrigatória (cartão 02/24b).
+    // Em staging/production `Config` já recusa o arranque sem ela (cartão 02/24b).
     if cfg.turnstile_secret.is_some() {
         sessions = sessions.with_registration(Registration::from_config(&cfg)?);
     } else {
         tracing::warn!("TURNSTILE_SECRET ausente: POST /api/v1/auth/register responde 503");
     }
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
-    tracing::info!(addr = %cfg.bind_addr, "a escutar");
+    tracing::info!(addr = %cfg.bind_addr, app_env = ?cfg.app_env, "a escutar");
     let trusted = TrustedProxies::new(cfg.trusted_proxy_cidrs);
     // ConnectInfo: o peer TCP decide se `CF-Connecting-IP`/`x-request-id` contam (caixa negra).
     let app = http::router_with_sessions(state, trusted, sessions)

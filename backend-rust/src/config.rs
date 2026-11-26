@@ -25,8 +25,47 @@ pub enum ConfigError {
     Invalid(&'static str, &'static str),
 }
 
+/// `APP_ENV`: ambiente de execução (obrigatório, valor exato).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppEnv {
+    Development,
+    Test,
+    Staging,
+    Production,
+}
+
+impl AppEnv {
+    /// Staging e produção exigem toda a configuração de segurança.
+    pub fn is_strict(self) -> bool {
+        matches!(self, Self::Staging | Self::Production)
+    }
+
+    fn parse(raw: Option<String>) -> Result<Self, ConfigError> {
+        const KEY: &str = "APP_ENV";
+        match raw.as_deref() {
+            None | Some("") => Err(ConfigError::Missing(KEY)),
+            Some("development") => Ok(Self::Development),
+            Some("test") => Ok(Self::Test),
+            Some("staging") => Ok(Self::Staging),
+            Some("production") => Ok(Self::Production),
+            Some(_) => Err(ConfigError::Invalid(
+                KEY,
+                "development | test | staging | production",
+            )),
+        }
+    }
+}
+
+/// Chaves de teste da Cloudflare (aprovam/recusam sempre): prefixos 1x, 2x, 3x.
+const TURNSTILE_TEST_PREFIXES: [&str; 3] = [
+    "1x0000000000000000000000000000000",
+    "2x0000000000000000000000000000000",
+    "3x0000000000000000000000000000000",
+];
+
 #[derive(Debug)]
 pub struct Config {
+    pub app_env: AppEnv,
     pub database_primary_url: SecretString,
     pub database_replica_url: SecretString,
     pub redis_url: SecretString,
@@ -171,11 +210,13 @@ impl Config {
     }
 
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let app_env = AppEnv::parse(get("APP_ENV"))?;
         let pg = ["postgres://", "postgresql://"];
         let bind = get("BIND_ADDR")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_BIND.to_owned());
-        Ok(Self {
+        let cfg = Self {
+            app_env,
             database_primary_url: secret(&get, "DATABASE_PRIMARY_URL", &pg)?,
             database_replica_url: secret(&get, "DATABASE_REPLICA_URL", &pg)?,
             redis_url: secret(&get, "REDIS_URL", &["redis://", "rediss://"])?,
@@ -187,7 +228,56 @@ impl Config {
             internal_proxy_token: internal_token(get("INTERNAL_PROXY_TOKEN"))?,
             csrf_key: csrf_key(get("CSRF_KEY"))?,
             turnstile_secret: turnstile_secret(get(TURNSTILE_SECRET))?,
-        })
+        };
+        if app_env.is_strict() {
+            cfg.check_strict()?;
+        }
+        Ok(cfg)
+    }
+
+    /// Regras de staging/produção: o que em dev é opcional passa a obrigatório.
+    fn check_strict(&self) -> Result<(), ConfigError> {
+        if self.trusted_proxy_cidrs.is_empty() {
+            return Err(ConfigError::Invalid(
+                "TRUSTED_PROXY_CIDRS",
+                "obrigatória em staging/production (sem ela todos os clientes contam como um só IP)",
+            ));
+        }
+        if self.internal_proxy_token.is_none() {
+            return Err(ConfigError::Invalid(
+                "INTERNAL_PROXY_TOKEN",
+                "obrigatória em staging/production",
+            ));
+        }
+        if self.csrf_key.is_none() {
+            return Err(ConfigError::Invalid(
+                CSRF_KEY,
+                "obrigatória em staging/production",
+            ));
+        }
+        if self.platform_admin_host.is_none() {
+            return Err(ConfigError::Invalid(
+                "PLATFORM_ADMIN_HOST",
+                "obrigatória em staging/production",
+            ));
+        }
+        match &self.turnstile_secret {
+            None => Err(ConfigError::Invalid(
+                TURNSTILE_SECRET,
+                "obrigatória em staging/production",
+            )),
+            Some(s)
+                if TURNSTILE_TEST_PREFIXES
+                    .iter()
+                    .any(|p| s.expose_secret().starts_with(p)) =>
+            {
+                Err(ConfigError::Invalid(
+                    TURNSTILE_SECRET,
+                    "chave de teste da Cloudflare não é aceite em staging/production",
+                ))
+            }
+            Some(_) => Ok(()),
+        }
     }
 }
 
@@ -205,7 +295,8 @@ mod tests {
         move |k| m.get(k).cloned()
     }
 
-    const OK: [(&str, &str); 4] = [
+    const OK: [(&str, &str); 5] = [
+        ("APP_ENV", "development"),
         ("DATABASE_PRIMARY_URL", "postgres://u:segredo1@h/db"),
         ("DATABASE_REPLICA_URL", "postgres://u:segredo1@h/db"),
         ("REDIS_URL", "redis://h:6379"),
@@ -224,7 +315,9 @@ mod tests {
 
     #[test]
     fn missing_is_readable_error() {
-        let e = Config::from_lookup(env(&[])).err().map(|e| e.to_string());
+        let e = Config::from_lookup(env(&[("APP_ENV", "test")]))
+            .err()
+            .map(|e| e.to_string());
         assert_eq!(
             e.as_deref(),
             Some("variável de ambiente em falta: DATABASE_PRIMARY_URL")
@@ -396,6 +489,119 @@ mod tests {
             assert_eq!(c.is_ok(), good, "{}", val.len());
             if let Err(e) = c {
                 assert!(!e.to_string().contains("aaaa"));
+            }
+        }
+    }
+
+    const PROD: [(&str, &str); 10] = [
+        ("APP_ENV", "production"),
+        ("DATABASE_PRIMARY_URL", "postgres://u:segredo1@h/db"),
+        ("DATABASE_REPLICA_URL", "postgres://u:segredo1@h/db"),
+        ("REDIS_URL", "redis://h:6379"),
+        ("CSRF_KEY", "chave-csrf-segredo-com-32-bytes-ok"),
+        ("TRUSTED_PROXY_CIDRS", "173.245.48.0/20"),
+        (
+            "INTERNAL_PROXY_TOKEN",
+            "token-interno-segredo-com-32-bytes-ok",
+        ),
+        ("PLATFORM_ADMIN_HOST", "admin.ptmarket.pt"),
+        ("TURNSTILE_SECRET", "0x4AAAsegredo-turnstile"),
+        ("BIND_ADDR", "0.0.0.0:8080"),
+    ];
+
+    fn err_of(v: &[(&str, &str)]) -> Option<String> {
+        Config::from_lookup(env(v)).err().map(|e| e.to_string())
+    }
+
+    #[test]
+    fn app_env_required_and_exact() {
+        let v: Vec<_> = OK
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "APP_ENV")
+            .collect();
+        assert_eq!(
+            err_of(&v).as_deref(),
+            Some("variável de ambiente em falta: APP_ENV")
+        );
+        for bad in ["prod", "Production", " production", "dev"] {
+            let mut v = v.clone();
+            v.push(("APP_ENV", bad));
+            let e = err_of(&v);
+            assert!(
+                e.as_deref().is_some_and(|s| s.contains("APP_ENV")
+                    && s.contains("development | test | staging | production")),
+                "{bad}"
+            );
+        }
+        for good in ["development", "test"] {
+            let mut v = v.clone();
+            v.push(("APP_ENV", good));
+            assert!(Config::from_lookup(env(&v)).is_ok_and(|c| !c.app_env.is_strict()));
+        }
+    }
+
+    #[test]
+    fn strict_complete_ok_and_each_missing_named() {
+        for e in ["production", "staging"] {
+            let mut v = PROD.to_vec();
+            v[0] = ("APP_ENV", e);
+            assert!(
+                Config::from_lookup(env(&v)).is_ok_and(|c| c.app_env.is_strict()),
+                "{e}"
+            );
+        }
+        for key in [
+            "TRUSTED_PROXY_CIDRS",
+            "INTERNAL_PROXY_TOKEN",
+            "CSRF_KEY",
+            "PLATFORM_ADMIN_HOST",
+            "TURNSTILE_SECRET",
+        ] {
+            let v: Vec<_> = PROD.iter().copied().filter(|(k, _)| *k != key).collect();
+            let e = err_of(&v);
+            assert!(e.as_deref().is_some_and(|s| s.contains(key)), "{key}");
+            let mut v2 = v.clone();
+            v2.push((key, ""));
+            assert!(err_of(&v2).is_some_and(|s| s.contains(key)), "{key} vazio");
+        }
+    }
+
+    #[test]
+    fn strict_rejects_turnstile_test_keys_without_leaking() {
+        for k in [
+            "1x00000000000000000000000000000000AA",
+            "2x0000000000000000000000000000000AA",
+            "3x0000000000000000000000000000000AA",
+        ] {
+            let mut v = PROD.to_vec();
+            v.push(("TURNSTILE_SECRET", k));
+            let e = err_of(&v);
+            assert!(
+                e.as_deref()
+                    .is_some_and(|s| s.contains("TURNSTILE_SECRET") && !s.contains(k)),
+                "{k}"
+            );
+        }
+        // Em development a chave de teste continua aceite.
+        let mut v = OK.to_vec();
+        v.push(("TURNSTILE_SECRET", "1x0000000000000000000000000000000AA"));
+        assert!(Config::from_lookup(env(&v)).is_ok());
+    }
+
+    #[test]
+    fn strict_errors_do_not_leak_values() {
+        for key in ["CSRF_KEY", "TRUSTED_PROXY_CIDRS", "TURNSTILE_SECRET"] {
+            let v: Vec<_> = PROD.iter().copied().filter(|(k, _)| *k != key).collect();
+            let e = err_of(&v).unwrap_or_default();
+            for secret in [
+                "chave-csrf",
+                "segredo1",
+                "postgres://",
+                "redis://",
+                "segredo-turnstile",
+            ] {
+                assert!(!e.contains(secret), "{key}: {secret}");
             }
         }
     }

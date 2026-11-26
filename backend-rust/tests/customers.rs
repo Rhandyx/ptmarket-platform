@@ -213,9 +213,8 @@ fn app_router_with(
     min_response: Duration,
 ) -> anyhow::Result<Router> {
     let st = state(app)?;
-    let registration =
-        Registration::new(Arc::new(FakeCaptcha), Arc::new(StaticBreach(breached)))
-            .with_min_response_for_tests(min_response);
+    let registration = Registration::new(Arc::new(FakeCaptcha), Arc::new(StaticBreach(breached)))
+        .with_min_response_for_tests(min_response);
     let sessions = Sessions::for_tests(app.clone(), redis()?, CSRF_KEY.to_owned().into(), ns, None)
         .with_internal_token(Some(INTERNAL_TOKEN.to_owned().into()))
         .with_registration(registration);
