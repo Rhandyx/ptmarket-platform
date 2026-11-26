@@ -10,6 +10,11 @@
 #   init de dev); psql corre dentro do contentor; removido no fim (trap).
 # Com MIGRATIONS_TEST_URL: usa essa BD (limpa, utilizador não superuser, bootstrap já aplicado) e o psql do
 #   host; os testes "superuser" precisam de MIGRATIONS_TEST_SUPER_URL (mesma BD, superuser).
+# 2.ª passagem (depois dos testes): numa BD NOVA, migrations até à penúltima, event-triggers.sql (superuser) e só
+#   depois a migration de número mais alto, como o migrator: prova que a migration nova passa com a L2 já ligada
+#   (como na BD de dev/produção; ex.: DDL feito com SET ROLE para um papel sem acesso a audit = 42501). Contentor:
+#   segunda BD no mesmo postgres descartável. MIGRATIONS_TEST_URL: exige MIGRATIONS_TEST_L2_URL e
+#   MIGRATIONS_TEST_L2_SUPER_URL (outra BD limpa com o bootstrap, mesmo migrator / superuser).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -45,6 +50,22 @@ if [ -n "${MIGRATIONS_TEST_URL:-}" ]; then
         echo "ERRO: com MIGRATIONS_TEST_URL é preciso psql no PATH." >&2
         exit 1
     fi
+    if [ -z "${MIGRATIONS_TEST_L2_URL:-}" ] || [ -z "${MIGRATIONS_TEST_L2_SUPER_URL:-}" ]; then
+        echo "ERRO: com MIGRATIONS_TEST_URL a 2.ª passagem (L2 ativa) precisa de MIGRATIONS_TEST_L2_URL e" >&2
+        echo "      MIGRATIONS_TEST_L2_SUPER_URL (outra BD limpa com o bootstrap; migrator / superuser)." >&2
+        exit 1
+    fi
+    L2_DB_URL="$MIGRATIONS_TEST_L2_URL"
+    prepare_l2_db() {
+        if [ "$(psql "$L2_DB_URL" -X -At -c "SELECT to_regclass('_sqlx_migrations') IS NULL
+                AND current_user = '$(psql "$DB_URL" -X -At -c 'SELECT current_user')'")" != t ]; then
+            echo "ERRO: MIGRATIONS_TEST_L2_URL tem de ser uma BD limpa (sem _sqlx_migrations) com o mesmo migrator." >&2
+            exit 1
+        fi
+    }
+    run_psql_super_l2() {
+        psql "$MIGRATIONS_TEST_L2_SUPER_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -f - <"$1"
+    }
     run_psql() { psql "$DB_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -v redaction_vectors="$VECTORS" -f - <"$1"; }
     run_psql_super() {
         if [ -z "${MIGRATIONS_TEST_SUPER_URL:-}" ]; then
@@ -114,6 +135,22 @@ SQL
         docker exec -i "$CONTAINER" psql -U postgres -d "$DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
             -v redaction_vectors="$VECTORS" -f - <"$1"
     }
+
+    # 2.ª passagem: BD nova no mesmo contentor (de template1, que já tem o bootstrap; reaplicado à BD, idempotente).
+    L2_DB_NAME="ptm_migtest_l2"
+    L2_DB_URL="postgres://ptmarket_migrator:${MIG_PASS}@127.0.0.1:${PORT}/${L2_DB_NAME}"
+    prepare_l2_db() {
+        docker exec -i "$CONTAINER" psql -U postgres -d postgres -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE $L2_DB_NAME OWNER ptmarket_migrator"
+        docker exec -i "$CONTAINER" psql -U postgres -d "$L2_DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+            -c "ALTER SCHEMA public OWNER TO ptmarket_migrator"
+        docker exec -i -e PTM_BOOTSTRAP_DBS="$L2_DB_NAME" "$CONTAINER" bash -s \
+            <"$ROOT/infra/postgres/init/03-audit-bootstrap.sh"
+    }
+    run_psql_super_l2() {
+        docker exec -i "$CONTAINER" psql -U postgres -d "$L2_DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+            -f - <"$1"
+    }
 fi
 
 echo "== sqlx migrate run --source migrations"
@@ -139,5 +176,28 @@ for t in "${tests[@]}"; do
         run_psql "$t"
     fi
 done
+
+# 2.ª passagem: a migration de número mais alto com a L2 já ativa (a 1.ª passagem liga os event triggers só no fim).
+versions=()
+while IFS= read -r v; do versions+=("$v"); done < <(
+    for f in "$MIG_DIR"/[0-9]*_*.sql; do
+        b="$(basename "$f")"
+        echo "${b%%_*}"
+    done | sort -n
+)
+if [ "${#versions[@]}" -lt 2 ]; then
+    echo "ERRO: a 2.ª passagem precisa de pelo menos 2 migrations." >&2
+    exit 1
+fi
+LAST="${versions[${#versions[@]}-1]}"
+PREV="${versions[${#versions[@]}-2]}"
+echo "== 2.ª passagem (BD nova): migrations até $PREV, event triggers da L2, depois a migration $LAST"
+prepare_l2_db
+"$SQLX" migrate run --source "$MIG_DIR" --database-url "$L2_DB_URL" --target-version "$((10#$PREV))"
+run_psql_super_l2 "$ROOT/infra/postgres/bootstrap/event-triggers.sql"
+if ! "$SQLX" migrate run --source "$MIG_DIR" --database-url "$L2_DB_URL"; then
+    echo "ERRO: migration $LAST falhou com a L2 ativa (event triggers ligados; ver o erro acima)." >&2
+    exit 1
+fi
 
 echo "TODOS OS TESTES PASSARAM"
