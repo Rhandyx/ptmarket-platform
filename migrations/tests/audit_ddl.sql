@@ -279,7 +279,8 @@ SELECT pg_temp.expect_error($q$ALTER TABLE public.ptm_ddl_app ENABLE REPLICA TRI
     'PTA04', 'app dona com ator: ENABLE REPLICA recusado');
 SELECT set_config('app.actor_type', '', true);
 -- DDL da app sem ator falha fechado (PTA01); com ator grava pelo audit_append, na cadeia da plataforma.
-SELECT pg_temp.expect_error($q$CREATE TEMP TABLE ptm_ddl_tmp1 (id int)$q$, 'PTA01', 'app: DDL sem ator → PTA01');
+-- (Na tabela de que é dona: desde a 0020 a app não tem TEMPORARY, já não cria tabelas temporárias.)
+SELECT pg_temp.expect_error($q$ALTER TABLE public.ptm_ddl_app ADD COLUMN c1 int$q$, 'PTA01', 'app: DDL sem ator → PTA01');
 RESET ROLE;
 RESET SESSION AUTHORIZATION;
 SET ROLE ptmarket_audit_writer;
@@ -289,7 +290,7 @@ SET SESSION AUTHORIZATION ptmarket_migrator;
 SET ROLE ptmarket_app;
 SELECT set_config('app.actor_type', 'merchant', true);
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000dd0aa', true);
-CREATE TEMP TABLE ptm_ddl_tmp2 (id int);
+ALTER TABLE public.ptm_ddl_app ADD COLUMN c2 int;
 SELECT pg_temp.expect_value(
     $q$SELECT (current_setting('app.current_tenant_id') = '00000000-0000-7000-8000-0000000dd0aa')::int$q$,
     1, 'app.current_tenant_id reposto depois da escrita do evento');
@@ -302,9 +303,9 @@ SELECT pg_temp.expect_value(
 SET ROLE ptmarket_audit_writer;
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM pg_temp.new_ev()
-       WHERE action = 'ddl.create_table' AND target_id LIKE 'pg_temp.ptm_ddl_tmp2' AND actor_type = 'merchant'
+       WHERE action = 'ddl.alter_table' AND target_id = 'public.ptm_ddl_app' AND actor_type = 'merchant'
          AND tenant_id IS NULL$q$,
-    1, 'DDL da app com ator: ddl.create_table como merchant, tenant NULL (cadeia da plataforma)');
+    1, 'DDL da app com ator: ddl.alter_table como merchant, tenant NULL (cadeia da plataforma)');
 RESET ROLE;
 
 -- ---------------------------------------------------------------------------

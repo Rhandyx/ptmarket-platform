@@ -62,7 +62,7 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
      migration é desfeita. O sqlx fixa o checksum da migration e o superuser fixa o texto: os dois têm de bater.
   **Cadeia linear:** cada entrada indica a anterior (`INSERT … (name, requires, sql)`; `requires` NULL só na
   primeira): `0011_db_user` → `0012_hardening` → `0013_ddl_owner_exec` → `0014_mask_limits` →
-  `0015_critical_timeline`. O bootstrap recusa
+  `0015_critical_timeline` → `0020_mask_v2`. O bootstrap recusa
   `requires` que não seja uma alteração aprovada ou uma cadeia com ramos; `audit_upgrade` recusa uma alteração cuja
   anterior não esteja em `sealed_changes_applied` nesta BD ("<nome> exige <anterior> aplicada antes").
   `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem
@@ -165,6 +165,31 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
     encomenda); tenant e `(target_type, target_id, created_at)` já existiam. A consulta da encomenda usa
     `(target_type = 'order' AND target_id = $1) OR (changes ? 'order_id' AND changes->>'order_id' = $1)` (o
     `changes ? 'order_id'` tem de estar na consulta para o índice parcial servir).
+- **Máscara v2, iban_change e tolerância explícita (0020, alteração aprovada `0020_mask_v2`, cartão 02/03e):**
+  - **Antes de aplicar a 0020 em produção: esvaziar o stream de auditoria** (o worker consome tudo e a fila morta
+    fica vazia). Um evento gravado antes da 0020 e reentregue depois pode dar `PTA03` (o dedupe compara o conteúdo
+    mascarado e a máscara nova pode mudar `reason`/`actor_label`).
+  - Máscara (vetores partilhados com o Rust e o Go em `docs/testdata/redaction-vectors.json`, só editados por este
+    cartão): chaves camelCase normalizadas (`taxId` → `tax_id`); PII de identificação antes da exceção `*_id`
+    (`tax_id`, `vat_id`, `national_id`, `niss`, `dni`, `nie`, `cif`, …); `mobile`/`cell`/`whatsapp`; `nib`,
+    `account_number`, `bank_account`, `numero_conta` como IBAN; pares `{key|name|field|path|label|type|k,
+    value|v|val}` e tuplos `["nif", "…"]`. Por valor: IBAN em qualquer caixa com espaços/NBSP/`-`/`.` e NIB de 21
+    dígitos (controlo certo) → `****` + 4 últimos; string que é só um UUID ou só uma data/hora ISO → em claro; PAN
+    (13–19 dígitos entre fronteiras de palavra, Luhn) → `"[redacted]"`; NIF PT (mód. 11), DNI/NIE ES e telefone
+    (E.164, PT nacional) → `"[pii]"`. `_chain_insert` é o **único** ponto de máscara (`audit_append_db` e
+    `audit_row_trigger` entregam `changes` em cru).
+  - `iban_change`: medido em `_chain_insert` antes da máscara (chave de classe IBAN que muda entre `before` e
+    `after`, `after` não nulo; INSERT e UPDATE, DELETE não), com prioridade sobre `critical_kind`; a action não muda
+    (`stores.update`) e o alerta sai sem `changes` nem `reason`. Dois IBAN com os mesmos 4 últimos contam.
+  - **Tolerância (cortar e marcar em vez de `PTA02`):** `_chain_insert(p_row, p_dedupe, p_tolerant)` (a de 2
+    argumentos foi apagada e sai da allowlist da `audit_seal` nesta BD); sem `pg_trigger_depth()`.
+    `audit_append_db` → sempre; `audit_append_event` → nunca; `audit_append` (a app tem EXECUTE) → só se a linha 2
+    do `PG_CONTEXT`, inteira, for `PL/pgSQL function audit.audit_(row_trigger|ddl_end|ddl_drop)() line N at
+    assignment`. Por isso as três funções chamam `v_ev := audit.audit_append(…)` e **nunca `PERFORM`**: um
+    `PERFORM` (ou EXECUTE, `query_to_xml`) corre por SPI e põe antes uma linha `SQL statement "…"` com texto
+    controlável (forjável com um alias entre aspas com quebras de linha). Ninguém cria funções em `audit.*`
+    (selagem) nem em `pg_temp`: `REVOKE TEMPORARY ON DATABASE` de PUBLIC, app, worker e price_writer (o migrator,
+    dono da BD em dev/CI, mantém; os testes criam tabelas temporárias como superuser/migrator).
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

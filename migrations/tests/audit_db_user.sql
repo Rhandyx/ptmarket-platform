@@ -420,7 +420,7 @@ SELECT pg_temp.expect_value(
     1, 'audit_events.db_user: text, sem DEFAULT');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM pg_proc p
-       WHERE p.oid IN ('audit._chain_insert(audit.audit_events,boolean)'::regprocedure,
+       WHERE p.oid IN ('audit._chain_insert(audit.audit_events,boolean,boolean)'::regprocedure, -- 03e: assinatura de 3 argumentos
                        'audit.audit_append(text,text,text,text,text,jsonb,uuid,uuid)'::regprocedure)
          AND p.prosecdef AND p.proowner = 'ptmarket_audit_writer'::regrole
          AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']$q$,

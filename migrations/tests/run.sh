@@ -15,6 +15,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MIG_DIR="$ROOT/migrations"
 
+# Vetores da máscara (docs/testdata/redaction-vectors.json; partilhados com o Rust e o Go): os testes entram por
+# stdin (no contentor), por isso o JSON chega como variável do psql (:'redaction_vectors').
+VECTORS_FILE="$ROOT/docs/testdata/redaction-vectors.json"
+if [ ! -f "$VECTORS_FILE" ]; then
+    echo "ERRO: $VECTORS_FILE em falta." >&2
+    exit 1
+fi
+VECTORS="$(cat "$VECTORS_FILE")"
+
 SQLX="$(command -v sqlx || true)"
 [ -n "$SQLX" ] || SQLX="$HOME/.cargo/bin/sqlx"
 if [ ! -x "$SQLX" ]; then
@@ -36,13 +45,14 @@ if [ -n "${MIGRATIONS_TEST_URL:-}" ]; then
         echo "ERRO: com MIGRATIONS_TEST_URL é preciso psql no PATH." >&2
         exit 1
     fi
-    run_psql() { psql "$DB_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -f - <"$1"; }
+    run_psql() { psql "$DB_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -v redaction_vectors="$VECTORS" -f - <"$1"; }
     run_psql_super() {
         if [ -z "${MIGRATIONS_TEST_SUPER_URL:-}" ]; then
             echo "ERRO: $(basename "$1") corre como superuser: defina MIGRATIONS_TEST_SUPER_URL (mesma BD)." >&2
             exit 1
         fi
-        psql "$MIGRATIONS_TEST_SUPER_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -f - <"$1"
+        psql "$MIGRATIONS_TEST_SUPER_URL" -X -q -o /dev/null -v ON_ERROR_STOP=1 -v redaction_vectors="$VECTORS" \
+            -f - <"$1"
     }
     if [ "$(psql "$DB_URL" -X -At -c "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")" != f ]; then
         echo "ERRO: MIGRATIONS_TEST_URL tem de usar um papel sem SUPERUSER/BYPASSRLS." >&2
@@ -97,10 +107,12 @@ SQL
     PORT="$(docker port "$CONTAINER" 5432/tcp | head -n1 | sed 's/.*://')"
     DB_URL="postgres://ptmarket_migrator:${MIG_PASS}@127.0.0.1:${PORT}/${DB_NAME}"
     run_psql() {
-        docker exec -i "$CONTAINER" psql -U ptmarket_migrator -d "$DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 -f - <"$1"
+        docker exec -i "$CONTAINER" psql -U ptmarket_migrator -d "$DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+            -v redaction_vectors="$VECTORS" -f - <"$1"
     }
     run_psql_super() {
-        docker exec -i "$CONTAINER" psql -U postgres -d "$DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 -f - <"$1"
+        docker exec -i "$CONTAINER" psql -U postgres -d "$DB_NAME" -X -q -o /dev/null -v ON_ERROR_STOP=1 \
+            -v redaction_vectors="$VECTORS" -f - <"$1"
     }
 fi
 

@@ -122,6 +122,8 @@ DECLARE
     v_writer  oid := to_regrole('ptmarket_audit_writer');
     v_ret     oid := to_regrole('ptmarket_audit_retention');
     -- ALLOWLIST das funções SECURITY DEFINER de audit.* (assinatura regprocedure com search_path = pg_catalog).
+    -- _chain_insert(…, boolean) só até à 0020_mask_v2 (as migrations 0008–0019 criam-na; a 0020 apaga-a e, a
+    -- partir daí, esta BD só aceita a de 3 argumentos: ver o início do corpo).
     v_allow_sig   text[] := ARRAY[
         'audit._chain_insert(audit.audit_events,boolean)',
         'audit.audit_append(text,text,text,text,text,jsonb,uuid,uuid)',
@@ -133,12 +135,14 @@ DECLARE
         'audit.audit_default_partition_rows()',
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
         'audit.audit_verify_actors(uuid,text,timestamp with time zone,timestamp with time zone)',
-        'audit.audit_guc_defaults()'
+        'audit.audit_guc_defaults()',
+        'audit._chain_insert(audit.audit_events,boolean,boolean)'
     ];
     v_allow_owner text[] := ARRAY[
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_owner',  -- cria partições: tem de ser dono das tabelas
+        'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
@@ -168,6 +172,13 @@ BEGIN
         RAISE EXCEPTION 'audit_seal: bootstrap em falta (schema audit ou papéis de auditoria)';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('ptmarket:audit_seal', 0));
+
+    -- Depois da 0020_mask_v2 nesta BD, a _chain_insert de 2 argumentos deixa de estar na allowlist (sem sobrecargas
+    -- nem regresso ao caminho tolerante por pg_trigger_depth()). A posição mantém-se (v_allow_owner).
+    IF EXISTS (SELECT 1 FROM audit_admin.sealed_changes_applied a WHERE a.name = '0020_mask_v2') THEN
+        v_allow_sig[array_position(v_allow_sig, 'audit._chain_insert(audit.audit_events,boolean)')] :=
+            '(retirada pela 0020_mask_v2)';
+    END IF;
 
     SELECT array_agg(oid) INTO v_callers
     FROM pg_catalog.pg_roles
@@ -1549,6 +1560,1129 @@ BEGIN
 END
 $body$;
 $chg_0015$);
+
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0020_mask_v2 (cartão 02/03e). Disparada por migrations/0020_audit_mask_v2.sql. Exige 0015.
+--   Máscara v2: chaves camelCase → snake_case antes de comparar (taxId → tax_id, cardPan → card_pan); PII de
+--     identificação ANTES da exceção *_id (tax_id, vat_id, national_id, niss, dni, nie, cif, …); PII + mobile,
+--     cell, whatsapp; classe 'iban' + nib, account_number, bank_account, numero_conta. Pares com etiqueta em
+--     key|name|field|path|label|type|k e valor em value|v|val (path: último segmento); tuplos ["nif", "…"].
+--     Por valor: IBAN em qualquer caixa com espaços/NBSP/"-"/"." e NIB de 21 dígitos (controlo certo) → ****4
+--     últimos; só UUID ou só data/hora ISO → em claro; PAN com Luhn → "[redacted]"; NIF PT (mód. 11), DNI/NIE
+--     ES e telefone (E.164 e PT nacional) → "[pii]".
+--   _chain_insert(p_row, p_dedupe, p_tolerant): ÚNICO ponto de máscara (audit_append_db e audit_row_trigger
+--     entregam changes em cru); iban_change medido antes da máscara (chave de classe 'iban' que muda em
+--     before/after, after não nulo), com prioridade sobre critical_kind. A de 2 argumentos é apagada (a selagem
+--     deixa de a aceitar nesta BD); sem pg_trigger_depth(): audit_append_db → tolerante; audit_append_event → não;
+--     audit_append → só se a linha 2 do PG_CONTEXT for a atribuição da L1/L2 (audit_row_trigger, audit_ddl_end e
+--     audit_ddl_drop chamam-na com v_ev := …, nunca PERFORM: sem a linha 'SQL statement' controlável).
+--   REVOKE TEMPORARY na BD atual de PUBLIC, app, worker e price_writer (ninguém cria funções em pg_temp).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0020_mask_v2', '0015_critical_timeline', $chg_0020$
+-- _chain_insert com 3 argumentos: o caminho tolerante é decidido por quem chama (audit_append_db → true;
+-- audit_append_event → false; audit_append → true só chamado pela L1/L2). Criada ANTES de mudar quem chama e de
+-- apagar a de 2 argumentos: cada DDL deste bloco passa pela L2 (audit_append_db) e nunca encontra a cadeia partida.
+CREATE FUNCTION audit._chain_insert(p_row audit.audit_events, p_dedupe boolean, p_tolerant boolean)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row     audit.audit_events := p_row;
+    v_content bytea;
+    v_found   bigint;
+    v_same    bigint;
+    v_size    bigint;
+    v_deep    boolean;
+    v_over    boolean;
+    v_text    text;
+    v_iban    boolean := false;
+    v_kind    text;
+    v_payload jsonb;
+BEGIN
+    -- Quem está ligado (LOGIN), não o papel assumido: ignora o que vier em p_row.
+    v_row.db_user := session_user;
+
+    -- Limites, medidos ANTES da máscara. NUL nunca chega aqui: o PostgreSQL recusa chr(0) em text e \u0000 em jsonb.
+    v_size := COALESCE(octet_length(v_row.changes::text), 0);
+    v_deep := v_row.changes IS NOT NULL AND jsonb_path_exists(v_row.changes,
+                  'strict $.**{16} ? (@.type() == "object" || @.type() == "array")'::jsonpath);
+    v_over := v_size > 65536 OR v_deep
+              OR COALESCE(char_length(v_row.reason), 0) > 1024
+              OR COALESCE(char_length(v_row.target_id), 0) > 256
+              OR COALESCE(char_length(v_row.actor_label), 0) > 128;
+    -- A auditoria nunca faz falhar uma escrita de negócio nem uma migration: o caminho tolerante (db, L1, L2) segue
+    -- e é cortado abaixo. Eventos da aplicação → PTA02 com mensagem fixa (nunca o valor), nada gravado.
+    IF v_over AND NOT COALESCE(p_tolerant, false) THEN
+        IF v_size > 65536 THEN
+            RAISE EXCEPTION '_chain_insert: changes acima de 64 KiB' USING ERRCODE = 'PTA02';
+        END IF;
+        IF v_deep THEN
+            RAISE EXCEPTION '_chain_insert: changes com profundidade acima de 16' USING ERRCODE = 'PTA02';
+        END IF;
+        IF char_length(v_row.reason) > 1024 THEN
+            RAISE EXCEPTION '_chain_insert: reason acima de 1024 caracteres' USING ERRCODE = 'PTA02';
+        END IF;
+        IF char_length(v_row.target_id) > 256 THEN
+            RAISE EXCEPTION '_chain_insert: target_id acima de 256 caracteres' USING ERRCODE = 'PTA02';
+        END IF;
+        RAISE EXCEPTION '_chain_insert: actor_label acima de 128 caracteres' USING ERRCODE = 'PTA02';
+    END IF;
+
+    -- iban_change, medido ANTES da máscara (dois IBAN com os mesmos 4 últimos são diferentes): uma chave de classe
+    -- 'iban' em before ∪ after com before->k IS DISTINCT FROM after->k e after->k não nulo (INSERT e UPDATE; DELETE não).
+    IF jsonb_typeof(v_row.changes) = 'object' THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM (SELECT b.k FROM jsonb_object_keys(CASE WHEN jsonb_typeof(v_row.changes -> 'before') = 'object'
+                                                         THEN v_row.changes -> 'before' ELSE '{}'::jsonb END) AS b(k)
+                  UNION
+                  SELECT a.k FROM jsonb_object_keys(CASE WHEN jsonb_typeof(v_row.changes -> 'after') = 'object'
+                                                         THEN v_row.changes -> 'after' ELSE '{}'::jsonb END) AS a(k)) AS s
+            WHERE audit._redact_key(s.k::text) = 'iban'
+              AND (v_row.changes -> 'before' -> s.k) IS DISTINCT FROM (v_row.changes -> 'after' -> s.k)
+              AND NULLIF(v_row.changes -> 'after' -> s.k, 'null'::jsonb) IS NOT NULL)
+          INTO v_iban;
+    END IF;
+
+    -- Máscara em todos os caminhos (app, worker, db): ÚNICO ponto de máscara (quem chama entrega em cru);
+    -- idempotente. reason e actor_label: máscara por valor.
+    v_row.changes     := audit.audit_redact(v_row.target_type::text, v_row.changes);
+    v_row.reason      := audit._redact_text(v_row.reason::text);
+    v_row.actor_label := audit._redact_text(v_row.actor_label::text);
+
+    -- Só no caminho tolerante (L1/L2/db): cortar e marcar, nunca falhar.
+    IF v_over THEN
+        IF char_length(v_row.target_id) > 256 THEN
+            v_row.target_id := left(v_row.target_id, 180) || '…sha256:'
+                               || encode(sha256(convert_to(v_row.target_id, 'UTF8')), 'hex');
+        END IF;
+        IF char_length(v_row.reason) > 1024 THEN
+            v_row.reason := left(v_row.reason, 1012) || '…[truncated]';
+        END IF;
+        IF char_length(v_row.actor_label) > 128 THEN
+            v_row.actor_label := left(v_row.actor_label, 116) || '…[truncated]';
+        END IF;
+        IF octet_length(v_row.changes::text) > 65536 THEN
+            v_row.changes := audit._truncate_leaves(v_row.changes);
+            v_text := v_row.changes::text;
+            IF octet_length(v_text) > 65536 THEN
+                v_row.changes := jsonb_build_object('truncated', true, 'bytes', octet_length(v_text),
+                                     'sha256', encode(sha256(convert_to(v_text, 'UTF8')), 'hex'));
+            END IF;
+        END IF;
+    END IF;
+
+    v_row.chain_key       := COALESCE(v_row.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid);
+    v_row.retention_class := audit.audit_retention_class(v_row.action::text, v_row.outcome::text);
+
+    INSERT INTO audit.audit_chain_heads (chain_key, retention_class, last_seq, last_hash)
+    VALUES (v_row.chain_key, v_row.retention_class, 0, decode(repeat('00', 32), 'hex'))
+    ON CONFLICT DO NOTHING;
+
+    SELECT h.last_seq + 1, h.last_hash INTO STRICT v_row.chain_seq, v_row.prev_hash
+    FROM audit.audit_chain_heads h
+    WHERE h.chain_key = v_row.chain_key
+      AND h.retention_class = v_row.retention_class
+    FOR UPDATE;
+
+    -- Reentrega (mesmo conteúdo) → NULL; id reutilizado com outro conteúdo → PTA03 (nunca em silêncio).
+    IF p_dedupe THEN
+        v_content := audit._event_content_hash(v_row);
+        SELECT count(*), count(*) FILTER (WHERE audit._event_content_hash(e) = v_content)
+          INTO v_found, v_same
+          FROM audit.audit_events e
+         WHERE e.id = v_row.id
+           AND e.created_at >= v_row.occurred_at - interval '1 day';
+        IF v_same > 0 THEN
+            RETURN NULL;
+        END IF;
+        IF v_found > 0 THEN
+            RAISE EXCEPTION '_chain_insert: id já gravado com conteúdo diferente'
+                USING ERRCODE = 'PTA03';
+        END IF;
+    END IF;
+
+    v_row.created_at  := clock_timestamp();
+    v_row.occurred_at := COALESCE(v_row.occurred_at, v_row.created_at);
+    v_row.id          := COALESCE(v_row.id, uuidv7());
+    v_row.hash        := audit._event_hash(v_row);
+
+    INSERT INTO audit.audit_events (
+        id, tenant_id, chain_key, store_id, actor_type, actor_id, actor_label, impersonator_id,
+        action, target_type, target_id, outcome, reason, changes, request_id, ip, user_agent_hash,
+        retention_class, occurred_at, created_at, chain_seq, prev_hash, hash, db_user
+    ) VALUES (
+        v_row.id, v_row.tenant_id, v_row.chain_key, v_row.store_id, v_row.actor_type, v_row.actor_id,
+        v_row.actor_label, v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id,
+        v_row.outcome, v_row.reason, v_row.changes, v_row.request_id, v_row.ip, v_row.user_agent_hash,
+        v_row.retention_class, v_row.occurred_at, v_row.created_at, v_row.chain_seq, v_row.prev_hash,
+        v_row.hash, v_row.db_user
+    );
+
+    UPDATE audit.audit_chain_heads
+       SET last_seq = v_row.chain_seq, last_hash = v_row.hash
+     WHERE chain_key = v_row.chain_key
+       AND retention_class = v_row.retention_class;
+
+    -- Alerta (export WORM + Telegram/Discord no cartão 09): admin, impersonação ou evento crítico.
+    -- Payload = linha já mascarada; iban_change sem changes nem reason (o IBAN nunca, nem mascarado).
+    -- iban_change pelas chaves (acima) tem prioridade sobre critical_kind; a action não muda (ex.: stores.update).
+    v_kind := CASE WHEN v_iban THEN 'iban_change'
+                   ELSE audit.critical_kind(v_row.action::text, v_row.outcome::text, v_row.actor_type::text) END;
+    IF v_row.actor_type = 'admin' OR v_row.impersonator_id IS NOT NULL OR v_kind IS NOT NULL THEN
+        v_payload := to_jsonb(v_row) || jsonb_build_object(
+            'prev_hash', encode(v_row.prev_hash, 'hex'),
+            'hash', encode(v_row.hash, 'hex'),
+            'user_agent_hash', encode(v_row.user_agent_hash, 'hex'));
+        IF v_kind = 'iban_change' THEN
+            v_payload := v_payload - ARRAY['changes', 'reason']::text[];
+        END IF;
+        INSERT INTO audit.audit_alerts (id, created_at, event_type, kind, payload)
+        VALUES (
+            v_row.id, v_row.created_at,
+            CASE WHEN v_kind IS NULL THEN 'audit.superadmin_action' ELSE 'audit.critical' END,
+            v_kind, v_payload
+        );
+    END IF;
+
+    RETURN v_row.id;
+END
+$body$;
+REVOKE ALL ON FUNCTION audit._chain_insert(audit.audit_events, boolean, boolean) FROM PUBLIC;
+-- Já do writer (a selagem fá-lo-ia no fim): com a L2 ativa, cada DDL seguinte deste bloco grava por audit_append_db
+-- (DEFINER do writer), que passa a chamar esta função logo a seguir.
+ALTER FUNCTION audit._chain_insert(audit.audit_events, boolean, boolean) OWNER TO ptmarket_audit_writer;
+
+CREATE OR REPLACE FUNCTION audit.audit_append_db(
+    p_action      text,
+    p_target_type text,
+    p_target_id   text,
+    p_changes     jsonb,
+    p_tenant_id   uuid,
+    p_store_id    uuid
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '2s'
+AS $body$
+DECLARE
+    v_row audit.audit_events;
+BEGIN
+    v_row.actor_type  := 'db';
+    v_row.actor_label := session_user;
+    v_row.tenant_id   := COALESCE(p_tenant_id,
+                                  NULLIF(current_setting('app.current_tenant_id', true), '')::uuid);
+    v_row.store_id    := p_store_id;
+    v_row.action      := p_action;
+    v_row.target_type := p_target_type;
+    v_row.target_id   := p_target_id;
+    v_row.outcome     := 'success';
+    v_row.changes     := p_changes; -- em cru: _chain_insert mede (limites, iban_change) e mascara
+
+    -- Caminho tolerante: as mutações do migrator/superuser e a L2 nunca falham por causa da auditoria.
+    RETURN audit._chain_insert(v_row, false, true);
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_append(
+    p_action      text,
+    p_target_type text,
+    p_target_id   text,
+    p_outcome     text,
+    p_reason      text,
+    p_changes     jsonb,
+    p_store_id    uuid,
+    p_tenant_id   uuid DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '2s'
+AS $body$
+DECLARE
+    v_row        audit.audit_events;
+    v_actor      text;
+    v_ctx_tenant uuid;
+    v_ctx        text;
+    v_tolerant   boolean;
+BEGIN
+    v_actor := NULLIF(current_setting('app.actor_type', true), '');
+    IF v_actor IS NULL THEN
+        RAISE EXCEPTION 'audit_append: app.actor_type em falta (ator obrigatório)'
+            USING ERRCODE = 'PTA01';
+    END IF;
+    -- 'db' só nasce em audit_append_db (trigger L1); a app nunca o escolhe. Lista fechada (CHECK sem 'db').
+    IF v_actor NOT IN ('customer', 'merchant', 'municipal', 'admin', 'system', 'api_key', 'anonymous') THEN
+        RAISE EXCEPTION 'audit_append: app.actor_type inválido'
+            USING ERRCODE = 'PTA01';
+    END IF;
+    v_row.actor_type      := v_actor;
+    v_row.actor_id        := NULLIF(current_setting('app.actor_id', true), '')::uuid;
+    v_row.actor_label     := NULLIF(current_setting('app.actor_label', true), '');
+    v_row.impersonator_id := NULLIF(current_setting('app.impersonator_id', true), '')::uuid;
+    v_row.request_id      := NULLIF(current_setting('app.request_id', true), '')::uuid;
+    v_row.ip              := NULLIF(current_setting('app.ip', true), '')::inet;
+    v_row.user_agent_hash := decode(NULLIF(current_setting('app.user_agent_hash', true), ''), 'hex');
+
+    v_ctx_tenant := NULLIF(current_setting('app.current_tenant_id', true), '')::uuid;
+    IF p_tenant_id IS NOT NULL THEN
+        IF v_row.actor_type <> 'system' THEN
+            RAISE EXCEPTION 'audit_append: p_tenant_id só é aceite com app.actor_type = system';
+        END IF;
+        IF v_ctx_tenant IS NOT NULL AND v_ctx_tenant <> p_tenant_id THEN
+            RAISE EXCEPTION 'audit_append: p_tenant_id difere de app.current_tenant_id';
+        END IF;
+    END IF;
+    v_row.tenant_id := COALESCE(v_ctx_tenant, p_tenant_id);
+
+    v_row.store_id    := p_store_id;
+    v_row.action      := p_action;
+    v_row.target_type := p_target_type;
+    v_row.target_id   := p_target_id;
+    v_row.outcome     := p_outcome;
+    v_row.reason      := p_reason;
+    v_row.changes     := p_changes;
+
+    -- Caminho tolerante (cortar e marcar acima dos limites) só para a L1/L2: a linha 2 do PG_CONTEXT (o chamador
+    -- imediato), inteira, tem de ser a atribuição de audit_row_trigger/audit_ddl_end/audit_ddl_drop. Um chamador por
+    -- SPI (EXECUTE, query_to_xml, PERFORM) põe aí 'SQL statement "…"' (texto controlável, nunca aceite); um DO põe
+    -- 'inline_code_block'. A app tem EXECUTE aqui, por isso não é um parâmetro; ninguém cria funções em audit.*
+    -- (selagem) nem em pg_temp (sem TEMPORARY).
+    GET DIAGNOSTICS v_ctx = PG_CONTEXT;
+    v_tolerant := COALESCE(split_part(v_ctx, E'\n', 2)
+                  ~ '^PL/pgSQL function audit\.audit_(row_trigger|ddl_end|ddl_drop)\(\) line [0-9]+ at assignment$', false);
+
+    RETURN audit._chain_insert(v_row, false, v_tolerant);
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_append_event(p_event jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row      audit.audit_events;
+    v_bad      text;
+    v_key      text;
+    v_occurred text;
+    v_ua       text;
+    v_lock     text;
+    v_ok       boolean;
+BEGIN
+    IF p_event IS NULL OR jsonb_typeof(p_event) <> 'object' THEN
+        RAISE EXCEPTION 'audit_append_event: o evento tem de ser um objeto JSON'
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM jsonb_object_keys(p_event) AS k
+    WHERE k <> ALL (ARRAY[
+        'id', 'tenant_id', 'store_id', 'actor_type', 'actor_id', 'actor_label', 'impersonator_id',
+        'action', 'target_type', 'target_id', 'outcome', 'reason', 'changes', 'request_id', 'ip',
+        'user_agent_hash', 'occurred_at']);
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: chave(s) desconhecida(s): %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM unnest(ARRAY['id', 'actor_type', 'action', 'outcome', 'request_id', 'occurred_at']) AS k
+    WHERE jsonb_typeof(p_event -> k) IS DISTINCT FROM 'string';
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: campo(s) obrigatório(s) em falta ou não texto: %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM unnest(ARRAY[
+        'tenant_id', 'store_id', 'actor_id', 'actor_label', 'impersonator_id', 'target_type',
+        'target_id', 'reason', 'ip', 'user_agent_hash']) AS k
+    WHERE jsonb_typeof(p_event -> k) NOT IN ('string', 'null');
+    IF jsonb_typeof(p_event -> 'changes') NOT IN ('object', 'null') THEN
+        v_bad := concat_ws(', ', v_bad, 'changes');
+    END IF;
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: campo(s) com tipo errado: %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    -- Conversões: qualquer erro de dados (22xxx) passa a PTA02 com a chave e o SQLSTATE, nunca o SQLERRM
+    -- (os erros de conversão citam o valor, que pode ser pessoal).
+    BEGIN
+        v_key := 'id';              v_row.id              := (p_event ->> 'id')::uuid;
+        v_key := 'tenant_id';       v_row.tenant_id       := (p_event ->> 'tenant_id')::uuid;
+        v_key := 'store_id';        v_row.store_id        := (p_event ->> 'store_id')::uuid;
+        v_key := 'actor_type';      v_row.actor_type      := p_event ->> 'actor_type';
+        v_key := 'actor_id';        v_row.actor_id        := (p_event ->> 'actor_id')::uuid;
+        v_key := 'actor_label';     v_row.actor_label     := p_event ->> 'actor_label';
+        v_key := 'impersonator_id'; v_row.impersonator_id := (p_event ->> 'impersonator_id')::uuid;
+        v_key := 'action';          v_row.action          := p_event ->> 'action';
+        v_key := 'target_type';     v_row.target_type     := p_event ->> 'target_type';
+        v_key := 'target_id';       v_row.target_id       := p_event ->> 'target_id';
+        v_key := 'outcome';         v_row.outcome         := p_event ->> 'outcome';
+        v_key := 'reason';          v_row.reason          := p_event ->> 'reason';
+        v_key := 'changes';         v_row.changes         := CASE WHEN jsonb_typeof(p_event -> 'changes') = 'object'
+                                                                  THEN p_event -> 'changes' END;
+        v_key := 'request_id';      v_row.request_id      := (p_event ->> 'request_id')::uuid;
+        v_key := 'ip';              v_row.ip              := (p_event ->> 'ip')::inet;
+
+        v_key := 'user_agent_hash';
+        v_ua := p_event ->> 'user_agent_hash';
+        IF v_ua IS NOT NULL THEN
+            IF v_ua !~ '^([0-9a-fA-F]{2})+$' THEN
+                RAISE EXCEPTION 'user_agent_hash não é hexadecimal' USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+            v_row.user_agent_hash := decode(lower(v_ua), 'hex');
+        END IF;
+
+        v_key := 'occurred_at';
+        v_occurred := p_event ->> 'occurred_at';
+        IF v_occurred !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})$' THEN
+            RAISE EXCEPTION 'occurred_at não é RFC 3339' USING ERRCODE = 'invalid_datetime_format';
+        END IF;
+        v_row.occurred_at := v_occurred::timestamptz;
+    EXCEPTION WHEN data_exception THEN
+        RAISE EXCEPTION 'audit_append_event: valor inválido no contrato (chave %, SQLSTATE %)', v_key, SQLSTATE
+            USING ERRCODE = 'PTA02';
+    END;
+
+    IF uuid_extract_version(v_row.id) IS DISTINCT FROM 7 THEN
+        RAISE EXCEPTION 'audit_append_event: id tem de ser uuidv7' USING ERRCODE = 'PTA02';
+    END IF;
+    -- 'db' é exclusivo do trigger genérico (mutação na própria BD); nunca vem do stream.
+    IF v_row.actor_type NOT IN ('customer', 'merchant', 'municipal', 'admin', 'api_key', 'anonymous', 'system') THEN
+        RAISE EXCEPTION 'audit_append_event: actor_type inválido' USING ERRCODE = 'PTA02';
+    END IF;
+    IF v_row.outcome NOT IN ('success', 'denied', 'error') THEN
+        RAISE EXCEPTION 'audit_append_event: outcome inválido' USING ERRCODE = 'PTA02';
+    END IF;
+    IF char_length(v_row.action) NOT BETWEEN 1 AND 96 THEN
+        RAISE EXCEPTION 'audit_append_event: action vazia ou com mais de 96 caracteres' USING ERRCODE = 'PTA02';
+    END IF;
+    IF char_length(v_row.target_type) > 64 THEN
+        RAISE EXCEPTION 'audit_append_event: target_type com mais de 64 caracteres' USING ERRCODE = 'PTA02';
+    END IF;
+    IF v_row.occurred_at > now() + interval '5 minutes' OR v_row.occurred_at < now() - interval '7 days' THEN
+        RAISE EXCEPTION 'audit_append_event: occurred_at fora de [now() - 7 dias, now() + 5 min]'
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    -- lock_timeout 2s só durante a escrita (como audit_append). No corpo e não em SET da função: o efeito é o
+    -- mesmo (repõe-se no fim; num erro a (sub)transação desfaz o set_config local).
+    v_lock := current_setting('lock_timeout');
+    PERFORM set_config('lock_timeout', '2s', true);
+    -- Cadeia, hash, máscara, idempotência (mesmo conteúdo ⇒ NULL; outro ⇒ PTA03) e alerta: _chain_insert.
+    v_ok := audit._chain_insert(v_row, true, false) IS NOT NULL;
+    PERFORM set_config('lock_timeout', v_lock, true);
+    RETURN v_ok;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_row_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_actor   text    := NULLIF(current_setting('app.actor_type', true), '');
+    v_is_app  boolean := current_user IN ('ptmarket_app', 'ptmarket_worker', 'ptmarket_price_writer');
+    v_action  text    := TG_TABLE_NAME || '.' || lower(TG_OP);
+    v_key     text    := COALESCE(TG_ARGV[0], 'id');
+    v_old     jsonb;
+    v_new     jsonb;
+    v_row     jsonb;
+    v_before  jsonb;
+    v_after   jsonb;
+    v_changes jsonb;
+    v_target  text;
+    v_tenant  uuid;
+    v_store   uuid;
+    v_ev      uuid;
+BEGIN
+    IF v_is_app AND v_actor IS NULL THEN
+        RAISE EXCEPTION 'mutação sem ator: % por %', v_action, current_user
+            USING ERRCODE = 'PTA01';
+    END IF;
+
+    IF TG_LEVEL = 'ROW' THEN
+        IF TG_OP <> 'INSERT' THEN
+            v_old := to_jsonb(OLD);
+        END IF;
+        IF TG_OP <> 'DELETE' THEN
+            v_new := to_jsonb(NEW);
+        END IF;
+        v_row := COALESCE(v_new, v_old);
+
+        IF TG_OP = 'INSERT' THEN
+            v_changes := jsonb_build_object('after', v_new);
+        ELSIF TG_OP = 'DELETE' THEN
+            v_changes := jsonb_build_object('before', v_old);
+        ELSE
+            SELECT jsonb_object_agg(k.key, v_old -> k.key), jsonb_object_agg(k.key, v_new -> k.key)
+              INTO v_before, v_after
+              FROM jsonb_object_keys(v_new) AS k(key)
+             WHERE (v_old -> k.key) IS DISTINCT FROM (v_new -> k.key);
+            IF v_before IS NULL THEN
+                RETURN NULL; -- UPDATE sem diferenças: sem evento
+            END IF;
+            v_changes := jsonb_build_object('before', v_before, 'after', v_after);
+        END IF;
+
+        v_target := v_row ->> v_key;
+        v_tenant := CASE WHEN TG_TABLE_NAME = 'tenants' THEN (v_row ->> 'id')::uuid
+                         ELSE (v_row ->> 'tenant_id')::uuid END;
+        v_store  := CASE WHEN TG_TABLE_NAME = 'stores' THEN (v_row ->> 'id')::uuid
+                         ELSE (v_row ->> 'store_id')::uuid END;
+    END IF;
+
+    IF v_is_app THEN
+        -- audit_append só aceita p_tenant_id com ator 'system' (os outros usam o tenant do contexto).
+        -- changes em cru: _chain_insert mede (limites, iban_change) e mascara. Atribuição (expressão simples, sem
+        -- SPI): a linha 2 do PG_CONTEXT em audit_append é exatamente 'PL/pgSQL function audit.audit_row_trigger()
+        -- line N at assignment' (caminho tolerante da L1). Um PERFORM poria antes uma linha 'SQL statement "…"'.
+        v_ev := audit.audit_append(
+            v_action::text, TG_TABLE_NAME::text, v_target::text, 'success'::text, NULL::text,
+            v_changes::jsonb, v_store::uuid,
+            CASE WHEN v_actor = 'system' THEN v_tenant END::uuid);
+    ELSE
+        PERFORM audit.audit_append_db(
+            v_action::text, TG_TABLE_NAME::text, v_target::text, v_changes::jsonb, v_tenant::uuid, v_store::uuid);
+    END IF;
+
+    RETURN NULL;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit._redact_key(p_key text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT CASE
+        WHEN n.k ~ '(password|passw|pwd|senha|palavra.?passe|segredo|secret|token|credential|passkey|split_key|api.?key|access.?key|chave|private|otp|totp|cvv|cvc|(^|[_-])pan($|[_-])|authorization|bearer|jwt|cookie|session|signature|hmac|pin$|card.?number|cartao|passport|passaporte|_enc$|_hash$)'
+            THEN 'secret'
+        WHEN n.k ~ '(iban|(^|[_-])nib($|[_-])|account.?number|bank.?account|numero.?conta)'
+            THEN 'iban'
+        WHEN n.k ~ '((tax|vat|fiscal|national|citizen|taxpayer|social.?security)[_-]?(id|number|no|num|code)$|(^|[_-])(niss|dni|nie|cif)($|[_-]))'
+            THEN 'pii'
+        WHEN n.k ~ '_id$'
+            THEN 'id'
+        WHEN n.k ~ '(email|phone|telefone|telemovel|mobile|(^|[_-])cell|whatsapp|nif|nipc|vat_number|contribuinte|name$|full_name|first_name|last_name|nome|apelido|address|morada|street|postal|zip|birth|nascimento|ip$)'
+            THEN 'pii'
+    END
+    FROM (SELECT lower(translate(regexp_replace(p_key, '([a-z0-9])([A-Z])', '\1_\2', 'g'),
+                 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇáàâãäéèêëíìîïóòôõöúùûüç',
+                 'AAAAAEEEEIIIIOOOOOUUUUCaaaaaeeeeiiiiooooouuuuc')) AS k) AS n
+$body$;
+
+CREATE OR REPLACE FUNCTION audit._redact_text(p_value text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_out  text := p_value;
+    v_m    text;
+    v_a    text[];
+    v_d    text;
+    v_g    text[];
+    v_acc  text;
+    v_i    integer;
+    v_j    integer;
+    v_k    integer;
+    v_x    integer;
+    v_sum  integer;
+    v_n    bigint;
+BEGIN
+    -- 1. Marcadores já postos.
+    IF p_value IS NULL OR p_value IN ('[redacted]', '[pii]', '[depth]') THEN
+        RETURN p_value;
+    END IF;
+    -- 2. JWT (três segmentos base64url), prefixos de chaves de API.
+    IF p_value ~ '\meyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.'
+       OR p_value ~ '[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}'
+       OR p_value ~ '\m(sk_|rk_|ghp_|pk_live_|xox[bp]-)[A-Za-z0-9]'
+       OR p_value ~ '\mAKIA[0-9A-Z]{16}' THEN
+        RETURN '[redacted]';
+    END IF;
+    -- 3. E-mail.
+    IF p_value ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' THEN
+        RETURN '[pii]';
+    END IF;
+    -- 4. IBAN no sítio (qualquer caixa; entre grupos: espaço(s), NBSP, "-" ou ".") → ****4 últimos.
+    FOR v_m IN
+        SELECT m[1]
+        FROM regexp_matches(v_out,
+            '\m([A-Za-z]{2}[0-9]{2}(?:[A-Za-z0-9]{11,30}|(?:(?: +| |-|\.)[A-Za-z0-9]{4}){2,7}(?:(?: +| |-|\.)[A-Za-z0-9]{1,4})?)|[Pp][Tt]50(?:(?: +| |-|\.)?[0-9]){21})\M',
+            'g') AS m
+    LOOP
+        v_out := replace(v_out, v_m, '****' || right(regexp_replace(v_m, '[^A-Za-z0-9]', '', 'g'), 4));
+    END LOOP;
+    -- 5. NIB PT: 21 dígitos (mesmos separadores) com os 2 dígitos de controlo certos → ****4 últimos.
+    FOR v_m IN
+        SELECT m[1]
+        FROM regexp_matches(v_out, '\m([0-9](?:(?: +| |-|\.)?[0-9]){20})\M', 'g') AS m
+    LOOP
+        v_d := regexp_replace(v_m, '[^0-9]', '', 'g');
+        IF 98 - ((left(v_d, 19)::numeric * 100) % 97) = right(v_d, 2)::numeric THEN
+            v_out := replace(v_out, v_m, '****' || right(v_d, 4));
+        END IF;
+    END LOOP;
+    -- 6. Só um UUID ou só uma data/hora ISO 8601: como está (um UUID só de dígitos passaria no Luhn).
+    IF v_out ~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+       OR v_out ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}([Tt ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.,][0-9]+)?)?([Zz]|[+-][0-9]{2}(:?[0-9]{2})?)?)?$' THEN
+        RETURN v_out;
+    END IF;
+    -- 7. PAN: 13–19 dígitos (espaço ou "-" entre eles) com Luhn válido, entre fronteiras de palavra (não dentro de
+    --    um hash hexadecimal). Por grupos contíguos da sequência (um PAN seguido de outros números também conta).
+    FOR v_m IN SELECT m[1] FROM regexp_matches(v_out, '\m([0-9](?:[ -]?[0-9])*)\M', 'g') AS m LOOP
+        CONTINUE WHEN length(v_m) < 13;
+        v_g := regexp_split_to_array(v_m, '[ -]');
+        FOR v_i IN 1 .. cardinality(v_g) LOOP
+            v_acc := '';
+            FOR v_j IN v_i .. cardinality(v_g) LOOP
+                v_acc := v_acc || v_g[v_j];
+                EXIT WHEN length(v_acc) > 19;
+                CONTINUE WHEN length(v_acc) < 13;
+                v_sum := 0;
+                FOR v_k IN 1 .. length(v_acc) LOOP
+                    v_x := substr(v_acc, length(v_acc) - v_k + 1, 1)::integer;
+                    IF v_k % 2 = 0 THEN
+                        v_x := v_x * 2;
+                        IF v_x > 9 THEN
+                            v_x := v_x - 9;
+                        END IF;
+                    END IF;
+                    v_sum := v_sum + v_x;
+                END LOOP;
+                IF v_sum % 10 = 0 THEN
+                    RETURN '[redacted]';
+                END IF;
+            END LOOP;
+        END LOOP;
+    END LOOP;
+    -- 8. NIF PT: 9 dígitos entre fronteiras de palavra ("PT" opcional), 1.º ≠ 0, controlo módulo 11.
+    FOR v_m IN SELECT m[1] FROM regexp_matches(v_out, '\m(?:[Pp][Tt])?([1-9][0-9]{8})\M', 'g') AS m LOOP
+        v_sum := 0;
+        FOR v_k IN 1 .. 8 LOOP
+            v_sum := v_sum + substr(v_m, v_k, 1)::integer * (10 - v_k);
+        END LOOP;
+        v_sum := v_sum % 11;
+        IF (CASE WHEN v_sum < 2 THEN 0 ELSE 11 - v_sum END) = substr(v_m, 9, 1)::integer THEN
+            RETURN '[pii]';
+        END IF;
+    END LOOP;
+    -- 9. DNI (8 dígitos + letra) / NIE (X/Y/Z + 7 dígitos + letra) ES: letra = tabela[n mod 23].
+    FOR v_a IN SELECT m FROM regexp_matches(v_out, '\m([XYZxyz]?)([0-9]{7,8})([A-Za-z])\M', 'g') AS m LOOP
+        IF (v_a[1] = '' AND length(v_a[2]) = 8) OR (v_a[1] <> '' AND length(v_a[2]) = 7) THEN
+            v_n := (translate(upper(v_a[1]), 'XYZ', '012') || v_a[2])::bigint;
+            IF substr('TRWAGMYFPDXBNJZSQVHLCKE', (v_n % 23)::integer + 1, 1) = upper(v_a[3]) THEN
+                RETURN '[pii]';
+            END IF;
+        END IF;
+    END LOOP;
+    -- 10. Telefone: E.164 ("+" ou "00" + 8–15 dígitos; separadores espaço . - ( )) e PT nacional (9 dígitos a
+    --     começar por 2 ou 9, com ou sem grupos de 3).
+    FOR v_m IN
+        SELECT m[1] FROM regexp_matches(v_out, '(?:\+|(?:^|[^0-9A-Za-z_])00)((?:[ .()-]*[0-9])+)', 'g') AS m
+    LOOP
+        v_acc := '';
+        FOREACH v_d IN ARRAY regexp_split_to_array(v_m, '[ .()-]+') LOOP
+            v_acc := v_acc || v_d;
+            IF length(v_acc) BETWEEN 8 AND 15 THEN
+                RETURN '[pii]';
+            END IF;
+        END LOOP;
+    END LOOP;
+    IF v_out ~ '\m[29][0-9]{2}(?:[ .-]?[0-9]{3}){2}\M' THEN
+        RETURN '[pii]';
+    END IF;
+    RETURN v_out;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit._redact_node(p_table text, p_value jsonb, p_level text, p_depth integer)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_pair text;
+    v_cls  text;
+BEGIN
+    CASE jsonb_typeof(p_value)
+    WHEN 'string' THEN
+        RETURN to_jsonb(audit._redact_text(p_value #>> '{}'));
+    WHEN 'array' THEN
+        IF p_depth > 16 THEN
+            RETURN '"[depth]"'::jsonb;
+        END IF;
+        -- Tuplo ["etiqueta", escalar]: a etiqueta (segredo/IBAN/PII) decide a máscara do 2.º elemento.
+        IF jsonb_array_length(p_value) = 2 AND jsonb_typeof(p_value -> 0) = 'string'
+           AND jsonb_typeof(p_value -> 1) IN ('string', 'number', 'boolean') THEN
+            v_cls := audit._redact_key(p_value ->> 0);
+            IF v_cls IN ('secret', 'iban', 'pii') THEN
+                RETURN jsonb_build_array(
+                    to_jsonb(audit._redact_text(p_value ->> 0)),
+                    CASE
+                        WHEN v_cls = 'secret' THEN '"[redacted]"'::jsonb
+                        WHEN v_cls = 'pii' THEN '"[pii]"'::jsonb
+                        WHEN jsonb_typeof(p_value -> 1) = 'string' AND (p_value ->> 1) ~ '^\[(redacted|pii|depth)\]$'
+                            THEN p_value -> 1
+                        WHEN jsonb_typeof(p_value -> 1) = 'string'
+                            THEN to_jsonb('****' || right(p_value ->> 1, 4))
+                        ELSE '"[redacted]"'::jsonb
+                    END);
+            END IF;
+        END IF;
+        RETURN (SELECT COALESCE(jsonb_agg(audit._redact_node(p_table, a.value, 'nested'::text, (p_depth + 1)::integer)
+                                          ORDER BY a.n), '[]'::jsonb)
+                FROM jsonb_array_elements(p_value) WITH ORDINALITY AS a(value, n));
+    WHEN 'object' THEN
+        IF p_depth > 16 THEN
+            RETURN '"[depth]"'::jsonb;
+        END IF;
+        -- Par genérico {key|name|field|path|label|type|k, value|v|val}: a etiqueta decide a máscara do valor
+        -- (em path, o último segmento; separadores . / [ ]).
+        IF p_value ?| ARRAY['value', 'v', 'val'] THEN
+            SELECT CASE WHEN bool_or(x.cls = 'secret') THEN 'secret'
+                        WHEN bool_or(x.cls = 'iban') THEN 'iban'
+                        WHEN bool_or(x.cls = 'pii') THEN 'pii' END
+              INTO v_pair
+              FROM (SELECT audit._redact_key(CASE WHEN l.k = 'path'
+                               THEN (SELECT s.seg
+                                     FROM regexp_split_to_table(p_value ->> 'path', '[].[/]+') WITH ORDINALITY AS s(seg, n)
+                                     WHERE s.seg <> ''
+                                     ORDER BY s.n DESC
+                                     LIMIT 1)
+                               ELSE p_value ->> l.k END) AS cls
+                    FROM unnest(ARRAY['key', 'name', 'field', 'path', 'label', 'type', 'k']) AS l(k)
+                    WHERE jsonb_typeof(p_value -> l.k) = 'string') AS x;
+        END IF;
+        RETURN (
+            SELECT COALESCE(jsonb_object_agg(c.key, CASE
+                WHEN c.value = 'null'::jsonb THEN c.value
+                WHEN k.cls = 'secret' THEN '"[redacted]"'::jsonb
+                WHEN k.cls = 'iban' THEN CASE
+                    WHEN jsonb_typeof(c.value) = 'string' AND (c.value #>> '{}') ~ '^\[(redacted|pii|depth)\]$'
+                        THEN c.value
+                    WHEN jsonb_typeof(c.value) = 'string'
+                        THEN to_jsonb('****' || right(c.value #>> '{}', 4))
+                    ELSE '"[redacted]"'::jsonb END
+                WHEN k.cls = 'pii'
+                     AND NOT (p_level IN ('root', 'columns')
+                              AND p_table IN ('tenants', 'categories', 'products')
+                              AND c.key IN ('name', 'legal_name'))
+                    THEN '"[pii]"'::jsonb
+                ELSE audit._redact_node(p_table, c.value,
+                         CASE WHEN p_level = 'root' AND c.key IN ('before', 'after')
+                              THEN 'columns' ELSE 'nested' END::text,
+                         (p_depth + 1)::integer)
+            END), '{}'::jsonb)
+            FROM jsonb_each(p_value) AS c
+            CROSS JOIN LATERAL (
+                SELECT CASE WHEN c.key IN ('value', 'v', 'val') AND v_pair IS NOT NULL THEN v_pair
+                            ELSE audit._redact_key(c.key::text) END AS cls) AS k);
+    ELSE
+        RETURN p_value;
+    END CASE;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_ddl_end()
+RETURNS event_trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_fn      oid     := to_regprocedure('audit.audit_row_trigger()');
+    v_super   boolean := COALESCE((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false);
+    v_is_app  boolean := current_user IN ('ptmarket_app', 'ptmarket_worker', 'ptmarket_price_writer');
+    v_ctx     text;
+    v_auto    boolean;
+    v_cmds    record;
+    r         record;
+    v_rels    oid[]   := '{}';
+    v_new     oid[]   := '{}';
+    v_rel     oid;
+    v_bad     text;
+    v_tenant  text;
+    v_changes jsonb;
+    v_ev      uuid;
+    -- máscara
+    v_q text; v_out text; v_pos int; v_len int; v_k int; v_i int; v_j int; v_j2 int; v_s int; v_end int;
+    v_n int; v_d int; v_r int; v_pre int; v_esc boolean; v_c text; v_tag text; v_tok text; v_rep text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_event_trigger_ddl_commands()) THEN
+        RETURN;
+    END IF;
+    IF v_fn IS NULL THEN
+        RAISE EXCEPTION 'audit_ddl_end: audit.audit_row_trigger() em falta' USING ERRCODE = 'PTA04';
+    END IF;
+
+    -- Comandos executados por esta função (criação automática): logo abaixo do frame atual, um dos três textos
+    -- exatos do passo 2 e o EXECUTE desta função. Forjar a pilha só dá estes três comandos (inofensivos).
+    GET DIAGNOSTICS v_ctx = PG_CONTEXT;
+    v_auto := v_ctx ~ ('^[^\n]*\nSQL statement "('
+        || 'CREATE TRIGGER zz_audit_row AFTER INSERT OR UPDATE OR DELETE ON [^\n]* FOR EACH ROW EXECUTE FUNCTION audit\.audit_row_trigger\(\)'
+        || '|CREATE TRIGGER zz_audit_truncate BEFORE TRUNCATE ON [^\n]* FOR EACH STATEMENT EXECUTE FUNCTION audit\.audit_row_trigger\(\)'
+        || '|ALTER TABLE [^\n]* ENABLE ALWAYS TRIGGER zz_audit_(row|truncate)'
+        || ')"\nPL/pgSQL function audit\.audit_ddl_end\(\) line [0-9]+ at EXECUTE(\n|$)');
+
+    -- 1. Relações tocadas (e tabelas novas de public a cobrir).
+    FOR v_cmds IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP
+        v_rel := NULL;
+        IF v_cmds.classid = 'pg_catalog.pg_class'::regclass THEN
+            v_rel := v_cmds.objid;
+        ELSIF v_cmds.classid = 'pg_catalog.pg_trigger'::regclass THEN
+            SELECT t.tgrelid INTO v_rel FROM pg_catalog.pg_trigger t WHERE t.oid = v_cmds.objid;
+        END IF;
+        IF v_rel IS NOT NULL THEN
+            v_rels := v_rels || v_rel
+                || ARRAY(SELECT p.relid::oid FROM pg_catalog.pg_partition_tree(v_rel::regclass) p);
+        END IF;
+        IF v_cmds.command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+           AND v_cmds.object_type = 'table' AND v_cmds.schema_name = 'public'
+           AND v_cmds.classid = 'pg_catalog.pg_class'::regclass
+           AND EXISTS (SELECT 1 FROM pg_catalog.pg_class c
+                       WHERE c.oid = v_cmds.objid AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+                         AND c.relname NOT IN ('audit_events', 'outbox_events')) THEN
+            v_new := v_new || v_cmds.objid;
+        END IF;
+    END LOOP;
+
+    -- 2. L1 automática (os EXECUTE abaixo são os únicos desta função: a exceção v_auto só os reconhece a eles).
+    FOREACH v_rel IN ARRAY v_new LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = v_rel AND t.tgname = 'zz_audit_row') THEN
+            EXECUTE format('CREATE TRIGGER zz_audit_row AFTER INSERT OR UPDATE OR DELETE ON %s '
+                           'FOR EACH ROW EXECUTE FUNCTION audit.audit_row_trigger()', v_rel::regclass);
+        END IF;
+        EXECUTE format('ALTER TABLE %s ENABLE ALWAYS TRIGGER zz_audit_row', v_rel::regclass);
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = v_rel AND t.tgname = 'zz_audit_truncate') THEN
+            EXECUTE format('CREATE TRIGGER zz_audit_truncate BEFORE TRUNCATE ON %s '
+                           'FOR EACH STATEMENT EXECUTE FUNCTION audit.audit_row_trigger()', v_rel::regclass);
+        END IF;
+        EXECUTE format('ALTER TABLE %s ENABLE ALWAYS TRIGGER zz_audit_truncate', v_rel::regclass);
+        IF (SELECT count(*) FROM pg_catalog.pg_trigger t
+            WHERE t.tgrelid = v_rel AND t.tgfoid = v_fn AND t.tgenabled = 'A'
+              AND ((t.tgname = 'zz_audit_row' AND t.tgtype = 29) OR (t.tgname = 'zz_audit_truncate' AND t.tgtype = 34))) <> 2 THEN
+            RAISE EXCEPTION 'audit_ddl_end: L1 automática falhou em %', v_rel::regclass USING ERRCODE = 'PTA04';
+        END IF;
+    END LOOP;
+
+    -- 3. Guarda dos zz_audit_* (antes de gravar: a recusa não depende do ator).
+    IF NOT v_super AND NOT v_auto AND cardinality(v_rels) > 0 THEN
+        SELECT string_agg(format('%s em %s (tgenabled %s)', t.tgname, t.tgrelid::regclass, t.tgenabled), ', ')
+          INTO v_bad
+        FROM pg_catalog.pg_trigger t
+        WHERE t.tgrelid = ANY (v_rels)
+          AND (t.tgname IN ('zz_audit_row', 'zz_audit_truncate') OR t.tgfoid = v_fn)
+          AND NOT (t.tgfoid = v_fn AND t.tgenabled = 'A' AND t.tgqual IS NULL AND t.tgconstraint = 0
+                   AND cardinality(t.tgattr::int2[]) = 0
+                   AND ((t.tgname = 'zz_audit_row' AND t.tgtype = 29)
+                        OR (t.tgname = 'zz_audit_truncate' AND t.tgtype = 34)));
+        IF v_bad IS NOT NULL THEN
+            RAISE EXCEPTION 'audit_ddl_end: os triggers da caixa negra não se alteram (%)', v_bad
+                USING ERRCODE = 'PTA04';
+        END IF;
+    END IF;
+
+    IF v_is_app AND NULLIF(current_setting('app.actor_type', true), '') IS NULL THEN
+        RAISE EXCEPTION 'DDL sem ator por %', current_user USING ERRCODE = 'PTA01';
+    END IF;
+
+    -- 4. Query: máscara (PASSWORD/SECRET) + sha256 do mascarado + corte a 4096.
+    v_q := current_query();
+    IF v_q IS NOT NULL THEN
+        v_out := ''; v_pos := 1; v_len := length(v_q);
+        LOOP
+            v_k := regexp_instr(v_q, '\m(password|secret)\M', v_pos, 1, 1, 'i');
+            EXIT WHEN v_k IS NULL OR v_k = 0;
+            v_i := v_k;
+            IF substr(v_q, v_i, 1) = '"' THEN v_i := v_i + 1; END IF;
+            LOOP -- separadores: espaços, '=', ':', comentários
+                v_c := substr(v_q, v_i, 2);
+                IF v_c ~ '^[[:space:]=:]' THEN
+                    v_i := v_i + 1;
+                ELSIF v_c = '/*' THEN
+                    v_j := strpos(substr(v_q, v_i + 2), '*/');
+                    v_i := CASE WHEN v_j = 0 THEN v_len + 1 ELSE v_i + v_j + 3 END;
+                ELSIF v_c = '--' THEN
+                    v_j := strpos(substr(v_q, v_i), E'\n');
+                    v_i := CASE WHEN v_j = 0 THEN v_len + 1 ELSE v_i + v_j END;
+                ELSE
+                    EXIT;
+                END IF;
+            END LOOP;
+            v_out := v_out || substr(v_q, v_pos, v_i - v_pos);
+            v_pre := CASE WHEN substr(v_q, v_i, 3) ~* '^u&''' THEN 2
+                          WHEN substr(v_q, v_i, 2) ~* '^[ebxn]''' THEN 1 ELSE 0 END;
+            v_esc := substr(v_q, v_i, 2) ~* '^e''';
+            v_s := v_i + v_pre;
+            v_c := substr(v_q, v_s, 1);
+            v_end := NULL;
+            IF v_c = '''' THEN
+                -- Aspas a nível d (1, 2, 4… por aninhamento): abre com d, conteúdo em múltiplos de 2d, fecha com d.
+                v_n := length((regexp_match(substr(v_q, v_s, 1000), '^''+'))[1]);
+                v_d := v_n & -v_n;
+                v_j := v_s + v_d;
+                LOOP
+                    v_j2 := regexp_instr(v_q, CASE WHEN v_esc THEN '[''\\]' ELSE '''' END, v_j);
+                    EXIT WHEN v_j2 = 0;
+                    IF substr(v_q, v_j2, 1) = '\' THEN
+                        v_j := v_j2 + 2;
+                        CONTINUE;
+                    END IF;
+                    v_r := length((regexp_match(substr(v_q, v_j2, 1000), '^''+'))[1]);
+                    IF v_r >= v_d AND v_r % (2 * v_d) <> 0 THEN
+                        v_end := v_j2 + ((v_r - v_d) / (2 * v_d)) * (2 * v_d) + v_d;
+                        EXIT;
+                    END IF;
+                    v_j := v_j2 + v_r;
+                END LOOP;
+                v_rep := substr(v_q, v_i, v_pre) || repeat('''', v_d) || '[redacted]'
+                         || CASE WHEN v_end IS NULL THEN '' ELSE repeat('''', v_d) END;
+            ELSIF v_c = '$' AND substr(v_q, v_s, 256) ~ '^\$([A-Za-z_][A-Za-z_0-9]*)?\$' THEN
+                v_tag := substring(substr(v_q, v_s, 256) from '^(\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$)');
+                v_j := strpos(substr(v_q, v_s + length(v_tag)), v_tag);
+                IF v_j > 0 THEN
+                    v_end := v_s + length(v_tag) + v_j - 1 + length(v_tag);
+                END IF;
+                v_rep := v_tag || '[redacted]' || CASE WHEN v_end IS NULL THEN '' ELSE v_tag END;
+            ELSIF v_c = '"' THEN
+                v_j := v_s + 1;
+                LOOP
+                    v_j2 := regexp_instr(v_q, '["\\]', v_j);
+                    EXIT WHEN v_j2 = 0;
+                    IF substr(v_q, v_j2, 1) = '\' THEN
+                        v_j := v_j2 + 2;
+                        CONTINUE;
+                    END IF;
+                    v_end := v_j2 + 1;
+                    EXIT;
+                END LOOP;
+                v_rep := '"[redacted]' || CASE WHEN v_end IS NULL THEN '' ELSE '"' END;
+            ELSE
+                v_tok := substring(substr(v_q, v_s) from '^[^[:space:];,()''"]*');
+                v_end := v_s + length(v_tok);
+                v_rep := CASE WHEN v_tok = '' THEN '' ELSE '[redacted]' END;
+            END IF;
+            v_out := v_out || v_rep;
+            v_pos := COALESCE(v_end, v_len + 1);
+        END LOOP;
+        v_out := v_out || substr(v_q, v_pos);
+    END IF;
+    v_changes := jsonb_build_object(
+        'query_sha256', encode(sha256(convert_to(v_out, 'UTF8')), 'hex'),
+        'query',        left(v_out, 4096),
+        'truncated',    COALESCE(length(v_out) > 4096, false));
+
+    -- 5. Um evento por comando, na cadeia da plataforma (tenant NULL).
+    v_tenant := NULLIF(current_setting('app.current_tenant_id', true), '');
+    IF v_tenant IS NOT NULL THEN
+        PERFORM set_config('app.current_tenant_id', '', true);
+    END IF;
+    FOR r IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP
+        IF v_is_app THEN
+            -- Atribuição (expressão simples, sem SPI): a linha 2 do PG_CONTEXT em audit_append é exatamente
+            -- 'PL/pgSQL function audit.audit_ddl_end() line N at assignment' (caminho tolerante da L2).
+            v_ev := audit.audit_append(
+                ('ddl.' || lower(replace(r.command_tag, ' ', '_')))::text, lower(r.object_type)::text,
+                r.object_identity::text, 'success'::text, NULL::text, v_changes::jsonb, NULL::uuid, NULL::uuid);
+        ELSE
+            PERFORM audit.audit_append_db(
+                ('ddl.' || lower(replace(r.command_tag, ' ', '_')))::text, lower(r.object_type)::text,
+                r.object_identity::text, v_changes::jsonb, NULL::uuid, NULL::uuid);
+        END IF;
+    END LOOP;
+    IF v_tenant IS NOT NULL THEN
+        PERFORM set_config('app.current_tenant_id', v_tenant, true);
+    END IF;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION audit.audit_ddl_end() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION audit.audit_ddl_drop()
+RETURNS event_trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_super   boolean := COALESCE((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false);
+    v_is_app  boolean := current_user IN ('ptmarket_app', 'ptmarket_worker', 'ptmarket_price_writer');
+    r         record;
+    v_bad     text;
+    v_tenant  text;
+    v_changes jsonb;
+    v_ev      uuid;
+    -- máscara (igual à de audit_ddl_end)
+    v_q text; v_out text; v_pos int; v_len int; v_k int; v_i int; v_j int; v_j2 int; v_s int; v_end int;
+    v_n int; v_d int; v_r int; v_pre int; v_esc boolean; v_c text; v_tag text; v_tok text; v_rep text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_event_trigger_dropped_objects()) THEN
+        RETURN;
+    END IF;
+
+    -- 1. Guarda: um zz_audit_* só cai com a sua tabela (no mesmo comando).
+    IF NOT v_super THEN
+        SELECT string_agg(o.object_identity, ', ') INTO v_bad
+        FROM pg_event_trigger_dropped_objects() o
+        WHERE o.object_type = 'trigger'
+          AND o.address_names[3] IN ('zz_audit_row', 'zz_audit_truncate')
+          AND NOT EXISTS (SELECT 1 FROM pg_event_trigger_dropped_objects() t
+                          WHERE t.object_type = 'table' AND t.address_names = o.address_names[1:2]);
+        IF v_bad IS NOT NULL THEN
+            RAISE EXCEPTION 'audit_ddl_drop: os triggers da caixa negra não se apagam (%)', v_bad
+                USING ERRCODE = 'PTA04';
+        END IF;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_event_trigger_dropped_objects() WHERE original) THEN
+        RETURN;
+    END IF;
+    IF v_is_app AND NULLIF(current_setting('app.actor_type', true), '') IS NULL THEN
+        RAISE EXCEPTION 'DDL sem ator por %', current_user USING ERRCODE = 'PTA01';
+    END IF;
+
+    -- 2. Query: máscara (PASSWORD/SECRET) + sha256 do mascarado + corte a 4096.
+    v_q := current_query();
+    IF v_q IS NOT NULL THEN
+        v_out := ''; v_pos := 1; v_len := length(v_q);
+        LOOP
+            v_k := regexp_instr(v_q, '\m(password|secret)\M', v_pos, 1, 1, 'i');
+            EXIT WHEN v_k IS NULL OR v_k = 0;
+            v_i := v_k;
+            IF substr(v_q, v_i, 1) = '"' THEN v_i := v_i + 1; END IF;
+            LOOP
+                v_c := substr(v_q, v_i, 2);
+                IF v_c ~ '^[[:space:]=:]' THEN
+                    v_i := v_i + 1;
+                ELSIF v_c = '/*' THEN
+                    v_j := strpos(substr(v_q, v_i + 2), '*/');
+                    v_i := CASE WHEN v_j = 0 THEN v_len + 1 ELSE v_i + v_j + 3 END;
+                ELSIF v_c = '--' THEN
+                    v_j := strpos(substr(v_q, v_i), E'\n');
+                    v_i := CASE WHEN v_j = 0 THEN v_len + 1 ELSE v_i + v_j END;
+                ELSE
+                    EXIT;
+                END IF;
+            END LOOP;
+            v_out := v_out || substr(v_q, v_pos, v_i - v_pos);
+            v_pre := CASE WHEN substr(v_q, v_i, 3) ~* '^u&''' THEN 2
+                          WHEN substr(v_q, v_i, 2) ~* '^[ebxn]''' THEN 1 ELSE 0 END;
+            v_esc := substr(v_q, v_i, 2) ~* '^e''';
+            v_s := v_i + v_pre;
+            v_c := substr(v_q, v_s, 1);
+            v_end := NULL;
+            IF v_c = '''' THEN
+                v_n := length((regexp_match(substr(v_q, v_s, 1000), '^''+'))[1]);
+                v_d := v_n & -v_n;
+                v_j := v_s + v_d;
+                LOOP
+                    v_j2 := regexp_instr(v_q, CASE WHEN v_esc THEN '[''\\]' ELSE '''' END, v_j);
+                    EXIT WHEN v_j2 = 0;
+                    IF substr(v_q, v_j2, 1) = '\' THEN
+                        v_j := v_j2 + 2;
+                        CONTINUE;
+                    END IF;
+                    v_r := length((regexp_match(substr(v_q, v_j2, 1000), '^''+'))[1]);
+                    IF v_r >= v_d AND v_r % (2 * v_d) <> 0 THEN
+                        v_end := v_j2 + ((v_r - v_d) / (2 * v_d)) * (2 * v_d) + v_d;
+                        EXIT;
+                    END IF;
+                    v_j := v_j2 + v_r;
+                END LOOP;
+                v_rep := substr(v_q, v_i, v_pre) || repeat('''', v_d) || '[redacted]'
+                         || CASE WHEN v_end IS NULL THEN '' ELSE repeat('''', v_d) END;
+            ELSIF v_c = '$' AND substr(v_q, v_s, 256) ~ '^\$([A-Za-z_][A-Za-z_0-9]*)?\$' THEN
+                v_tag := substring(substr(v_q, v_s, 256) from '^(\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$)');
+                v_j := strpos(substr(v_q, v_s + length(v_tag)), v_tag);
+                IF v_j > 0 THEN
+                    v_end := v_s + length(v_tag) + v_j - 1 + length(v_tag);
+                END IF;
+                v_rep := v_tag || '[redacted]' || CASE WHEN v_end IS NULL THEN '' ELSE v_tag END;
+            ELSIF v_c = '"' THEN
+                v_j := v_s + 1;
+                LOOP
+                    v_j2 := regexp_instr(v_q, '["\\]', v_j);
+                    EXIT WHEN v_j2 = 0;
+                    IF substr(v_q, v_j2, 1) = '\' THEN
+                        v_j := v_j2 + 2;
+                        CONTINUE;
+                    END IF;
+                    v_end := v_j2 + 1;
+                    EXIT;
+                END LOOP;
+                v_rep := '"[redacted]' || CASE WHEN v_end IS NULL THEN '' ELSE '"' END;
+            ELSE
+                v_tok := substring(substr(v_q, v_s) from '^[^[:space:];,()''"]*');
+                v_end := v_s + length(v_tok);
+                v_rep := CASE WHEN v_tok = '' THEN '' ELSE '[redacted]' END;
+            END IF;
+            v_out := v_out || v_rep;
+            v_pos := COALESCE(v_end, v_len + 1);
+        END LOOP;
+        v_out := v_out || substr(v_q, v_pos);
+    END IF;
+    v_changes := jsonb_build_object(
+        'query_sha256', encode(sha256(convert_to(v_out, 'UTF8')), 'hex'),
+        'query',        left(v_out, 4096),
+        'truncated',    COALESCE(length(v_out) > 4096, false));
+
+    -- 3. Um evento por objeto original, na cadeia da plataforma (tenant NULL).
+    v_tenant := NULLIF(current_setting('app.current_tenant_id', true), '');
+    IF v_tenant IS NOT NULL THEN
+        PERFORM set_config('app.current_tenant_id', '', true);
+    END IF;
+    FOR r IN SELECT * FROM pg_event_trigger_dropped_objects() WHERE original LOOP
+        IF v_is_app THEN
+            -- Atribuição (expressão simples, sem SPI): a linha 2 do PG_CONTEXT em audit_append é exatamente
+            -- 'PL/pgSQL function audit.audit_ddl_drop() line N at assignment' (caminho tolerante da L2).
+            v_ev := audit.audit_append(
+                ('ddl.drop_' || lower(replace(r.object_type, ' ', '_')))::text, lower(r.object_type)::text,
+                r.object_identity::text, 'success'::text, NULL::text, v_changes::jsonb, NULL::uuid, NULL::uuid);
+        ELSE
+            PERFORM audit.audit_append_db(
+                ('ddl.drop_' || lower(replace(r.object_type, ' ', '_')))::text, lower(r.object_type)::text,
+                r.object_identity::text, v_changes::jsonb, NULL::uuid, NULL::uuid);
+        END IF;
+    END LOOP;
+    IF v_tenant IS NOT NULL THEN
+        PERFORM set_config('app.current_tenant_id', v_tenant, true);
+    END IF;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION audit.audit_ddl_drop() FROM PUBLIC;
+
+-- A de 2 argumentos sai por último (todos os chamadores já usam a de 3; a L2 deste bloco também).
+DROP FUNCTION audit._chain_insert(audit.audit_events, boolean);
+
+-- Sem TEMPORARY: os papéis da app deixam de criar funções/tabelas em pg_temp (o migrator, dono da BD, mantém).
+DO $do$
+BEGIN
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC, ptmarket_app, ptmarket_worker, ptmarket_price_writer',
+                   current_database());
+END
+$do$;
+$chg_0020$);
 
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$

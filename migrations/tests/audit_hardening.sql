@@ -127,7 +127,7 @@ SELECT pg_temp.expect_value(
 -- ---------------------------------------------------------------------------
 -- 2. Tabela de casos da máscara (como app: a função é INVOKER).
 -- ---------------------------------------------------------------------------
-SET ROLE ptmarket_app;
+-- Criada como superuser: desde a 0020 a app não tem TEMPORARY (não cria tabelas temporárias).
 CREATE TEMP TABLE redact_cases (label text, tbl text, input jsonb, expected jsonb);
 INSERT INTO redact_cases VALUES
     ('stores.email (e name de stores) → [pii]', 'stores',
@@ -175,6 +175,8 @@ INSERT INTO redact_cases VALUES
                  "x_enc": "e", "x_hash": "h", "birth_date": "2000-01-01", "postal_code": "4000-001"}}',
      '{"after": {"iban": "****0154", "card_pan": "[redacted]", "private_key": "[redacted]",
                  "x_enc": "[redacted]", "x_hash": "[redacted]", "birth_date": "[pii]", "postal_code": "[pii]"}}');
+GRANT SELECT ON redact_cases TO ptmarket_app;
+SET ROLE ptmarket_app;
 SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM redact_cases WHERE label = %L
               AND audit.audit_redact(tbl, input) = expected$q$, c.label),

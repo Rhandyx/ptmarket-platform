@@ -1,0 +1,868 @@
+[
+  {
+    "id": "key-tax_id",
+    "kind": "json",
+    "input": {
+      "tax_id": "512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-vat_id",
+    "kind": "json",
+    "input": {
+      "vat_id": "PT512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-national_id",
+    "kind": "json",
+    "input": {
+      "national_id": "12345678Z"
+    },
+    "must_not_contain": [
+      "12345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-taxId-camel",
+    "kind": "json",
+    "input": {
+      "taxId": "512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-vatNumber-camel",
+    "kind": "json",
+    "input": {
+      "vatNumber": "512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-mobile",
+    "kind": "json",
+    "input": {
+      "mobile": "+351 912 345 678"
+    },
+    "must_not_contain": [
+      "912",
+      "345 678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-nib",
+    "kind": "json",
+    "input": {
+      "nib": "003501230000123456777"
+    },
+    "must_not_contain": [
+      "0035012300001234"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-accountNumber-camel",
+    "kind": "json",
+    "input": {
+      "accountNumber": "12345678901"
+    },
+    "must_not_contain": [
+      "1234567"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "key-cardPan-camel",
+    "kind": "json",
+    "input": {
+      "cardPan": "4111111111111111"
+    },
+    "must_not_contain": [
+      "41111111"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "pair-path-last-segment",
+    "kind": "json",
+    "input": {
+      "path": "billing.taxId",
+      "value": "512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "pair-k-v",
+    "kind": "json",
+    "input": {
+      "k": "nif",
+      "v": "512345678"
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "tuple-nif",
+    "kind": "json",
+    "input": {
+      "x": [
+        "nif",
+        "512345678"
+      ]
+    },
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-nif-valid",
+    "kind": "text",
+    "input": "512345678",
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-nif-valid-pt-prefix",
+    "kind": "text",
+    "input": "NIF PT512345678",
+    "must_not_contain": [
+      "512345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-dni-valid",
+    "kind": "text",
+    "input": "12345678Z",
+    "must_not_contain": [
+      "12345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-nie-valid",
+    "kind": "text",
+    "input": "X1234567L",
+    "must_not_contain": [
+      "1234567"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-phone-e164-pt",
+    "kind": "text",
+    "input": "+351 912 345 678",
+    "must_not_contain": [
+      "912",
+      "345 678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-phone-00-prefix",
+    "kind": "text",
+    "input": "00351912345678",
+    "must_not_contain": [
+      "912345678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-phone-pt-national-groups",
+    "kind": "text",
+    "input": "ligar para 912 345 678",
+    "must_not_contain": [
+      "912 345 678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-pan-luhn-spaces",
+    "kind": "text",
+    "input": "4111 1111 1111 1111",
+    "must_not_contain": [
+      "4111 1111",
+      "1111 1111"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-pan-luhn-dashes",
+    "kind": "text",
+    "input": "4111-1111-1111-1111",
+    "must_not_contain": [
+      "4111-1111",
+      "1111-1111"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-lowercase",
+    "kind": "text",
+    "input": "pt50 0002 0123 1234 5678 9015 4",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-dashes",
+    "kind": "text",
+    "input": "PT50-0002-0123-1234-5678-9015-4",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-dots",
+    "kind": "text",
+    "input": "PT50.0002.0123.1234.5678.9015.4",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-nbsp",
+    "kind": "text",
+    "input": "PT50\u00a00002\u00a00123\u00a01234\u00a05678\u00a09015\u00a04",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-double-spaces",
+    "kind": "text",
+    "input": "PT50  0002  0123  1234  5678  9015  4",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-de-lowercase",
+    "kind": "text",
+    "input": "de89 3704 0044 0532 0130 00",
+    "must_not_contain": [
+      "3704",
+      "0044",
+      "0532"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-nib-21-digits",
+    "kind": "text",
+    "input": "0035 0123 00001234567 77",
+    "must_not_contain": [
+      "0035",
+      "0123",
+      "00001234567"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-nib-21-digits-compact",
+    "kind": "text",
+    "input": "003501230000123456777",
+    "must_not_contain": [
+      "00350123000012345"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-store_id",
+    "kind": "json",
+    "input": {
+      "store_id": "00000000-0000-7000-8000-0000000003e1"
+    },
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-order_company_ids",
+    "kind": "json",
+    "input": {
+      "order_id": "o-1",
+      "company_id": "c1"
+    },
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-uuid-digits-only",
+    "kind": "text",
+    "input": "12345678-1234-1234-1234-123456789012",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-iso-datetime",
+    "kind": "text",
+    "input": "2026-11-26T10:15:30Z",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-iso-datetime-offset",
+    "kind": "text",
+    "input": "2026-11-26T10:15:30.123+01:00",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-iso-date",
+    "kind": "text",
+    "input": "2026-11-26",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-nif-wrong-check-digit",
+    "kind": "text",
+    "input": "512345670",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db"
+    ]
+  },
+  {
+    "id": "clear-16-digits-no-luhn",
+    "kind": "text",
+    "input": "4111111111111112",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db"
+    ]
+  },
+  {
+    "id": "clear-nib-wrong-check-digits",
+    "kind": "text",
+    "input": "003501230000123456700",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db"
+    ]
+  },
+  {
+    "id": "clear-title",
+    "kind": "json",
+    "input": {
+      "title": "Bolo"
+    },
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-senha",
+    "kind": "json",
+    "input": {
+      "senha": "S3gr3do-03d"
+    },
+    "must_not_contain": [
+      "S3gr3do-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-palavra-passe",
+    "kind": "json",
+    "input": {
+      "palavra-passe": "S3gr3do-03d",
+      "Palavra_Passe": "S3gr3do-03d"
+    },
+    "must_not_contain": [
+      "S3gr3do-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-secrets-before-id",
+    "kind": "json",
+    "input": {
+      "reset_token_id": "tok-03d",
+      "secret_id": "sec-03d",
+      "api_key_id": "key-03d"
+    },
+    "must_not_contain": [
+      "tok-03d",
+      "sec-03d",
+      "key-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-secrets-pt-en",
+    "kind": "json",
+    "input": {
+      "pwd": "v-03d",
+      "api-key": "v-03d",
+      "access_key": "v-03d",
+      "session": "v-03d",
+      "cookie": "v-03d",
+      "signature": "v-03d",
+      "hmac": "v-03d",
+      "pin": "v-03d",
+      "card_number": "v-03d",
+      "cartão": "v-03d",
+      "passaporte": "v-03d",
+      "passport": "v-03d",
+      "jwt": "v-03d",
+      "bearer": "v-03d",
+      "chave": "v-03d",
+      "segredo": "v-03d",
+      "card_pan": "v-03d"
+    },
+    "must_not_contain": [
+      "v-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-pii-pt-accents",
+    "kind": "json",
+    "input": {
+      "telemóvel": "p-03d",
+      "TELEMÓVEL": "p-03d",
+      "nome": "p-03d",
+      "apelido": "p-03d",
+      "data_nascimento": "p-03d",
+      "contribuinte": "p-03d",
+      "morada": "p-03d"
+    },
+    "must_not_contain": [
+      "p-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-pair-key-value",
+    "kind": "json",
+    "input": {
+      "key": "password",
+      "value": "S3gr3do-03d"
+    },
+    "must_not_contain": [
+      "S3gr3do-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-pair-field-accented",
+    "kind": "json",
+    "input": {
+      "field": "Telemóvel",
+      "value": "p-03d"
+    },
+    "must_not_contain": [
+      "p-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-pairs-in-array",
+    "kind": "json",
+    "input": {
+      "attrs": [
+        {
+          "name": "chave_api",
+          "value": "k-03d"
+        },
+        {
+          "name": "cor",
+          "value": "azul"
+        }
+      ]
+    },
+    "must_not_contain": [
+      "k-03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-jwt",
+    "kind": "text",
+    "input": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+    "must_not_contain": [
+      "eyJhbGciOiJIUzI1NiJ9",
+      "c2lnbmF0dXJl"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-email",
+    "kind": "text",
+    "input": "joao@x.pt",
+    "must_not_contain": [
+      "joao"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-api-key-prefix-sk",
+    "kind": "text",
+    "input": "sk_live_abc03d",
+    "must_not_contain": [
+      "abc03d"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-api-key-prefix-akia",
+    "kind": "text",
+    "input": "AKIAIOSFODNN7EXAMPLE",
+    "must_not_contain": [
+      "IOSFODNN7EXAMPLE"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-iban-inline",
+    "kind": "text",
+    "input": "pagar a PT50000201231234567890154 hoje",
+    "must_not_contain": [
+      "000201231234567890"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-iban-grouped",
+    "kind": "text",
+    "input": "PT50 0002 0123 1234 5678 9015 4",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-iban-de-compact",
+    "kind": "text",
+    "input": "DE89370400440532013000",
+    "must_not_contain": [
+      "370400440532"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "03d-clear-neutral",
+    "kind": "json",
+    "input": {
+      "company_id": "c1",
+      "expand_id": "e1",
+      "japan": "jp",
+      "note": "loja.ptmarket.pt",
+      "sku": "task_sk_1",
+      "n": 12
+    },
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  }
+]

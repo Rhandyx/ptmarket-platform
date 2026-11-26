@@ -134,6 +134,7 @@ RESET ROLE;
 SET ROLE ptmarket_audit_writer;
 SELECT (created_at AT TIME ZONE 'UTC')::date AS root_day FROM audit.audit_events
 WHERE id NOT IN (SELECT id FROM audit_base) ORDER BY created_at LIMIT 1 \gset
+RESET ROLE; -- 03e: sem TEMPORARY para PUBLIC, a tabela temporária é criada pelo superuser
 CREATE TEMP TABLE expected_root AS
 SELECT DISTINCT ON (chain_key, retention_class) chain_key, retention_class::text, chain_seq, hash
 FROM audit.audit_events e

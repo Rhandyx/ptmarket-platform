@@ -76,7 +76,7 @@ SELECT pg_temp.expect_value(
     1, 'audit_append é DEFINER, pertence a ptmarket_audit_writer e tem lock_timeout = 2s');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
-       WHERE p.oid = 'audit._chain_insert(audit.audit_events,boolean)'::regprocedure
+       WHERE p.oid = 'audit._chain_insert(audit.audit_events,boolean,boolean)'::regprocedure -- 03e: assinatura de 3 argumentos
          AND r.rolname = 'ptmarket_audit_writer'
          AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner)$q$,
     1, '_chain_insert: dono ptmarket_audit_writer, sem EXECUTE para mais ninguém');

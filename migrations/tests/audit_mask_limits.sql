@@ -131,7 +131,7 @@ ROLLBACK TO SAVEPOINT chain;
 -- ---------------------------------------------------------------------------
 -- 2. Tabela de casos da máscara (como app: audit_redact é INVOKER).
 -- ---------------------------------------------------------------------------
-SET ROLE ptmarket_app;
+-- Criada como superuser: desde a 0020 a app não tem TEMPORARY (não cria tabelas temporárias).
 CREATE TEMP TABLE mask_cases (label text, tbl text, input jsonb, expected jsonb);
 INSERT INTO mask_cases VALUES
     ('senha', 'stores', '{"senha": "x"}', '{"senha": "[redacted]"}'),
@@ -181,6 +181,8 @@ INSERT INTO mask_cases VALUES
        "expand_id": "e1", "japan": "jp", "note": "loja.ptmarket.pt", "sku": "task_sk_1", "n": 12}'),
     ('profundidade 16 intacta', 'stores', pg_temp.nest(16), pg_temp.nest(16)),
     ('profundidade 17: o 17.º contentor → "[depth]"', 'stores', pg_temp.nest(17), pg_temp.nest(16, '"[depth]"'));
+GRANT SELECT ON mask_cases TO ptmarket_app;
+SET ROLE ptmarket_app;
 SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM mask_cases WHERE label = %L
               AND audit.audit_redact(tbl, input) = expected$q$, c.label),

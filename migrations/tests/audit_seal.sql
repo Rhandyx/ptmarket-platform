@@ -118,7 +118,7 @@ SELECT pg_temp.expect_error(
     $q$SELECT audit.audit_append('stores.update', 'store', 's1', 'success', NULL, NULL, NULL)$q$,
     '42501', 'migrator não executa audit_append');
 SELECT pg_temp.expect_error(
-    $q$SELECT audit._chain_insert(NULL::audit.audit_events, false)$q$, '42501', 'migrator não executa _chain_insert');
+    $q$SELECT audit._chain_insert(NULL::audit.audit_events, false, false)$q$, '42501', 'migrator não executa _chain_insert'); -- 03e: assinatura de 3 argumentos
 SELECT pg_temp.expect_error(
     $q$SELECT audit.audit_append_event('{}')$q$, '42501', 'migrator não executa audit_append_event');
 SELECT pg_temp.expect_error(
@@ -166,7 +166,7 @@ SELECT pg_temp.expect_error(
        RETURNS uuid LANGUAGE sql AS 'SELECT NULL::uuid'$q$,
     '42501', 'CREATE OR REPLACE FUNCTION audit.audit_append falha');
 SELECT pg_temp.expect_error(
-    $q$ALTER FUNCTION audit._chain_insert(audit.audit_events, boolean) OWNER TO ptmarket_migrator$q$,
+    $q$ALTER FUNCTION audit._chain_insert(audit.audit_events, boolean, boolean) OWNER TO ptmarket_migrator$q$, -- 03e: assinatura de 3 argumentos
     '42501', 'ALTER FUNCTION OWNER falha');
 SELECT pg_temp.expect_error(
     $q$ALTER FUNCTION audit.audit_append(text, text, text, text, text, jsonb, uuid, uuid) RESET search_path$q$,
@@ -201,7 +201,7 @@ SELECT pg_temp.expect_value(
               OR c.oid IN ('audit.audit_chain_heads'::regclass, 'audit.audit_alerts'::regclass)
            UNION ALL
            SELECT p.proowner FROM pg_proc p
-           WHERE p.oid IN ('audit._chain_insert(audit.audit_events, boolean)'::regprocedure,
+           WHERE p.oid IN ('audit._chain_insert(audit.audit_events, boolean, boolean)'::regprocedure, -- 03e: assinatura de 3 argumentos
                            'audit._event_hash(audit.audit_events)'::regprocedure,
                            'audit.audit_retention_class(text, text)'::regprocedure)) o
        JOIN pg_roles r ON r.oid = o.owner
@@ -209,7 +209,7 @@ SELECT pg_temp.expect_value(
     0, '_chain_insert: tabelas e funções em que toca sem dono com LOGIN');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM regexp_matches(
-           pg_get_functiondef('audit._chain_insert(audit.audit_events, boolean)'::regprocedure),
+           pg_get_functiondef('audit._chain_insert(audit.audit_events, boolean, boolean)'::regprocedure), -- 03e: assinatura de 3 argumentos
            '(?:FROM|INTO|UPDATE|JOIN)\s+([a-z_]+\.[a-z_]+)', 'gi') m
        WHERE m[1] NOT IN ('audit.audit_chain_heads', 'audit.audit_events', 'audit.audit_alerts')$q$,
     0, '_chain_insert só refere audit.audit_chain_heads, audit.audit_events e audit.audit_alerts');
