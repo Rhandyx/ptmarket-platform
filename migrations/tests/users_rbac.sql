@@ -406,8 +406,10 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
        WHERE p.oid = 'identity_user_credentials(text)'::regprocedure AND a.grantee = 0$q$,
     0, 'lookup sem EXECUTE para PUBLIC');
--- Proibida função que liste utilizadores: ptmarket_identity só é dono dos lookups (0 ou 1 linha cada).
--- 14: lookups de sessão e passkey · 0025: porta da timeline do Super-Admin (lista eventos, não utilizadores)
+-- Proibida função que liste utilizadores: ptmarket_identity só é dono dos lookups (0 ou 1 linha cada) e de uma
+-- exceção na allowlist: identity_admin_read_events (0025/0026), até 100 linhas de EVENTOS da caixa negra (nunca
+-- utilizadores), só para super_admin com TOTP e sessão da plataforma com 2FA.
+-- 14: lookups de sessão e passkey
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) AS fns
                              FROM pg_proc p WHERE p.proowner = 'ptmarket_identity'::regrole) s

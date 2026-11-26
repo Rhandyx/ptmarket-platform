@@ -6,6 +6,8 @@
 --   grants e a guarda de memberships da 0022 para ptmarket_identity.
 -- Superuser só para semear contas, ler audit.* (conjuntos esperados), adulterar a cadeia (dono NOLOGIN, trigger
 -- desligado só nesta transação) e ler catálogos; cada chamada às funções faz SET ROLE do papel em causa.
+-- Corre contra a versão em vigor (0026: session_user = ptmarket_app, 24 h sem filtro seletivo, cauda no chain_ok);
+-- o que é só da 0026 está em audit_admin_read_events_v2.sql.
 -- Tudo numa transação com ROLLBACK.
 
 BEGIN;
@@ -181,7 +183,8 @@ INSERT INTO gate_cases VALUES
                                                                                      '00000000-0000-7000-8000-0000002a0002');
 GRANT SELECT ON gate_cases TO ptmarket_app;
 
-SET ROLE ptmarket_app;
+-- Desde a 0026 a selada exige session_user = ptmarket_app: SET SESSION AUTHORIZATION (não SET ROLE).
+SET SESSION AUTHORIZATION ptmarket_app;
 DO $$
 DECLARE
     c record;
@@ -260,9 +263,10 @@ SELECT pg_temp.expect_error(
                                                        NULL, now(), NULL, 10)$q$,
     '22023', 'cursor só com created_at');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM public.identity_admin_read_events(now() - interval '31 days', now(), NULL, NULL, NULL,
+    $q$SELECT count(*) FROM public.identity_admin_read_events(now() - interval '30 days', now() + interval '1 day',
+                                                              '00000000-0000-7000-8000-0000002a0a01', NULL, NULL,
                                                               NULL, NULL, NULL, NULL, NULL, 1)$q$,
-    1, 'janela de 31 dias exatos e limit 1 aceites');
+    1, 'janela de 31 dias exatos (com tenant) e limit 1 aceites');
 
 -- ---------------------------------------------------------------------------
 -- 4. Filtros e paginação (como ptmarket_app; comparação como superuser).
@@ -288,7 +292,7 @@ BEGIN
     END LOOP;
 END
 $$;
-RESET ROLE;
+RESET SESSION AUTHORIZATION;
 
 -- Conjuntos esperados (superuser lê audit.*).
 CREATE TEMP TABLE expected AS
@@ -386,17 +390,17 @@ REVOKE UPDATE, DELETE ON audit.audit_events FROM CURRENT_USER;
 ALTER TABLE audit.audit_events FORCE ROW LEVEL SECURITY;
 RESET ROLE;
 
-SET ROLE ptmarket_app;
+SET SESSION AUTHORIZATION ptmarket_app;
 SELECT pg_temp.grab('tamper2', '00000000-0000-7000-8000-0000002a0a02', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 100);
 SELECT pg_temp.grab('tamper3', '00000000-0000-7000-8000-0000002a0a03', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 100);
 SELECT pg_temp.grab('tamper1', '00000000-0000-7000-8000-0000002a0a01', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 100);
-RESET ROLE;
+RESET SESSION AUTHORIZATION;
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM res WHERE label = 'tamper2' AND NOT chain_ok$q$,
     3, 'T2 adulterada: seq 1 (hash), seq 2 (elo) e seq 3 (hash) com chain_ok = false');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM res WHERE label = 'tamper3' AND chain_ok IS DISTINCT FROM (chain_seq = 1)$q$,
-    0, 'T3 sem o seq 2: seq 1 true, seq 3 false (falta o anterior e há linhas mais antigas)');
+    $q$SELECT count(*) FROM res WHERE label = 'tamper3' AND chain_ok IS DISTINCT FROM false$q$,
+    0, 'T3 sem o seq 2: seq 1 false (sem seguinte e não é a cabeça, 0026), seq 3 false (falta o anterior)');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM res WHERE label = 'tamper3'$q$, 2, 'T3: 2 linhas depois do DELETE');
 SELECT pg_temp.expect_value(

@@ -3007,6 +3007,147 @@ GRANT EXECUTE ON FUNCTION audit.admin_read_events(timestamptz, timestamptz, uuid
 GRANT USAGE ON SCHEMA audit TO ptmarket_identity;
 $chg_0025$);
 
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0026_admin_read_events_v2 (achados da auditoria do cartão 02/23a). Disparada por
+--   migrations/0026_audit_admin_read_events_v2.sql. Exige 0025. Assinaturas, donos e grants iguais (CREATE OR REPLACE).
+--   audit.admin_read_events passa a VOLATILE e:
+--     * recusa (42501) se session_user não for ptmarket_app (o SET ROLE não muda o session_user: o migrator e
+--       outros logins não leem pela porta);
+--     * janela máxima de 24 h sem filtro seletivo (tenant, loja, ator ou encomenda); 31 dias com um deles (22023);
+--     * grava ela própria, por audit._chain_insert e na transação de quem chama, o evento
+--       'admin.audit_timeline.read' (ator do contexto, como audit_append; outcome success; changes = os filtros, o
+--       cursor só como booleano, e o número de linhas devolvidas): nenhuma leitura global fica fora da cadeia.
+--   audit._admin_read_events_sql: chain_ok também verifica a cauda (uma linha sem seq + 1 só é true se
+--     seq = audit_chain_heads.last_seq da cadeia) e as sondagens de seq − 1, seq + 1 e de linhas mais antigas
+--     limitam created_at (poda de partições; created_at cresce com o seq, sob o lock da cabeça).
+--     Sondagens como subconsultas escalares (nunca "hashed SubPlan": sempre pelo índice da cadeia ou pela PK das
+--     cabeças, no máximo 100 linhas por página).
+--     O prefixo da cadeia (linhas mais antigas apagadas, indistinguíveis do corte da retenção numa linha) não é
+--     verificado aqui: é responsabilidade de audit.audit_verify_chain e da raiz diária em WORM.
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0026_admin_read_events_v2', '0025_admin_read_events', $chg_0026$
+CREATE OR REPLACE FUNCTION audit._admin_read_events_sql(p_tenant boolean, p_store boolean, p_actor boolean,
+    p_order boolean, p_action boolean, p_outcome boolean, p_cursor boolean)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT 'WITH page AS MATERIALIZED ('
+        || ' SELECT e AS r FROM audit.audit_events e'
+        || ' WHERE e.created_at >= $1 AND e.created_at < $2'
+        || CASE WHEN p_tenant THEN ' AND e.tenant_id = $3' ELSE '' END
+        || CASE WHEN p_store THEN ' AND e.store_id = $4' ELSE '' END
+        || CASE WHEN p_actor THEN ' AND e.actor_id = $5' ELSE '' END
+        || CASE WHEN p_order
+                THEN ' AND ((e.target_type = ''order'' AND e.target_id = $6::text)'
+                     || ' OR (e.changes ? ''order_id'' AND e.changes ->> ''order_id'' = $6::text))'
+                ELSE '' END
+        || CASE WHEN p_action THEN ' AND e.action LIKE $7 ESCAPE ''!''' ELSE '' END
+        || CASE WHEN p_outcome THEN ' AND e.outcome = $8' ELSE '' END
+        || CASE WHEN p_cursor THEN ' AND e.created_at <= $9 AND (e.created_at, e.id) < ($9, $10)' ELSE '' END
+        || ' ORDER BY e.created_at DESC, e.id DESC LIMIT $11)'
+        || ' SELECT (p.r).id, (p.r).created_at, (p.r).tenant_id, (p.r).store_id, (p.r).actor_type::text,'
+        || ' (p.r).actor_id, (p.r).actor_label, (p.r).impersonator_id, (p.r).action::text, (p.r).target_type::text,'
+        || ' (p.r).target_id, (p.r).outcome::text, (p.r).reason, (p.r).changes, (p.r).chain_seq,'
+        || ' COALESCE((p.r).hash = audit._event_hash(p.r)'
+        || ' AND CASE'
+        || ' WHEN (p.r).chain_seq = 1 THEN (p.r).prev_hash = decode(repeat(''00'', 32), ''hex'')'
+        || ' WHEN k.n = 1 THEN k.ok'
+        || ' WHEN k.n = 0 THEN (SELECT 1 FROM audit.audit_events o'
+        || ' WHERE o.chain_key = (p.r).chain_key AND o.retention_class = (p.r).retention_class'
+        || ' AND o.chain_seq < (p.r).chain_seq AND o.created_at <= (p.r).created_at LIMIT 1) IS NULL'
+        || ' ELSE false END'
+        || ' AND ((SELECT 1 FROM audit.audit_events s'
+        || ' WHERE s.chain_key = (p.r).chain_key AND s.retention_class = (p.r).retention_class'
+        || ' AND s.chain_seq = (p.r).chain_seq + 1 AND s.created_at >= (p.r).created_at LIMIT 1) IS NOT NULL'
+        || ' OR (SELECT h.last_seq FROM audit.audit_chain_heads h'
+        || ' WHERE h.chain_key = (p.r).chain_key AND h.retention_class = (p.r).retention_class)'
+        || ' = (p.r).chain_seq), false)'
+        || ' FROM page p'
+        || ' CROSS JOIN LATERAL (SELECT count(*) AS n, bool_and(q.hash = (p.r).prev_hash) AS ok'
+        || ' FROM audit.audit_events q'
+        || ' WHERE q.chain_key = (p.r).chain_key AND q.retention_class = (p.r).retention_class'
+        || ' AND q.chain_seq = (p.r).chain_seq - 1 AND q.created_at <= (p.r).created_at) k'
+        || ' ORDER BY (p.r).created_at DESC, (p.r).id DESC'
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.admin_read_events(p_from timestamptz, p_to timestamptz, p_tenant_id uuid,
+    p_store_id uuid, p_actor_id uuid, p_order_id uuid, p_action_prefix text, p_outcome text, p_cursor_at timestamptz,
+    p_cursor_id uuid, p_limit integer)
+RETURNS TABLE (id uuid, created_at timestamptz, tenant_id uuid, store_id uuid, actor_type text, actor_id uuid,
+    actor_label text, impersonator_id uuid, action text, target_type text, target_id text, outcome text,
+    reason text, changes jsonb, chain_seq bigint, chain_ok boolean)
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_selective boolean := p_tenant_id IS NOT NULL OR p_store_id IS NOT NULL OR p_actor_id IS NOT NULL
+                           OR p_order_id IS NOT NULL;
+    v_like      text;
+    v_rows      bigint;
+    v_row       audit.audit_events;
+BEGIN
+    IF session_user::text IS DISTINCT FROM 'ptmarket_app'
+       OR current_setting('app.actor_type', true) IS DISTINCT FROM 'admin' THEN
+        RAISE EXCEPTION 'admin_read_events: acesso recusado' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF p_from IS NULL OR p_to IS NULL OR p_from >= p_to OR p_to - p_from > interval '31 days' THEN
+        RAISE EXCEPTION 'admin_read_events: janela inválida (p_from < p_to, no máximo 31 dias)'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT v_selective AND p_to - p_from > interval '24 hours' THEN
+        RAISE EXCEPTION 'admin_read_events: sem filtro de tenant, loja, ator ou encomenda a janela máxima é 24 h'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
+        RAISE EXCEPTION 'admin_read_events: p_limit fora de 1..100' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_action_prefix IS NOT NULL AND p_action_prefix !~ '^[a-z0-9._]{1,100}$' THEN
+        RAISE EXCEPTION 'admin_read_events: prefixo de ação inválido' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_outcome IS NOT NULL AND p_outcome NOT IN ('success', 'denied', 'error') THEN
+        RAISE EXCEPTION 'admin_read_events: outcome inválido' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF (p_cursor_at IS NULL) <> (p_cursor_id IS NULL) THEN
+        RAISE EXCEPTION 'admin_read_events: cursor incompleto' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- LIKE de prefixo: '!' (fora do alfabeto aceite) escapa % e _.
+    v_like := replace(replace(p_action_prefix, '%', '!%'), '_', '!_') || '%';
+
+    RETURN QUERY EXECUTE audit._admin_read_events_sql(
+            (p_tenant_id IS NOT NULL)::boolean, (p_store_id IS NOT NULL)::boolean, (p_actor_id IS NOT NULL)::boolean,
+            (p_order_id IS NOT NULL)::boolean, (p_action_prefix IS NOT NULL)::boolean,
+            (p_outcome IS NOT NULL)::boolean, (p_cursor_at IS NOT NULL)::boolean)
+        USING p_from, p_to, p_tenant_id, p_store_id, p_actor_id, p_order_id, v_like, p_outcome, p_cursor_at,
+              p_cursor_id, p_limit;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+    -- A própria leitura entra na cadeia (mesma transação; falhar aqui desfaz a leitura). Ator do contexto, como
+    -- audit_append; changes = os filtros (ids e datas, sem dados pessoais), o cursor só como booleano.
+    v_row.actor_type      := 'admin';
+    v_row.actor_id        := NULLIF(current_setting('app.actor_id', true), '')::uuid;
+    v_row.actor_label     := NULLIF(current_setting('app.actor_label', true), '');
+    v_row.impersonator_id := NULLIF(current_setting('app.impersonator_id', true), '')::uuid;
+    v_row.request_id      := NULLIF(current_setting('app.request_id', true), '')::uuid;
+    v_row.ip              := NULLIF(current_setting('app.ip', true), '')::inet;
+    v_row.user_agent_hash := decode(NULLIF(current_setting('app.user_agent_hash', true), ''), 'hex');
+    v_row.tenant_id       := NULLIF(current_setting('app.current_tenant_id', true), '')::uuid;
+    v_row.action          := 'admin.audit_timeline.read';
+    v_row.target_type     := 'audit_events';
+    v_row.outcome         := 'success';
+    v_row.changes         := jsonb_strip_nulls(jsonb_build_object(
+        'from', p_from, 'to', p_to, 'tenant_id', p_tenant_id, 'store_id', p_store_id, 'actor_id', p_actor_id,
+        'order_id', p_order_id, 'action_prefix', p_action_prefix, 'outcome', p_outcome,
+        'cursor', p_cursor_at IS NOT NULL, 'limit', p_limit, 'rows', v_rows));
+    PERFORM audit._chain_insert(v_row, false::boolean, false::boolean);
+END
+$body$;
+$chg_0026$);
+
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
 DECLARE

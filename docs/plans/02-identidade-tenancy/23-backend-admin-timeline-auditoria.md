@@ -14,6 +14,9 @@ O super_admin consulta a caixa negra numa timeline filtrável por tenant, loja, 
 ## Ajustes do supervisor (prevalecem sobre o contexto abaixo)
 - Rota: `GET /api/v1/superadmin/audit/events`, dentro do grupo `superadmin` já fechado pelo `superadmin_gate` (cartão 20). Quem não for super_admin com 2FA recebe o 404 uniforme + `denied`/`superadmin_gate` (não 403).
 - A leitura global faz-se só por `audit.admin_read_events(...)` (cartão 23a), com `query_as` estático + casts (exceção `audit.*`). Um 42501 da função dá 404 + denied; um 22023 dá 400.
+- Chamar `public.identity_admin_read_events(...)` (0025/0026; assinatura: p_from, p_to, p_tenant_id, p_store_id, p_actor_id, p_order_id, p_action_prefix, p_outcome, p_cursor_at, p_cursor_id, p_limit integer → id, created_at, tenant_id, store_id, actor_type, actor_id, actor_label, impersonator_id, action, target_type, target_id, outcome, reason, changes jsonb, chain_seq bigint, chain_ok boolean), e NÃO a `audit.*` diretamente.
+- A BD grava ela própria o evento `admin.audit_timeline.read` no sucesso (0026): a app não o duplica. As recusas (42501 → 404, 22023 → 400) gravam `denied` com `audit::record` num SAVEPOINT (o erro aborta a transação). Sem filtro seletivo (tenant, loja, ator ou encomenda), a janela máxima é 24 h; com filtro, 31 dias.
+- A porta da BD exige o GUC `app.session_id` (uuid) com a sessão de plataforma do pedido. Acrescentá-lo ao TenantTx/AuditCtx (`src/tenancy/db.rs`, `src/audit/`: autorizado só para este GUC), com teste de que é posto em todas as transações com sessão.
 - `src/http/mod.rs` (registar a rota no grupo superadmin) substitui `src/http/router.rs` em "Pode alterar". Teste de integração em `tests/admin_timeline.rs`; a Prova passa a `--test admin_timeline`.
 
 ## Contexto exato
