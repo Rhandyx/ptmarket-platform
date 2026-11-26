@@ -89,9 +89,15 @@ pub fn api(
             state,
         );
     };
+    // Dados pessoais e sessões: leituras síncronas na caixa negra.
     let read_sync = Router::new()
         .route("/api/v1/auth/session", get(identity::http::session_status))
-        .route("/api/v1/auth/logout", post(identity::http::logout));
+        .route("/api/v1/auth/logout", post(identity::http::logout))
+        .route("/api/v1/auth/register", post(identity::customers::register))
+        .route(
+            "/api/v1/me",
+            get(identity::customers::get_me).patch(identity::customers::patch_me),
+        );
     let read_async = with_csrf(read_async, sessions.clone());
     let read_sync = with_csrf(read_sync, sessions.clone());
     let routes = Router::new()

@@ -1,7 +1,11 @@
 use std::net::SocketAddr;
 
 use ptmarket_api::{
-    config::Config, http, http::client_ip::TrustedProxies, identity::Sessions, state::AppState,
+    config::Config,
+    http,
+    http::client_ip::TrustedProxies,
+    identity::{Registration, Sessions},
+    state::AppState,
 };
 
 #[tokio::main]
@@ -22,8 +26,15 @@ async fn run() -> anyhow::Result<()> {
     // Sem CSRF_KEY o binário não arranca (as sessões precisam dela).
     let csrf_key = cfg.require_csrf_key()?;
     let state = AppState::from_config(&cfg)?;
-    let sessions = Sessions::new(state.db_primary.clone(), state.redis.clone(), csrf_key)
+    let mut sessions = Sessions::new(state.db_primary.clone(), state.redis.clone(), csrf_key)
         .with_internal_token(cfg.internal_proxy_token.clone());
+    // Sem TURNSTILE_SECRET o registo de clientes responde 503 (falha fechado; nunca sem captcha).
+    // Em produção a variável passa a ser obrigatória (cartão 02/24b).
+    if cfg.turnstile_secret.is_some() {
+        sessions = sessions.with_registration(Registration::from_config(&cfg)?);
+    } else {
+        tracing::warn!("TURNSTILE_SECRET ausente: POST /api/v1/auth/register responde 503");
+    }
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!(addr = %cfg.bind_addr, "a escutar");
     let trusted = TrustedProxies::new(cfg.trusted_proxy_cidrs);

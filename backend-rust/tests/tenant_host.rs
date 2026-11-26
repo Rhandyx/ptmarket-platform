@@ -887,7 +887,11 @@ async fn parallel_burst_never_passes_the_limit(
         }
     }
     let max = u64::try_from(MAX_UNKNOWN_HOSTS)?;
-    assert!(hosts.db_lookups() <= max, "{} consultas", hosts.db_lookups());
+    assert!(
+        hosts.db_lookups() <= max,
+        "{} consultas",
+        hosts.db_lookups()
+    );
     assert_eq!(unknown, hosts.db_lookups());
 
     // Depois da rajada, nunca mais de `MAX_UNKNOWN_HOSTS` no contador.
@@ -923,7 +927,11 @@ async fn ipv6_slash_48_has_a_wider_second_limit(
     }
     let before = hosts.db_lookups();
     let r = from(&app, "r48-x.ptmarket.invalid", "2001:db8:9:ff::1").await?;
-    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "/64 novo no /48 esgotado");
+    assert_eq!(
+        r.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "/64 novo no /48 esgotado"
+    );
     assert_eq!(hosts.db_lookups(), before);
     let r = from(&app, "r48-x.ptmarket.invalid", "2001:db8:a::1").await?;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "outro /48");

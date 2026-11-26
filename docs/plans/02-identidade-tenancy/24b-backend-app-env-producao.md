@@ -22,13 +22,14 @@ Em strict, erro de arranque (ConfigError::Invalid com a razão, sem valores) qua
   - INTERNAL_PROXY_TOKEN ausente (o SSR do Next precisa dele para reenviar o Host e o IP reais);
   - CSRF_KEY ausente;
   - PLATFORM_ADMIN_HOST ausente;
+  - TURNSTILE_SECRET ausente (sem ela o registo de clientes dá 503) ou igual a uma chave de teste da Cloudflare (1x0000000000000000000000000000000AA, 2x…AA, 3x…AA: aprovam/recusam sempre; comparar com o prefixo `1x0000000000000000000000000000000`, `2x…`, `3x…`);
   - BIND_ADDR em 0.0.0.0/[::] SEM TRUSTED_PROXY_CIDRS (redundante com a 1.ª regra; não duplicar o teste).
 Em development/test tudo fica como hoje.
 .env.example: APP_ENV=development, com um comentário que explica as regras de produção.
 ```
 
 ## Feito quando
-- [ ] Testes em `config.rs`: sem APP_ENV → erro legível; `production` sem cada uma das 4 variáveis → erro que nomeia a variável; `production` completo → ok; `development` mínimo (o OK atual + APP_ENV) → ok
+- [ ] Testes em `config.rs`: sem APP_ENV → erro legível; `production` sem cada uma das 5 variáveis → erro que nomeia a variável; `production` completo → ok; `development` mínimo (o OK atual + APP_ENV) → ok
 - [ ] Nenhum valor de segredo aparece nas mensagens (teste: o erro não contém o valor do CSRF_KEY nem das URLs)
 
 ## Prova (um comando)

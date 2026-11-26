@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customers SET\n               name = CASE WHEN $2::bool THEN $3::text ELSE name END,\n               phone = CASE WHEN $4::bool THEN $5::text ELSE phone END,\n               nif = CASE WHEN $6::bool THEN $7::text ELSE nif END,\n               consents = CASE WHEN $8::bool IS NULL THEN consents\n                   ELSE jsonb_set(consents, '{marketing}', jsonb_build_object('granted', $8::bool,\n                       'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')))\n                   END,\n               updated_at = now()\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5323ba6c8fc8a433b1f7244a3cad04bbe9524c8776d5e19b543df4240c6d436b"
+}

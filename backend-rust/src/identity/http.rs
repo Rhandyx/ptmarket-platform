@@ -29,13 +29,15 @@ use crate::{
     error::AppError,
     identity::{
         csrf::{CsrfKey, capture_host, csrf_guard},
+        customers::Registration,
         session::{self, CookieKind, CookieRead, SessionId, SessionKind, SessionRow, Subject},
     },
     tenancy::{ResolvedHost, TenantId, begin_tenant_tx, db::begin_platform_tx},
 };
 
 /// Dependências das sessões: BD primária (lookup e revogação: nunca a réplica, uma revogação vale
-/// já), Redis (inatividade) e a chave CSRF.
+/// já), Redis (inatividade) e a chave CSRF. Leva também as dependências do registo de clientes
+/// (`Registration`: captcha e passwords vazadas); sem elas, `POST /api/v1/auth/register` → 503.
 #[derive(Clone)]
 pub struct Sessions {
     inner: Arc<Inner>,
@@ -52,6 +54,8 @@ struct Inner {
     idle: Option<Duration>,
     /// `INTERNAL_PROXY_TOKEN` (o mesmo do `HostResolver`): host efetivo e SSR sem `Origin` (CSRF).
     internal_token: Option<SecretString>,
+    /// Captcha e verificação de passwords vazadas do registo (cartão 02/17).
+    registration: Option<Registration>,
 }
 
 impl Sessions {
@@ -87,6 +91,7 @@ impl Sessions {
                 ns,
                 idle,
                 internal_token: None,
+                registration: None,
             }),
         }
     }
@@ -99,6 +104,20 @@ impl Sessions {
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Dependências do registo de clientes (`Registration::from_config` em produção; fakes nos
+    /// testes). Sem esta chamada o registo responde 503 (falha fechado: nunca sem captcha).
+    pub fn with_registration(self, registration: Registration) -> Self {
+        let mut inner = Arc::unwrap_or_clone(self.inner);
+        inner.registration = Some(registration);
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn registration(&self) -> Option<&Registration> {
+        self.inner.registration.as_ref()
     }
 
     pub(crate) fn internal_token(&self) -> Option<&SecretString> {
@@ -281,6 +300,16 @@ pub struct CurrentSession {
     cookie: Option<CookieKind>,
 }
 
+impl CurrentSession {
+    pub(crate) fn sessions(&self) -> &Sessions {
+        &self.sessions
+    }
+
+    pub(crate) fn actor(&self) -> Option<Actor> {
+        self.actor
+    }
+}
+
 impl<S: Send + Sync> FromRequestParts<S> for CurrentSession {
     type Rejection = AppError;
 
@@ -310,7 +339,7 @@ pub struct SessionStatus {
     pub csrf_token: Option<String>,
 }
 
-fn no_store(mut resp: Response) -> Response {
+pub(crate) fn no_store(mut resp: Response) -> Response {
     resp.headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     resp

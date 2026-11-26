@@ -45,6 +45,9 @@ pub struct Config {
     /// sessões. Igual em todas as instâncias; mudá-la invalida os tokens em uso. Validada se
     /// presente; obrigatória para servir sessões (`Config::require_csrf_key`).
     pub csrf_key: Option<SecretString>,
+    /// `TURNSTILE_SECRET` (chave secreta do Cloudflare Turnstile; `siteverify` no registo). Sem ela
+    /// o registo de clientes não é servido (`Config::require_turnstile_secret`).
+    pub turnstile_secret: Option<SecretString>,
 }
 
 fn platform_host(raw: Option<String>) -> Result<Option<String>, ConfigError> {
@@ -96,6 +99,23 @@ fn csrf_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
     Ok(Some(key))
 }
 
+const TURNSTILE_SECRET: &str = "TURNSTILE_SECRET";
+
+fn turnstile_secret(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
+    let Some(v) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let secret = SecretString::from(v);
+    let s = secret.expose_secret();
+    if s.trim() != s || s.chars().any(char::is_control) {
+        return Err(ConfigError::Invalid(
+            TURNSTILE_SECRET,
+            "sem espaços nas pontas nem caracteres de controlo",
+        ));
+    }
+    Ok(Some(secret))
+}
+
 fn trusted_proxies(raw: Option<String>) -> Result<Vec<IpNet>, ConfigError> {
     const KEY: &str = "TRUSTED_PROXY_CIDRS";
     let raw = raw.unwrap_or_default();
@@ -143,6 +163,13 @@ impl Config {
         self.csrf_key.clone().ok_or(ConfigError::Missing(CSRF_KEY))
     }
 
+    /// `TURNSTILE_SECRET` para servir o registo de clientes; ausente → erro de arranque.
+    pub fn require_turnstile_secret(&self) -> Result<SecretString, ConfigError> {
+        self.turnstile_secret
+            .clone()
+            .ok_or(ConfigError::Missing(TURNSTILE_SECRET))
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let pg = ["postgres://", "postgresql://"];
         let bind = get("BIND_ADDR")
@@ -159,6 +186,7 @@ impl Config {
             platform_admin_host: platform_host(get("PLATFORM_ADMIN_HOST"))?,
             internal_proxy_token: internal_token(get("INTERNAL_PROXY_TOKEN"))?,
             csrf_key: csrf_key(get("CSRF_KEY"))?,
+            turnstile_secret: turnstile_secret(get(TURNSTILE_SECRET))?,
         })
     }
 }
@@ -297,6 +325,37 @@ mod tests {
             if let Err(e) = c {
                 assert!(!e.to_string().contains("cccc"));
             }
+        }
+    }
+
+    #[test]
+    fn turnstile_secret_optional_validated_and_hidden() {
+        let c = Config::from_lookup(env(&OK));
+        assert!(c.as_ref().is_ok_and(|c| c.turnstile_secret.is_none()));
+        let e = c
+            .ok()
+            .and_then(|c| c.require_turnstile_secret().err())
+            .map(|e| e.to_string());
+        assert_eq!(
+            e.as_deref(),
+            Some("variável de ambiente em falta: TURNSTILE_SECRET")
+        );
+        let mut v = OK.to_vec();
+        v.push(("TURNSTILE_SECRET", "0x4AAAsegredo-turnstile"));
+        let c = Config::from_lookup(env(&v));
+        assert!(
+            c.as_ref()
+                .is_ok_and(|c| c.require_turnstile_secret().is_ok())
+        );
+        assert!(!format!("{c:?}").contains("segredo-turnstile"));
+        for bad in [" 0x4AAAsegredo", "0x4AAA\nsegredo"] {
+            let mut v = OK.to_vec();
+            v.push(("TURNSTILE_SECRET", bad));
+            let e = Config::from_lookup(env(&v)).err().map(|e| e.to_string());
+            assert!(
+                e.as_deref().is_some_and(|s| !s.contains("segredo")),
+                "{bad:?}"
+            );
         }
     }
 

@@ -43,6 +43,49 @@
         }
       }
     },
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Regista um cliente (conta global). Responde sempre 202 com o mesmo corpo, exista ou não o\nemail; não inicia sessão.",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Pedido aceite (sempre igual, exista ou não a conta)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterAccepted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Pedido com sessão iniciada"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "422": {
+            "description": "Dados inválidos, password vazada ou verificação anti-robô falhada"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/auth/session": {
       "get": {
         "tags": [
@@ -60,6 +103,91 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "Perfil do cliente autenticado (só o próprio: não há id no pedido).",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "description": "Perfil do cliente da sessão",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de cliente"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "Altera nome, telefone, NIF e consentimento de marketing do cliente autenticado.",
+        "operationId": "patch_me",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfilePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Perfil depois da alteração",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerProfile"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de cliente"
+          },
+          "403": {
+            "description": "Token CSRF ou Origin inválidos"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "422": {
+            "description": "Dados inválidos (ex.: NIF com dígito de controlo errado)"
           },
           "503": {
             "description": "Serviço temporariamente indisponível"
@@ -157,6 +285,28 @@
   },
   "components": {
     "schemas": {
+      "ConsentsInput": {
+        "type": "object",
+        "description": "Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado).",
+        "required": [
+          "terms_version",
+          "privacy_version"
+        ],
+        "properties": {
+          "marketing": {
+            "type": "boolean"
+          },
+          "privacy_version": {
+            "type": "string",
+            "description": "Versão da política de privacidade aceite (obrigatória; 1–64 caracteres)."
+          },
+          "terms_version": {
+            "type": "string",
+            "description": "Versão dos termos aceites (obrigatória; 1–64 caracteres)."
+          }
+        },
+        "additionalProperties": false
+      },
       "CountryCode": {
         "type": "string",
         "description": "`tenants.country_code`.",
@@ -164,6 +314,146 @@
           "PT",
           "ES"
         ]
+      },
+      "CustomerProfile": {
+        "type": "object",
+        "description": "Perfil do cliente autenticado.",
+        "required": [
+          "id",
+          "email",
+          "name",
+          "phone",
+          "nif",
+          "consents",
+          "created_at"
+        ],
+        "properties": {
+          "consents": {
+            "type": "object",
+            "description": "`{\"terms\": {\"version\", \"at\"}, \"privacy\": {\"version\", \"at\"}, \"marketing\": {\"granted\", \"at\"}}`\n(`at` em RFC 3339 UTC)."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339 UTC."
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nif": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ProfilePatch": {
+        "type": "object",
+        "description": "Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `\"\"` apagam o valor.\nEmail e password ficam fora (exigem reautenticação).",
+        "properties": {
+          "marketing": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Consentimento de marketing (datado no servidor)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1 a 255 caracteres."
+          },
+          "nif": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PT: 9 dígitos com dígito de controlo; ES: 9 caracteres alfanuméricos; `\"\"` apaga."
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Até 50 caracteres; `\"\"` apaga."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterAccepted": {
+        "type": "object",
+        "description": "Resposta do registo: sempre a mesma, exista ou não a conta.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Sempre `ok`."
+          }
+        }
+      },
+      "RegisterRequest": {
+        "type": "object",
+        "description": "Pedido de registo. Sem `Debug`: leva a password.",
+        "required": [
+          "email",
+          "password",
+          "name",
+          "consents",
+          "turnstile_token",
+          "form_started_at"
+        ],
+        "properties": {
+          "consents": {
+            "$ref": "#/components/schemas/ConsentsInput"
+          },
+          "email": {
+            "type": "string",
+            "description": "Até 255 caracteres; gravado normalizado (trim, NFC, minúsculas)."
+          },
+          "form_started_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Instante em que o formulário foi aberto (ms desde 1970-01-01 UTC)."
+          },
+          "name": {
+            "type": "string",
+            "description": "1 a 255 caracteres."
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "description": "8 a 128 caracteres."
+          },
+          "turnstile_token": {
+            "type": "string",
+            "description": "Token do widget Cloudflare Turnstile (verificado no servidor; uso único)."
+          },
+          "website": {
+            "type": "string",
+            "description": "Honeypot: campo invisível; tem de vir vazio (ou ausente)."
+          }
+        },
+        "additionalProperties": false
       },
       "SessionStatus": {
         "type": "object",

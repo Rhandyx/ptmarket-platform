@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customers (id, email, name, password_hash, consents)\n           VALUES ($1, $2, $3, $4, jsonb_build_object(\n               'terms', jsonb_build_object('version', $5::text,\n                   'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')),\n               'privacy', jsonb_build_object('version', $6::text,\n                   'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')),\n               'marketing', jsonb_build_object('granted', $7::bool,\n                   'at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e8157d617c948d6c3ea465b40ce47a05d3d7a3cf411c841f96f61a66bbc0af70"
+}

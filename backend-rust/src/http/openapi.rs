@@ -11,7 +11,10 @@ use crate::{http::health, identity, tenancy};
         health::readyz,
         tenancy::http::tenant_info,
         identity::http::session_status,
-        identity::http::logout
+        identity::http::logout,
+        identity::customers::register,
+        identity::customers::get_me,
+        identity::customers::patch_me
     ),
     info(title = "PT Market API", version = "0.1.0")
 )]
