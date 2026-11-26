@@ -88,6 +88,19 @@
           "404": {
             "description": "Host desconhecido, inválido ou tenant inativo"
           },
+          "429": {
+            "description": "Demasiados hosts desconhecidos deste cliente no último minuto",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Segundos até poder repetir"
+              }
+            }
+          },
           "503": {
             "description": "Serviço temporariamente indisponível"
           }

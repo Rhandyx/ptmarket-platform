@@ -6,7 +6,10 @@ use deadpool_redis::Runtime;
 use secrecy::ExposeSecret;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::{config::Config, storage::NullStorage, storage::StorageBackend, tenancy::HostResolver};
+use crate::{
+    config::Config, http::client_ip::TrustedProxies, storage::NullStorage, storage::StorageBackend,
+    tenancy::HostResolver,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,7 +19,8 @@ pub struct AppState {
     pub db_replica: sqlx::PgPool,
     pub redis: deadpool_redis::Pool,
     pub storage: Arc<dyn StorageBackend>,
-    /// Resolve o tenant pelo `Host` (cache partilhada entre pedidos; lê da réplica).
+    /// Resolve o tenant pelo `Host` (cache partilhada entre pedidos; lê da réplica; travão a hosts
+    /// desconhecidos por IP no Redis, com falha aberta).
     pub hosts: Arc<HostResolver>,
 }
 
@@ -38,6 +42,10 @@ impl AppState {
             db_replica.clone(),
             cfg.platform_admin_host.clone(),
             cfg.internal_proxy_token.clone(),
+        )
+        .with_miss_limit(
+            redis.clone(),
+            TrustedProxies::new(cfg.trusted_proxy_cidrs.clone()),
         );
         Ok(Self {
             db_primary: lazy(cfg.database_primary_url.expose_secret())

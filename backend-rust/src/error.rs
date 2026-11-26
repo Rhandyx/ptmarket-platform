@@ -29,6 +29,10 @@ pub enum AppError {
     /// Capacidade esgotada (ex.: fila de hashes de password cheia). 503 + `Retry-After`.
     #[error("busy")]
     Busy,
+    /// Demasiados pedidos deste cliente (ex.: hosts desconhecidos a mais no último minuto). 429 +
+    /// `Retry-After` (segundos, no mínimo 1).
+    #[error("too many requests")]
+    TooManyRequests { retry_after_s: u64 },
     /// Dependência obrigatória indisponível (ex.: caixa negra não gravou): falha fechado, 503.
     #[error("service unavailable")]
     ServiceUnavailable,
@@ -45,6 +49,7 @@ impl AppError {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict => StatusCode::CONFLICT,
             Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -58,6 +63,7 @@ impl AppError {
             Self::Validation(_) => "validation",
             Self::Conflict => "conflict",
             Self::Busy => "busy",
+            Self::TooManyRequests { .. } => "too_many_requests",
             Self::ServiceUnavailable => "service_unavailable",
             Self::Internal(_) => "internal",
         }
@@ -71,6 +77,7 @@ impl AppError {
             Self::Validation(_) => "Dados inválidos.",
             Self::Conflict => "Conflito com o estado atual.",
             Self::Busy => "Serviço ocupado. Tente novamente dentro de instantes.",
+            Self::TooManyRequests { .. } => "Demasiados pedidos. Tente novamente mais tarde.",
             Self::ServiceUnavailable => "Serviço temporariamente indisponível.",
             Self::Internal(_) => "Erro interno.",
         }
@@ -90,11 +97,16 @@ impl IntoResponse for AppError {
             error["fields"] = serde_json::json!(fields);
         }
         let mut resp = (self.status(), Json(serde_json::json!({ "error": error }))).into_response();
-        if matches!(self, Self::Busy) {
-            resp.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static(RETRY_AFTER_BUSY_SECS),
-            );
+        let retry_after = match &self {
+            Self::Busy => Some(axum::http::HeaderValue::from_static(RETRY_AFTER_BUSY_SECS)),
+            Self::TooManyRequests { retry_after_s } => {
+                Some(axum::http::HeaderValue::from((*retry_after_s).max(1)))
+            }
+            _ => None,
+        };
+        if let Some(v) = retry_after {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, v);
         }
         resp
     }
@@ -126,6 +138,11 @@ mod tests {
             (AppError::Validation(vec![]), 422, "validation"),
             (AppError::Conflict, 409, "conflict"),
             (AppError::Busy, 503, "busy"),
+            (
+                AppError::TooManyRequests { retry_after_s: 7 },
+                429,
+                "too_many_requests",
+            ),
             (AppError::ServiceUnavailable, 503, "service_unavailable"),
             (AppError::Internal(anyhow::anyhow!("x")), 500, "internal"),
         ];
@@ -154,6 +171,35 @@ mod tests {
                 .get(axum::http::header::RETRY_AFTER)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_sets_retry_after_and_generic_body() {
+        let retry = |e: AppError| {
+            e.into_response()
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            retry(AppError::TooManyRequests { retry_after_s: 42 }).as_deref(),
+            Some("42")
+        );
+        // Nunca `Retry-After: 0` (o cliente repetiria de imediato).
+        assert_eq!(
+            retry(AppError::TooManyRequests { retry_after_s: 0 }).as_deref(),
+            Some("1")
+        );
+        let (s, body) = parts(AppError::TooManyRequests { retry_after_s: 42 }).await;
+        assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+        let mut keys: Vec<&str> = body["error"]
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        keys.sort_unstable();
+        assert_eq!(keys, ["code", "message"]);
+        assert!(!body.to_string().contains("42"));
     }
 
     #[tokio::test]

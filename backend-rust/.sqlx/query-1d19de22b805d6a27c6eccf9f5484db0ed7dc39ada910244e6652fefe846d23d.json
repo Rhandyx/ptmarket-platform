@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email,\n                             invoicing_credentials_enc, eupago_split_key, stripe_account_id,\n                             publish_to_national_portal, custom_commission_bps, kyc_verified)\n         VALUES ($1, $2, $3, $4, $5, '500000000', $6, 'loja@test.invalid', $7, $8, $9, $10,\n                 777, true)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1d19de22b805d6a27c6eccf9f5484db0ed7dc39ada910244e6652fefe846d23d"
+}

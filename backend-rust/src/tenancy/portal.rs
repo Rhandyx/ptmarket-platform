@@ -2,12 +2,19 @@
 //!
 //! `begin_portal_read_tx` só abre para um tenant `national_portal` (senão `Forbidden`; o handler
 //! junta a marca `DENIED_NOT_PORTAL` à resposta e a caixa negra grava o `denied`). Dentro dela a BD
-//! (0016) deixa ver lojas/produtos/variantes publicados de todos os tenants ativos do mesmo país.
+//! deixa ver lojas/produtos/variantes publicados de todos os tenants ativos do mesmo país.
 //!
-//! Defesa em profundidade: o RLS é por linha, não por coluna. Por isso `PortalReadTx` NÃO dá
-//! acesso à ligação: só tem consultas dedicadas, cujas linhas (`PortalStore`) não têm campos
-//! sensíveis (`query_as!` obriga a que cada coluna selecionada seja um campo do tipo). Colunas que
-//! nunca saem em modo portal: `PORTAL_FORBIDDEN_COLUMNS`.
+//! As lojas de outros tenants leem-se SÓ na view `portal_stores` (0021: `security_barrier`, já
+//! filtrada por publicada + ativa + mesmo país, sem colunas sensíveis); a tabela `stores` só mostra
+//! as do próprio tenant. Produtos e variantes continuam nas tabelas.
+//!
+//! Defesa em profundidade: `PortalReadTx` NÃO dá acesso à ligação: só tem consultas dedicadas,
+//! cujas linhas (`PortalStore`) não têm campos sensíveis. Colunas que nunca saem em modo portal
+//! (nem existem na view): `PORTAL_FORBIDDEN_COLUMNS`.
+//!
+//! Exceção à regra `query!` (como a do `audit.*`): a view é `REVOKE ALL FROM PUBLIC` + `SELECT`
+//! só para `ptmarket_app`, por isso o migrator não tem SELECT para o `EXPLAIN` da macro. Usa-se
+//! `query_as` com SQL estático, cast de tipo exato em cada coluna e argumento, e `FromRow`.
 //!
 //! Não é aceite pelo outbox nem pela caixa negra de mutações (não é `TenantTx` nem `AuditedTx`):
 //! ```compile_fail
@@ -47,19 +54,22 @@ use crate::{
 /// Marca de recusa para a resposta de um tenant que não é o portal nacional.
 pub const DENIED_NOT_PORTAL: Denied = Denied("not_national_portal");
 
-/// Colunas de `stores` que nunca são selecionadas em modo portal (nem qualquer `*_enc`/`*_key`).
-pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 4] = [
+/// Colunas de `stores` que nunca são selecionadas em modo portal (nem qualquer `*_enc`/`*_key`)
+/// e que a view `portal_stores` não tem.
+pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 6] = [
     "iban",
     "invoicing_credentials_enc",
     "eupago_split_key",
     "stripe_account_id",
+    "custom_commission_bps",
+    "kyc_verified",
 ];
 
 /// Máximo de linhas por consulta do portal.
 pub const MAX_PORTAL_ROWS: i64 = 100;
 
 /// Loja vista pelo portal nacional: só dados públicos.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct PortalStore {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -79,18 +89,19 @@ impl PortalReadTx {
         self.tenant
     }
 
-    /// Lojas publicadas no portal (todas as que o RLS deixa ver), por nome; no máximo
-    /// `MAX_PORTAL_ROWS` (o `limit` é limitado a 1..=100).
+    /// Lojas publicadas no portal (view `portal_stores`, já filtrada pela BD), por nome; no
+    /// máximo `MAX_PORTAL_ROWS` (o `limit` é limitado a 1..=100). As 4 colunas são `NOT NULL`
+    /// em `stores`.
     pub async fn published_stores(&mut self, limit: i64) -> Result<Vec<PortalStore>, AppError> {
         let limit = limit.clamp(1, MAX_PORTAL_ROWS);
-        sqlx::query_as!(
-            PortalStore,
-            "SELECT id, tenant_id, name, slug FROM stores
-             WHERE publish_to_national_portal AND is_active
+        sqlx::query_as::<_, PortalStore>(
+            "SELECT id::uuid AS id, tenant_id::uuid AS tenant_id, name::text AS name,
+                    slug::text AS slug
+             FROM portal_stores
              ORDER BY name, id
-             LIMIT $1",
-            limit
+             LIMIT $1::int8",
         )
+        .bind(limit)
         .fetch_all(&mut *self.tx)
         .await
         .map_err(db_error)
@@ -135,8 +146,7 @@ pub async fn begin_portal_read_tx(
 mod tests {
     use super::*;
 
-    /// Os campos de `PortalStore` são exatamente as colunas da consulta (`query_as!`): nenhum é
-    /// sensível.
+    /// Os campos de `PortalStore` (as colunas da consulta): nenhum é sensível.
     #[test]
     fn portal_store_has_no_sensitive_column() {
         let s = PortalStore {

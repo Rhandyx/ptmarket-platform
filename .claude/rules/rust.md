@@ -10,7 +10,7 @@ paths:
 - PK = UUIDv7 gerado em Rust (`Uuid::now_v7()`).
 - `state.db_replica` para leituras públicas; `state.db_primary` para escritas, checkout, stock, admin.
 - SQL só com `sqlx::query!`/`query_as!`. JSONB: passar `serde_json::Value`, nunca string + `::jsonb`.
-  Exceção única: chamadas a `audit.*` (schema selado; o migrator não tem EXECUTE/SELECT para o EXPLAIN da macro) usam `query_scalar`/`query_as` com SQL estático, binds e cast de tipo exato em cada argumento.
+  Exceções (o migrator não tem EXECUTE/SELECT para o EXPLAIN da macro): chamadas a `audit.*` (schema selado) e a view `portal_stores` (dona `ptmarket_portal`, 0021) usam `query_scalar`/`query_as` com SQL estático, binds e cast de tipo exato em cada argumento/coluna. Nenhuma outra sem aprovação do supervisor.
 - Stock: desconto atómico `WHERE stock_qty >= $n` + linha em `stock_reservations` na mesma transação (spec 11 D2). `.sqlx/` no git (`cargo sqlx prepare`). Eventos: escrever em `outbox_events` na mesma transação; nunca publicar no Redis a partir de um handler. Caixa negra (spec 13): toda a mutação e toda a recusa 401/403/IDOR grava `audit_events` na mesma transação via `AuditCtx` obrigatório; todo o pedido de utilizador autenticado (incluindo leituras) gera audit_event pelo middleware (leituras via Redis Stream, exceto admin/superadmin e dados pessoais = síncrono).
 - Todo o handler com ID verifica dono/tenant (além de RLS) e tem teste anti-IDOR.
 - DTOs: `#[serde(deny_unknown_fields)]` + validação; limites de tamanho.

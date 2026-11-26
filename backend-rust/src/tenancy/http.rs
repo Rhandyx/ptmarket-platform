@@ -2,11 +2,15 @@
 //!
 //! A layer `resolve_host` fica POR FORA da caixa negra e nunca recusa: só põe `ResolvedHost` (e,
 //! se for um tenant, o `TenantId` que o middleware de auditoria lê) nas extensões e apaga o
-//! `X-Internal-Token`. Quem recusa (404) são os extractores, por dentro da caixa negra.
+//! `X-Internal-Token`. Quem recusa (404, ou 429 com `Retry-After` se o cliente estiver limitado
+//! por hosts desconhecidos) são os extractores, por dentro da caixa negra (o 429 segue a regra de
+//! resumo do middleware).
+
+use std::net::SocketAddr;
 
 use axum::{
     Json,
-    extract::{FromRequestParts, Request, State},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
     http::request::Parts,
     middleware::Next,
     response::Response,
@@ -20,13 +24,25 @@ use crate::{
     tenancy::{
         db::db_error,
         host::X_INTERNAL_TOKEN,
-        resolver::{CountryCode, ResolvedHost, ResolvedTenant, TenantType},
+        resolver::{CountryCode, HostThrottle, ResolvedHost, ResolvedTenant, TenantType},
     },
 };
 
 /// Layer (`from_fn_with_state`) que resolve o `Host` de cada pedido. Por fora da caixa negra.
+/// Sem consulta (cliente limitado ou sem lugar no semáforo): `ResolvedHost::Unknown` +
+/// `HostThrottle`.
 pub async fn resolve_host(State(s): State<AppState>, mut req: Request, next: Next) -> Response {
-    let resolved = s.hosts.resolve(req.headers(), req.uri()).await;
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let resolved = match s.hosts.resolve(req.headers(), req.uri(), peer).await {
+        Ok(r) => r,
+        Err(throttle) => {
+            req.extensions_mut().insert(throttle);
+            ResolvedHost::Unknown
+        }
+    };
     // O segredo do proxy interno nunca chega aos handlers nem a logs.
     req.headers_mut().remove(X_INTERNAL_TOKEN);
     if let ResolvedHost::Tenant(t) = resolved {
@@ -36,7 +52,17 @@ pub async fn resolve_host(State(s): State<AppState>, mut req: Request, next: Nex
     next.run(req).await
 }
 
+/// `ResolvedHost` do pedido; sem consulta → 429 (limitado) ou 503 + `Retry-After` (sem lugar).
 fn resolved_host(parts: &Parts) -> Result<ResolvedHost, AppError> {
+    match parts.extensions.get::<HostThrottle>() {
+        Some(HostThrottle::Limited { retry_after_s }) => {
+            return Err(AppError::TooManyRequests {
+                retry_after_s: *retry_after_s,
+            });
+        }
+        Some(HostThrottle::Busy) => return Err(AppError::Busy),
+        None => {}
+    }
     parts
         .extensions
         .get::<ResolvedHost>()
@@ -48,7 +74,8 @@ fn resolved_host(parts: &Parts) -> Result<ResolvedHost, AppError> {
         })
 }
 
-/// Rotas de tenant: só um `Host` de tenant ativo; tudo o resto → 404 genérico (BD em baixo → 503).
+/// Rotas de tenant: só um `Host` de tenant ativo; tudo o resto → 404 genérico (BD ou Redis em
+/// baixo, ou sem lugar → 503; cliente limitado → 429).
 impl<S: Send + Sync> FromRequestParts<S> for ResolvedTenant {
     type Rejection = AppError;
 
@@ -61,7 +88,8 @@ impl<S: Send + Sync> FromRequestParts<S> for ResolvedTenant {
     }
 }
 
-/// Extractor das rotas de plataforma: só `PLATFORM_ADMIN_HOST`; um tenant (ou outro host) → 404.
+/// Extractor das rotas de plataforma: só `PLATFORM_ADMIN_HOST`; um tenant (ou outro host) → 404
+/// (cliente limitado → 429; sem lugar → 503).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformHost;
 
@@ -124,6 +152,8 @@ pub struct TenantInfo {
     responses(
         (status = 200, description = "Tenant do Host", body = TenantInfo),
         (status = 404, description = "Host desconhecido, inválido ou tenant inativo"),
+        (status = 429, description = "Demasiados hosts desconhecidos deste cliente no último minuto",
+            headers(("Retry-After" = u64, description = "Segundos até poder repetir"))),
         (status = 503, description = "Serviço temporariamente indisponível")
     )
 )]

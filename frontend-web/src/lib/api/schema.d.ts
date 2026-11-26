@@ -231,6 +231,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Demasiados hosts desconhecidos deste cliente no último minuto */
+            429: {
+                headers: {
+                    /** @description Segundos até poder repetir */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Serviço temporariamente indisponível */
             503: {
                 headers: {

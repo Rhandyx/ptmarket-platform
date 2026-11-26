@@ -955,7 +955,8 @@ async fn no_kill_switch(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResu
     let rows = events(&db, t, r.rid).await?;
     assert_eq!(rows.len(), 1);
     let changes = rows[0].7.clone().unwrap_or_default();
-    assert_eq!(changes["query_keys"], serde_json::json!(["email", "page"]));
+    // Par de 2 com chave sensível ("email", x) → x mascarado pelo redator comum (vetores 03e): mascarar a mais é aceite.
+    assert_eq!(changes["query_keys"], serde_json::json!(["email", "[pii]"]));
     let text = format!("{rows:?}");
     for s in secrets {
         assert!(!text.contains(s), "{s} no evento: {text}");
