@@ -64,7 +64,8 @@ END
 $$;
 
 -- Tenants TA, TB; lojas SA (TA), SB (TB).
--- Utilizadores: X = merchant_owner de SA · Y = tenant_admin de TB · S = super_admin · Z = merchant_staff de SA, INATIVO.
+-- Utilizadores: X = merchant_owner de SA · Y = tenant_admin de TB · S = super_admin · Z = merchant_staff de SA, INATIVO
+-- · W = sponsor_admin da entidade E (0028).
 SELECT set_config('app.actor_label', 'test', true);
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013a0', true);
 
@@ -161,6 +162,56 @@ SELECT pg_temp.expect_error(
 SELECT pg_temp.expect_error(
     $q$INSERT INTO user_roles (user_id, role) VALUES ('00000000-0000-7000-8000-0000000013ee', 'super_admin')$q$,
     '23503', 'papel de utilizador inexistente falha');
+-- 0028: sponsor_admin com âmbito de entidade patrocinadora (W = sponsor_admin da entidade E).
+INSERT INTO sponsor_entities (id, kind, name, slug) VALUES
+    ('00000000-0000-7000-8000-0000000013d1', 'association', 'Associação RBAC', 'assoc-rbac');
+INSERT INTO users (id, email, full_name) VALUES
+    ('00000000-0000-7000-8000-0000000013e7', 'patrocinio.w@teste.invalid', 'Wanda Patrocinio');
+INSERT INTO user_roles (id, user_id, role, sponsor_entity_id) VALUES
+    ('00000000-0000-7000-8000-0000000013f7', '00000000-0000-7000-8000-0000000013e7', 'sponsor_admin',
+     '00000000-0000-7000-8000-0000000013d1');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM user_roles WHERE id = '00000000-0000-7000-8000-0000000013f7'$q$,
+    1, 'sponsor_admin com entidade passa');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role) VALUES ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin')$q$,
+    '23514', 'sponsor_admin sem entidade falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id, tenant_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin', '00000000-0000-7000-8000-0000000013d1',
+        '00000000-0000-7000-8000-0000000013a0')$q$,
+    '23514', 'sponsor_admin com tenant_id falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id, tenant_id, store_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin', '00000000-0000-7000-8000-0000000013d1',
+        '00000000-0000-7000-8000-0000000013a0', '00000000-0000-7000-8000-0000000013a1')$q$,
+    '23514', 'sponsor_admin com tenant_id + store_id falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, tenant_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin', '00000000-0000-7000-8000-0000000013a0')$q$,
+    '23514', 'sponsor_admin só com tenant_id falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, tenant_id, store_id, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e1', 'merchant_owner', '00000000-0000-7000-8000-0000000013a0',
+        '00000000-0000-7000-8000-0000000013a1', '00000000-0000-7000-8000-0000000013d1')$q$,
+    '23514', 'merchant_owner com entidade falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, tenant_id, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e2', 'tenant_admin', '00000000-0000-7000-8000-0000000013b0',
+        '00000000-0000-7000-8000-0000000013d1')$q$,
+    '23514', 'tenant_admin com entidade falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e5', 'super_admin', '00000000-0000-7000-8000-0000000013d1')$q$,
+    '23514', 'super_admin com entidade falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin', '00000000-0000-7000-8000-0000000013d1')$q$,
+    '23505', 'sponsor_admin duplicado exato = 23505');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e7', 'sponsor_admin', '00000000-0000-7000-8000-0000000013dd')$q$,
+    '23503', 'sponsor_admin com entidade inexistente falha');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO users (email, full_name, totp_enabled) VALUES ('t@teste.invalid', 'T', true)$q$,
     '23514', 'totp_enabled sem totp_secret_enc falha');
@@ -211,6 +262,17 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM users', 1, 'Y vê só a sua co
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM user_roles WHERE role = 'tenant_admin'$q$, 1, 'Y lê o seu papel tenant_admin');
 SELECT pg_temp.expect_count('SELECT count(*) FROM user_roles', 1, 'Y vê só os seus papéis');
+
+SELECT pg_temp.as_actor('municipal', '00000000-0000-7000-8000-0000000013e7');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM user_roles
+       WHERE role = 'sponsor_admin' AND sponsor_entity_id = '00000000-0000-7000-8000-0000000013d1'$q$,
+    1, 'W (sponsor_admin) lê o seu papel com a entidade');
+SELECT pg_temp.expect_count('SELECT count(*) FROM user_roles', 1, 'W vê só os seus papéis');
+SELECT pg_temp.as_actor('merchant', '00000000-0000-7000-8000-0000000013e1');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM user_roles WHERE user_id = '00000000-0000-7000-8000-0000000013e7'$q$,
+    0, 'X não lê o papel sponsor_admin de W');
 
 SELECT pg_temp.as_actor('admin', '00000000-0000-7000-8000-0000000013e5');
 SELECT pg_temp.expect_count('SELECT count(*) FROM users', 1, 'S (admin) vê só a sua conta (sem listagem global)');
@@ -286,6 +348,13 @@ SELECT pg_temp.expect_error(
     $q$INSERT INTO user_roles (user_id, role, tenant_id) VALUES
        ('00000000-0000-7000-8000-0000000013e1', 'tenant_admin', '00000000-0000-7000-8000-0000000013a0')$q$,
     '42501', 'app não se dá tenant_admin');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO user_roles (user_id, role, sponsor_entity_id) VALUES
+       ('00000000-0000-7000-8000-0000000013e1', 'sponsor_admin', '00000000-0000-7000-8000-0000000013d1')$q$,
+    '42501', 'app não se dá sponsor_admin');
+SELECT pg_temp.expect_error(
+    $q$UPDATE user_roles SET sponsor_entity_id = NULL WHERE id = '00000000-0000-7000-8000-0000000013f7'$q$,
+    '42501', 'app não altera o âmbito de sponsor_admin');
 SELECT pg_temp.expect_error(
     $q$UPDATE user_roles SET role = 'super_admin', tenant_id = NULL, store_id = NULL
        WHERE id = '00000000-0000-7000-8000-0000000013f1'$q$,
@@ -445,11 +514,11 @@ SELECT pg_temp.expect_count(
        WHERE target_type = 'users' AND actor_type = 'db' AND action = 'users.insert'
          AND tenant_id = '00000000-0000-7000-8000-0000000013a0'
          AND changes->'after'->>'email' = '[pii]' AND changes->'after'->>'full_name' = '[pii]'$q$,
-    4, 'seed do dono em users ficou na caixa negra (ator db), email/nome = [pii]');
+    5, 'seed do dono em users ficou na caixa negra (ator db), email/nome = [pii]');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE target_type IN ('users', 'user_roles')
-         AND changes::text ~* '(argon2id|ZW5jLXRvdHA|Tk9WTy|Lojista|teste\.invalid|Xavier|Yara|Sofia|Zeca)'$q$,
+         AND changes::text ~* '(argon2id|ZW5jLXRvdHA|Tk9WTy|Lojista|teste\.invalid|Xavier|Yara|Sofia|Zeca|Wanda|Patrocinio)'$q$,
     0, 'eventos de users/user_roles sem hash, segredo TOTP, email nem nome em claro');
 RESET ROLE;
 
