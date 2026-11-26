@@ -51,7 +51,9 @@
 6. **Modelo comercial (26/11, spec 14 canónica):**
    - **Canais e catálogo:** `tenants` = canais com domínio (`custom_domain` continua NOT NULL) e `sponsor_entities` = Câmara, Junta ou Associação (N:N com as lojas por `store_sponsorships`: pending/active/rejected/expired/revoked). Catálogo universal em `lojaportugal.pt`, sem opt-out (`shipping_scope` controla a entrega); `stores.tenant_id` = canal nacional do país.
    - **Comissão:** patrocínio ativo → `MIN(commission_override_bps)` (0); senão `custom_commission_bps` (só super_admin); senão o plano (`commission_payg` 8%/6% marginal por defeito, ou `tiered_subscription`), com escalões em `billing_plan_tiers` (nunca hardcoded). `sponsored_discount_cents` = (referência 8% ou exceção) − fee, sobre o subtotal sem portes, half-up. A cobrança das mensalidades fica para o épico de pagamentos.
-   - **Painel e preços:** painel único `admin.ptmarket.pt` (âmbito pelo papel; `sponsor_admin`). Patrocínio sem domínio: Junta/Associação 750–1.500 € + 1.200–1.800 €/ano; Câmara 2.500–3.500 € + 2.400–3.000 €/ano.
+   - **Painel e preços:** painel único `admin.ptmarket.pt` (âmbito pelo papel; `sponsor_admin`). Preço único por tipo de entidade, com ou sem domínio próprio. O domínio white-label (3 templates + PWA) é uma opção incluída a 0 €, que se ativa no arranque ou mais tarde (correção do owner, 26/11). Os valores:
+     - Câmara: 12.500–14.500 € no Ano 1 + 2.700–3.600 €/ano (o triénio CCP do doc 01 §3.2 mantém-se).
+     - Junta/Associação: 750–1.500 € + 1.200–1.800 €/ano. Pode operar só com selos e página dedicada ou ativar o domínio.
 5. Pendentes: textos dos Termos/Privacidade (o owner traz um documento antigo; agente jurídico, só local; bloqueia a produção). IVA ES / NIF ES no futuro. Marca (fontes/paleta). Retenção da BD: default 10/2/1 anos.
 
 ## Dívida técnica conhecida
