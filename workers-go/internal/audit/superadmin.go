@@ -72,13 +72,6 @@ type alertFields struct {
 	TargetID   *string `json:"target_id"`
 }
 
-func deref(s *string) string {
-	if s == nil {
-		return "-"
-	}
-	return *s
-}
-
 func (r *Relay) scopeArg() []string {
 	sc := scope(r.Tenants)
 	if sc == nil {
@@ -182,10 +175,13 @@ func (r *Relay) relayOne(ctx context.Context, a alertRow) error {
 	if r.Alert == nil {
 		return errors.New("sem Alerter")
 	}
+	// Sem dados pessoais nem markdown (cartão 02/09b): target_id é texto livre (pode ser um e-mail ou um
+	// link mascarado); só passam UUIDs e tokens simples, o resto vira "-". O mesmo resumo vai para todos os
+	// canais (incluindo o LogSink).
 	return r.Alert.Notify(ctx, Alert{
-		Kind: *a.Kind,
-		Summary: fmt.Sprintf("ator %s/%s · ação %s · alvo %s/%s · %s", f.ActorType, deref(f.ActorID),
-			f.Action, deref(f.TargetType), deref(f.TargetID), a.CreatedAt.UTC().Format(time.RFC3339)),
+		Kind: tokenOrDash(a.Kind),
+		Summary: fmt.Sprintf("ator %s/%s · ação %s · alvo %s/%s · %s", tokenOrDash(&f.ActorType), uuidOrDash(f.ActorID),
+			tokenOrDash(&f.Action), tokenOrDash(f.TargetType), uuidOrDash(f.TargetID), a.CreatedAt.UTC().Format(time.RFC3339)),
 		EventID: a.ID,
 	})
 }

@@ -1,6 +1,13 @@
 package logx
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"maps"
+	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -38,5 +45,90 @@ func TestRedact(t *testing.T) {
 	}
 	if got := Redact("4111 1111 1111 1111"); !strings.HasSuffix(got, "1111") {
 		t.Errorf("deve manter os 4 últimos: %q", got)
+	}
+}
+
+// Cartão 02/09b: os vetores partilhados com a BD e o Rust (layers com "go").
+type vector struct {
+	ID             string          `json:"id"`
+	Kind           string          `json:"kind"`
+	Input          json.RawMessage `json:"input"`
+	MustNotContain []string        `json:"must_not_contain"`
+	MustEqualInput bool            `json:"must_equal_input"`
+	Layers         []string        `json:"layers"`
+}
+
+func TestRedactionVectors(t *testing.T) {
+	raw, err := os.ReadFile("../../../docs/testdata/redaction-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vs []vector
+	if err := json.Unmarshal(raw, &vs); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, v := range vs {
+		if !slices.Contains(v.Layers, "go") {
+			continue
+		}
+		n++
+		t.Run(v.ID, func(t *testing.T) {
+			switch v.Kind {
+			case "text":
+				var in string
+				if err := json.Unmarshal(v.Input, &in); err != nil {
+					t.Fatal(err)
+				}
+				out := Redact(in)
+				checkLeak(t, out, v.MustNotContain)
+				if v.MustEqualInput && out != in {
+					t.Fatalf("Redact(%q)=%q, esperado igual à entrada", in, out)
+				}
+			case "json":
+				var in map[string]any
+				if err := json.Unmarshal(v.Input, &in); err != nil {
+					t.Fatal(err)
+				}
+				keys := slices.Sorted(maps.Keys(in))
+				args := make([]any, 0, len(keys))
+				for _, k := range keys {
+					args = append(args, slog.Any(k, in[k]))
+				}
+				var buf bytes.Buffer
+				NewTo(&buf).Info("vetor", args...)
+				line := buf.String()
+				var out map[string]any
+				if err := json.Unmarshal([]byte(line), &out); err != nil {
+					t.Fatalf("linha inválida %q: %v", line, err)
+				}
+				// A hora da linha não faz parte da verificação (pode conter dígitos de um vetor).
+				if ts, ok := out[slog.TimeKey].(string); ok {
+					line = strings.Replace(line, ts, "", 1)
+				}
+				checkLeak(t, line, v.MustNotContain)
+				if v.MustEqualInput {
+					for _, k := range keys {
+						if !reflect.DeepEqual(out[k], in[k]) {
+							t.Fatalf("%s: %v → %v (esperado igual à entrada)", k, in[k], out[k])
+						}
+					}
+				}
+			default:
+				t.Fatalf("kind desconhecido %q", v.Kind)
+			}
+		})
+	}
+	if n == 0 {
+		t.Fatal("nenhum vetor com layer go")
+	}
+}
+
+func checkLeak(t *testing.T, out string, leaks []string) {
+	t.Helper()
+	for _, l := range leaks {
+		if strings.Contains(out, l) {
+			t.Fatalf("saída %q contém %q", out, l)
+		}
 	}
 }

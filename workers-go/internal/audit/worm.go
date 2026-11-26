@@ -58,7 +58,7 @@ type S3Worm struct {
 	AccessKey string
 	SecretKey string
 	Prefix    string       // prefixo extra das chaves (testes); vazio em produção
-	HTTP      *http.Client // nil = cliente próprio com timeout
+	HTTP      *http.Client // nil = cliente próprio com timeout e sem redirects
 	now       func() time.Time
 }
 
@@ -73,7 +73,7 @@ func NewS3Worm(endpoint, region, bucket, accessKey, secretKey string) (*S3Worm, 
 	return &S3Worm{
 		Endpoint: strings.TrimRight(endpoint, "/"), Region: region, Bucket: bucket,
 		AccessKey: accessKey, SecretKey: secretKey,
-		HTTP: &http.Client{Timeout: wormTimeout + 5*time.Second},
+		HTTP: wormClient(),
 	}, nil
 }
 
@@ -103,7 +103,13 @@ func (s *S3Worm) client() *http.Client {
 	if s.HTTP != nil {
 		return s.HTTP
 	}
-	return &http.Client{Timeout: wormTimeout + 5*time.Second}
+	return wormClient()
+}
+
+// wormClient: timeout próprio e sem redirects (um 3xx levaria os cabeçalhos assinados para outro host;
+// volta como resposta e o Put/Get trata-o como erro "HTTP 3xx", sem o Location).
+func wormClient() *http.Client {
+	return &http.Client{Timeout: wormTimeout + 5*time.Second, CheckRedirect: noRedirect}
 }
 
 // Put grava com Object Lock GOVERNANCE até retainUntil. 412 (If-None-Match) = ErrExists.

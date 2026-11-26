@@ -50,7 +50,7 @@ func realMain() int {
 	acfg := config.LoadAlerts()
 	channels, err := audit.NewChannels(audit.AlertSettings{
 		TelegramBotToken: acfg.TelegramBotToken, TelegramChatID: acfg.TelegramChatID,
-		DiscordWebhookURL: acfg.DiscordWebhookURL, Sink: acfg.Sink,
+		DiscordWebhookURL: acfg.DiscordWebhookURL, Sink: acfg.Sink, DevLogOnly: acfg.DevLogOnly,
 	}, log)
 	if err != nil {
 		log.Error("configuração inválida", "err", err.Error())

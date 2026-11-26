@@ -13,7 +13,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -34,6 +36,7 @@ const (
 const (
 	alertTimeout   = 5 * time.Second
 	alertMaxText   = 1800
+	discordMax     = 2000 // limite do campo content do webhook
 	sentTTL        = 30 * 24 * time.Hour
 	telegramAPI    = "https://api.telegram.org"
 	sentKeyPrefix  = "audit:alert:sent:"
@@ -69,11 +72,15 @@ func alertText(a Alert) string {
 	return t
 }
 
+// noRedirect: os clientes do worker nunca seguem redirects (um 3xx levaria o corpo do alerta ou os
+// cabeçalhos assinados do S3 para outro host). O 3xx volta ao chamador como resposta e conta como falha.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 func alertClient(c *http.Client) *http.Client {
 	if c != nil {
 		return c
 	}
-	return &http.Client{Timeout: alertTimeout}
+	return &http.Client{Timeout: alertTimeout, CheckRedirect: noRedirect}
 }
 
 // postJSON: POST com timeout de 5 s; erros só com o canal e o estado HTTP (nunca o URL).
@@ -143,8 +150,19 @@ func (d *Discord) Name() string { return "discord" }
 
 func (d *Discord) Send(ctx context.Context, a Alert) error {
 	_, _, err := postJSON(ctx, d.HTTP, d.Name(), d.WebhookURL,
-		map[string]any{"content": alertText(a), "allowed_mentions": map[string]any{"parse": []string{}}})
+		map[string]any{"content": discordText(a), "allowed_mentions": map[string]any{"parse": []string{}}})
 	return err
+}
+
+// discordText: o texto num bloco de código (o Discord não renderiza markdown nem links mascarados lá
+// dentro); os acentos graves do conteúdo são trocados antes para o bloco não poder ser fechado.
+func discordText(a Alert) string {
+	const open, closing = "```\n", "\n```"
+	t := strings.ReplaceAll(alertText(a), "`", "'")
+	if lim := discordMax - len(open) - len(closing); len(t) > lim {
+		t = strings.ToValidUTF8(t[:lim], "")
+	}
+	return open + t + closing
 }
 
 // LogSink: ALERT_SINK=log:// (só dev): o alerta vai para o log do worker.
@@ -165,6 +183,7 @@ type AlertSettings struct {
 	TelegramChatID    string
 	DiscordWebhookURL string
 	Sink              string // "log://" ou vazio
+	DevLogOnly        bool   // ALERT_DEV_LOG_ONLY=1: aceita log:// como único canal (só dev)
 }
 
 // NewChannels constrói os canais configurados; nenhum canal = erro (não há forma de desligar).
@@ -191,7 +210,17 @@ func NewChannels(s AlertSettings, log *slog.Logger) ([]Channel, error) {
 	}
 	if len(out) == 0 {
 		return nil, errors.New("nenhum canal de alerta: definir ALERT_TELEGRAM_BOT_TOKEN + ALERT_TELEGRAM_CHAT_ID " +
-			"e/ou ALERT_DISCORD_WEBHOOK_URL (dev: ALERT_SINK=log://)")
+			"e/ou ALERT_DISCORD_WEBHOOK_URL (dev: ALERT_SINK=log:// com ALERT_DEV_LOG_ONLY=1)")
+	}
+	if len(out) == 1 && out[0].Name() == "log" {
+		// Alertas críticos só no log = ninguém é avisado: só com a variável explícita de dev.
+		if !s.DevLogOnly {
+			return nil, errors.New("ALERT_SINK=log:// sozinho não avisa ninguém: configurar Telegram e/ou Discord " +
+				"(em dev: ALERT_DEV_LOG_ONLY=1; nunca em produção)")
+		}
+		if log != nil {
+			log.Warn("alertas críticos só no log do worker (ALERT_DEV_LOG_ONLY=1): ninguém é avisado; nunca em produção")
+		}
 	}
 	return out, nil
 }
@@ -264,4 +293,203 @@ func (f *Fanout) Notify(ctx context.Context, a Alert) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Throttle agrupa rajadas (cartão 02/09b: o onboarding em massa gera um iban_change por loja): por kind,
+// numa janela de Window a contar do 1.º alerta, só os Limit primeiros saem um a um; os seguintes não são
+// enviados e, no fim da janela, sai um único resumo com a contagem. Não toca no WORM (o relay grava cada
+// alerta antes de chamar Notify). Estado em memória: um rearranque perde a contagem por enviar (o detalhe
+// continua no WORM e em audit_alerts); Run faz um último Flush ao parar.
+type Throttle struct {
+	Next   Alerter
+	Limit  int           // 0 = 5
+	Window time.Duration // 0 = 5 min
+	Tick   time.Duration // 0 = 30 s (frequência do Flush em Run)
+	Now    func() time.Time
+	Log    *slog.Logger
+
+	mu      sync.Mutex
+	buckets map[string]*throttleBucket
+	pending map[string]*throttleSummary
+}
+
+const (
+	defaultThrottleLimit  = 5
+	defaultThrottleWindow = 5 * time.Minute
+	defaultThrottleTick   = 30 * time.Second
+	throttleFlushTimeout  = 30 * time.Second
+)
+
+type throttleBucket struct {
+	start      time.Time
+	sent, held int
+}
+
+type throttleSummary struct {
+	from, to time.Time
+	held     int
+}
+
+func (t *Throttle) now() time.Time {
+	if t.Now != nil {
+		return t.Now()
+	}
+	return time.Now()
+}
+
+func (t *Throttle) limit() int {
+	if t.Limit > 0 {
+		return t.Limit
+	}
+	return defaultThrottleLimit
+}
+
+func (t *Throttle) window() time.Duration {
+	if t.Window > 0 {
+		return t.Window
+	}
+	return defaultThrottleWindow
+}
+
+// closeExpired (com mu): janelas terminadas passam a resumo por enviar (somado por kind).
+func (t *Throttle) closeExpired(now time.Time) {
+	w := t.window()
+	for kind, b := range t.buckets {
+		if now.Sub(b.start) < w {
+			continue
+		}
+		if b.held > 0 {
+			if t.pending == nil {
+				t.pending = map[string]*throttleSummary{}
+			}
+			end := b.start.Add(w)
+			if p := t.pending[kind]; p != nil {
+				p.held += b.held
+				p.to = end
+			} else {
+				t.pending[kind] = &throttleSummary{from: b.start, to: end, held: b.held}
+			}
+		}
+		delete(t.buckets, kind)
+	}
+}
+
+func (t *Throttle) Notify(ctx context.Context, a Alert) error {
+	if t.Next == nil {
+		return errors.New("alerta: Throttle sem destino")
+	}
+	now := t.now()
+	t.mu.Lock()
+	t.closeExpired(now)
+	if t.buckets == nil {
+		t.buckets = map[string]*throttleBucket{}
+	}
+	b := t.buckets[a.Kind]
+	if b == nil {
+		b = &throttleBucket{start: now}
+		t.buckets[a.Kind] = b
+	}
+	if b.sent >= t.limit() {
+		b.held++
+		t.mu.Unlock()
+		return nil
+	}
+	b.sent++ // reserva o lugar; libertado se o envio falhar (o chamador repete)
+	t.mu.Unlock()
+	if err := t.Next.Notify(ctx, a); err != nil {
+		t.mu.Lock()
+		if t.buckets[a.Kind] == b {
+			b.sent--
+		}
+		t.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// Flush envia os resumos das janelas terminadas. Um resumo que falha fica para o Flush seguinte.
+func (t *Throttle) Flush(ctx context.Context) error {
+	if t.Next == nil {
+		return errors.New("alerta: Throttle sem destino")
+	}
+	t.mu.Lock()
+	t.closeExpired(t.now())
+	todo := t.pending
+	t.pending = nil
+	t.mu.Unlock()
+	var errs []error
+	for kind, p := range todo {
+		err := t.Next.Notify(ctx, Alert{Kind: kind, Summary: fmt.Sprintf(
+			"resumo: mais %d alerta(s) deste tipo entre %s e %s (só os %d primeiros de cada %s saem um a um; "+
+				"todos estão no WORM)", p.held, p.from.UTC().Format(time.RFC3339), p.to.UTC().Format(time.RFC3339),
+			t.limit(), t.window())})
+		if err == nil {
+			continue
+		}
+		errs = append(errs, err)
+		t.mu.Lock()
+		if t.pending == nil {
+			t.pending = map[string]*throttleSummary{}
+		}
+		if q := t.pending[kind]; q != nil {
+			q.held += p.held
+			if p.from.Before(q.from) {
+				q.from = p.from
+			}
+		} else {
+			t.pending[kind] = p
+		}
+		t.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// Run: Flush a cada Tick até ctx terminar; ao parar, um último Flush com prazo próprio.
+func (t *Throttle) Run(ctx context.Context) {
+	every := t.Tick
+	if every <= 0 {
+		every = defaultThrottleTick
+	}
+	tk := time.NewTicker(every)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleFlushTimeout)
+			t.mu.Lock()
+			for _, b := range t.buckets { // fecha as janelas em curso para o resumo sair já
+				b.start = b.start.Add(-t.window())
+			}
+			t.mu.Unlock()
+			if err := t.Flush(fctx); err != nil && t.Log != nil {
+				t.Log.Error("resumo de alertas agrupados", "err", err.Error())
+			}
+			cancel()
+			return
+		case <-tk.C:
+			if err := t.Flush(ctx); err != nil && t.Log != nil {
+				t.Log.Error("resumo de alertas agrupados", "err", err.Error())
+			}
+		}
+	}
+}
+
+// Campos do resumo de um alerta (cartão 02/09b): ids só com forma de UUID; tipos e ação só tokens simples.
+var (
+	reAlertUUID  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reAlertToken = regexp.MustCompile(`^[a-z0-9_.:-]{1,64}$`)
+)
+
+func uuidOrDash(s *string) string {
+	if s == nil || !reAlertUUID.MatchString(*s) {
+		return "-"
+	}
+	return *s
+}
+
+func tokenOrDash(s *string) string {
+	if s == nil || !reAlertToken.MatchString(*s) {
+		return "-"
+	}
+	return *s
 }

@@ -29,12 +29,14 @@ type Worm struct {
 	EventsRetentionDays int    // WORM_EVENTS_RETENTION_DAYS (730)
 }
 
-// Alerts: canais de alerta crítico. Pelo menos um (ALERT_SINK=log:// só em dev).
+// Alerts: canais de alerta crítico. Pelo menos um; ALERT_SINK=log:// como único canal só com
+// ALERT_DEV_LOG_ONLY=1 (só dev; nunca em produção).
 type Alerts struct {
 	TelegramBotToken  string // ALERT_TELEGRAM_BOT_TOKEN (segredo)
 	TelegramChatID    string // ALERT_TELEGRAM_CHAT_ID
 	DiscordWebhookURL string // ALERT_DISCORD_WEBHOOK_URL (segredo)
 	Sink              string // ALERT_SINK
+	DevLogOnly        bool   // ALERT_DEV_LOG_ONLY=1
 }
 
 // LoadWorm lê WORM_*. Sem WORM_BUCKET (ou endpoint/chaves) = erro: a caixa negra não arranca sem WORM.
@@ -79,6 +81,7 @@ func LoadAlerts() Alerts {
 		TelegramChatID:    os.Getenv("ALERT_TELEGRAM_CHAT_ID"),
 		DiscordWebhookURL: os.Getenv("ALERT_DISCORD_WEBHOOK_URL"),
 		Sink:              os.Getenv("ALERT_SINK"),
+		DevLogOnly:        os.Getenv("ALERT_DEV_LOG_ONLY") == "1",
 	}
 }
 

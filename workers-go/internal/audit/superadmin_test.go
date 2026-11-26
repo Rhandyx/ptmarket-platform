@@ -185,3 +185,79 @@ func TestRelayWormFailureAndBacklog(t *testing.T) {
 		t.Fatal("alerta crítico em falta depois de recuperar")
 	}
 }
+
+// Cartão 02/09b: o resumo nunca leva um e-mail nem um link disfarçado; com UUID leva o UUID; o Discord
+// recebe o texto num bloco de código; o Telegram em texto simples (sem parse_mode).
+func TestRelaySummaryNoPIINoMarkdown(t *testing.T) {
+	ctx := context.Background()
+	actor, target := "0194f0a0-1111-7000-8000-00000000abcd", "0194f0a0-2222-7000-8000-00000000beef"
+	cases := []struct {
+		name   string
+		fields string
+		bad    []string
+		good   []string
+	}{
+		{"e-mail", `"actor_id":"joao@x.pt","target_type":"store","target_id":"joao@x.pt"`, []string{"joao", "x.pt"}, nil},
+		{"link mascarado", `"actor_id":"[clique](http://evil)","target_type":"[a](http://evil)","target_id":"[clique](http://evil)"`,
+			[]string{"clique", "evil", "]("}, nil},
+		{"ação e tipo com markdown", `"actor_type":"**x**","action":"[a](http://evil)","target_id":"` + target + `"`,
+			[]string{"evil", "**"}, []string{target}},
+		{"uuid", `"actor_id":"` + actor + `","target_type":"store","target_id":"` + target + `"`, nil, []string{actor, target, "store"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tg, dc := &fakeChat{tg: true}, &fakeChat{}
+			tgs, dcs := httptest.NewServer(tg), httptest.NewServer(dc)
+			defer tgs.Close()
+			defer dcs.Close()
+			fan := &Fanout{Channels: []Channel{
+				&Telegram{Token: "1:T", ChatID: "42", BaseURL: tgs.URL},
+				&Discord{WebhookURL: dcs.URL + "/api/webhooks/1/x"},
+			}}
+			kind := "iban_change"
+			payload := `{"tenant_id":"0194f0a0-0000-7000-8000-000000000001","actor_type":"admin","action":"stores.iban_update",` + c.fields + `}`
+			relay := &Relay{Worm: &memWorm{}, Alert: fan, Retention: time.Hour}
+			if err := relay.relayOne(ctx, alertRow{ID: uuidV7(), CreatedAt: time.Now(), EventType: "x", Kind: &kind,
+				Payload: json.RawMessage(payload)}); err != nil {
+				t.Fatal(err)
+			}
+			tgAll, dcAll := tg.all(), dc.all()
+			if len(tgAll) != 1 || len(dcAll) != 1 {
+				t.Fatalf("pedidos: telegram=%d discord=%d", len(tgAll), len(dcAll))
+			}
+			for _, raw := range []string{tgAll[0], dcAll[0]} {
+				body := raw[strings.Index(raw, " ")+1:]
+				var m map[string]any
+				if err := json.Unmarshal([]byte(body), &m); err != nil {
+					t.Fatal(err)
+				}
+				text, _ := m["text"].(string)
+				if text == "" {
+					text, _ = m["content"].(string)
+				}
+				for _, b := range c.bad {
+					if strings.Contains(text, b) {
+						t.Fatalf("corpo contém %q: %s", b, text)
+					}
+				}
+				for _, g := range c.good {
+					if !strings.Contains(text, g) {
+						t.Fatalf("corpo sem %q: %s", g, text)
+					}
+				}
+				if _, ok := m["parse_mode"]; ok {
+					t.Fatal("telegram com parse_mode")
+				}
+			}
+			var dm map[string]any
+			_ = json.Unmarshal([]byte(dcAll[0][strings.Index(dcAll[0], " ")+1:]), &dm)
+			content, _ := dm["content"].(string)
+			if !strings.HasPrefix(content, "```\n") || !strings.HasSuffix(content, "\n```") {
+				t.Fatalf("discord fora do bloco de código: %q", content)
+			}
+			if am, _ := dm["allowed_mentions"].(map[string]any); am == nil || len(am["parse"].([]any)) != 0 {
+				t.Fatalf("allowed_mentions: %v", dm["allowed_mentions"])
+			}
+		})
+	}
+}
