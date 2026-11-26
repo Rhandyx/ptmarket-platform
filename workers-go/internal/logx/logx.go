@@ -5,11 +5,16 @@
 package logx
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"io"
 	"log/slog"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -30,12 +35,14 @@ var (
 	// IBAN: 2 letras + 2 dígitos + grupos de 4 (qualquer caixa, com ou sem separadores).
 	reIBAN = regexp.MustCompile(`(?i)\b[A-Z]{2}\d{2}(?:` + sep + `{0,3}[A-Z0-9]{4}){2,7}(?:` + sep + `{0,3}[A-Z0-9]{1,4})?\b`)
 	// NIB: 21 dígitos (com ou sem separadores).
-	reNIB     = regexp.MustCompile(`\b\d(?:` + sep + `{0,3}\d){20}\b`)
-	rePAN     = regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`)
-	rePhone   = regexp.MustCompile(`(?:\+|\b00)\d{1,3}` + sep + `{0,3}\d(?:` + sep + `{0,3}\d){6,13}\b`)
-	rePhonePT = regexp.MustCompile(`\b[29]\d{2}(?:` + sep + `{0,3}\d{3}){2}\b`)
-	// NIF (com prefixo de país opcional), DNI e NIE.
-	reNIF = regexp.MustCompile(`\b(?:[A-Za-z]{2})?[1-9]\d{8}\b`)
+	reNIB   = regexp.MustCompile(`\b\d(?:` + sep + `{0,3}\d){20}\b`)
+	rePAN   = regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`)
+	rePhone = regexp.MustCompile(`(?:\+|\b00)\d{1,3}` + sep + `{0,3}\d(?:` + sep + `{0,3}\d){6,13}\b`)
+	// Telemóvel/fixo PT e NIF (com prefixo de país opcional): sem \b, para apanhar também um número colado a
+	// "_" ou letras (id_123456789, nif123456789); a fronteira é "sem outro dígito colado" (ver maskNumber).
+	rePhonePT = regexp.MustCompile(`[29]\d{2}(?:` + sep + `{0,3}\d{3}){2}`)
+	reNIF     = regexp.MustCompile(`(?:[A-Za-z]{2})?[1-9]\d{8}`)
+	// DNI e NIE.
 	reDNI = regexp.MustCompile(`\b(?:[XYZxyz]\d{7}|\d{8})[A-Za-z]\b`)
 )
 
@@ -100,10 +107,43 @@ func redactText(s string) string {
 	s = reNIB.ReplaceAllString(s, mask)
 	s = rePAN.ReplaceAllStringFunc(s, maskPAN)
 	s = rePhone.ReplaceAllString(s, mask)
-	s = rePhonePT.ReplaceAllString(s, mask)
-	s = reNIF.ReplaceAllString(s, mask)
+	s = maskNumber(rePhonePT, s)
+	s = maskNumber(reNIF, s)
 	s = reDNI.ReplaceAllString(s, mask)
 	return s
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// maskNumber mascara as ocorrências de re cujo número não está colado a outro dígito (antes do 1.º dígito
+// ou depois do fim); letras e "_" à volta não impedem a máscara. Uma ocorrência rejeitada recomeça a
+// procura no byte seguinte (não esconde uma ocorrência válida que comece dentro dela).
+func maskNumber(re *regexp.Regexp, s string) string {
+	var b strings.Builder
+	last, pos := 0, 0
+	for pos < len(s) {
+		loc := re.FindStringIndex(s[pos:])
+		if loc == nil {
+			break
+		}
+		start, end := pos+loc[0], pos+loc[1]
+		d := start
+		for d < end && !isDigit(s[d]) {
+			d++
+		}
+		if (d > 0 && isDigit(s[d-1])) || (end < len(s) && isDigit(s[end])) {
+			pos = start + 1
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(mask)
+		last, pos = end, end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 // maskPAN mascara números que passam Luhn (13-19 dígitos), deixando os 4 últimos.
@@ -231,6 +271,11 @@ func redactValue(v any) any {
 			l[i] = x
 		}
 		return redactValue(l)
+	case json.Number:
+		if Redact(string(t)) != string(t) {
+			return mask
+		}
+		return t
 	}
 	return v
 }
@@ -248,14 +293,74 @@ func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 	case slog.KindString:
 		a.Value = slog.StringValue(Redact(a.Value.String()))
 	case slog.KindAny:
-		switch v := a.Value.Any().(type) {
-		case map[string]any, map[string]string, []any, []string:
-			a.Value = slog.AnyValue(redactValue(v))
-		default:
-			a.Value = slog.StringValue(Redact(a.Value.String()))
-		}
+		a.Value = redactAny(a.Value.Any())
+	case slog.KindInt64:
+		a.Value = redactNumber(a.Value, strconv.FormatInt(a.Value.Int64(), 10))
+	case slog.KindUint64:
+		a.Value = redactNumber(a.Value, strconv.FormatUint(a.Value.Uint64(), 10))
+	case slog.KindFloat64:
+		a.Value = redactNumber(a.Value, strconv.FormatFloat(a.Value.Float64(), 'f', -1, 64))
 	}
 	return a
+}
+
+// redactNumber (cartão 02/09c): um número que o redator mascararia como texto (NIF, telefone, PAN…) → "***".
+// Os floats são vistos em notação decimal ('f'), não científica.
+func redactNumber(v slog.Value, text string) slog.Value {
+	if Redact(text) != text {
+		return slog.StringValue(mask)
+	}
+	return v
+}
+
+// bytesAsText: dentro de structs, mapas e listas, []byte sai como texto (o json.Marshal daria base64, que
+// escapa aos regex) e passa pelo redator; o resto com a semântica do encoding/json (v1).
+var bytesAsText = jsonv2.JoinOptions(json.DefaultOptionsV1(), jsonv2.WithMarshalers(
+	jsonv2.MarshalToFunc(func(enc *jsontext.Encoder, b []byte) error {
+		return enc.WriteToken(jsontext.String(strings.ToValidUTF8(string(b), "\uFFFD")))
+	})))
+
+// redactAny (cartão 02/09c): mapas e listas → redactValue; error → texto redigido; []byte e
+// json.RawMessage → JSON válido segue o caminho das structs, senão texto redigido; o resto (structs,
+// ponteiros, outros mapas…) → JSON (com []byte como texto) → any → redactValue (chaves sensíveis pelo
+// nome do campo JSON).
+// Sem forma de passar a JSON → máscara.
+func redactAny(v any) slog.Value {
+	switch t := v.(type) {
+	case nil:
+		return slog.AnyValue(nil)
+	case map[string]any, map[string]string, []any, []string:
+		return slog.AnyValue(redactValue(t))
+	case error:
+		return slog.StringValue(Redact(t.Error()))
+	case json.RawMessage:
+		return redactBytes(t)
+	case []byte:
+		return redactBytes(t)
+	}
+	b, err := jsonv2.Marshal(v, bytesAsText)
+	if err != nil {
+		return slog.StringValue(mask)
+	}
+	return redactJSON(b)
+}
+
+func redactBytes(b []byte) slog.Value {
+	if json.Valid(b) {
+		return redactJSON(b)
+	}
+	return slog.StringValue(Redact(string(b)))
+}
+
+// redactJSON: números como json.Number (não perdem precisão e também passam pelo redator).
+func redactJSON(b []byte) slog.Value {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var x any
+	if err := dec.Decode(&x); err != nil {
+		return slog.StringValue(mask)
+	}
+	return slog.AnyValue(redactValue(x))
 }
 
 // pairHandler aplica a regra nome/valor entre atributos irmãos (ex.: "key","password","value","…"),

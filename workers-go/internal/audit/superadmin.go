@@ -182,7 +182,8 @@ func (r *Relay) relayOne(ctx context.Context, a alertRow) error {
 		Kind: tokenOrDash(a.Kind),
 		Summary: fmt.Sprintf("ator %s/%s · ação %s · alvo %s/%s · %s", tokenOrDash(&f.ActorType), uuidOrDash(f.ActorID),
 			tokenOrDash(&f.Action), tokenOrDash(f.TargetType), uuidOrDash(f.TargetID), a.CreatedAt.UTC().Format(time.RFC3339)),
-		EventID: a.ID,
+		EventID:  a.ID,
+		TenantID: uuidOrDash(f.TenantID), // chave do agrupamento (kind, tenant) no Throttle
 	})
 }
 

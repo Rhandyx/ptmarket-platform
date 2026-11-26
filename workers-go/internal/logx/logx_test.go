@@ -2,7 +2,9 @@ package logx
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"os"
@@ -130,5 +132,109 @@ func checkLeak(t *testing.T, out string, leaks []string) {
 		if strings.Contains(out, l) {
 			t.Fatalf("saída %q contém %q", out, l)
 		}
+	}
+}
+
+// Cartão 02/09c: structs, []byte, json.RawMessage e error passam pelo redator; números colados a "_" ou
+// letras também; um UUID fica intacto.
+func TestRedactAnyValues(t *testing.T) {
+	type creds struct {
+		Password string
+		Email    string
+	}
+	type tagged struct {
+		Login string `json:"login"`
+		Tax   string `json:"nif"`
+		Ref   int64  `json:"ref"`
+	}
+	const uuid = "0194f0a0-0000-7000-8000-000000000001"
+	var buf bytes.Buffer
+	NewTo(&buf).Info("valores",
+		slog.Any("creds", creds{Password: "hunter2-pw", Email: "ana@example.pt"}),
+		slog.Any("ptr", &tagged{Login: "ana", Tax: "234567891", Ref: 345678912}),
+		slog.Any("raw", []byte("iban PT50000201231234567890154")),
+		slog.Any("rawjson", json.RawMessage(`{"nif":"123456789","outro":{"phone":"912345678"}}`)),
+		slog.Any("err", errors.New("falhou para ana@example.pt")),
+		slog.Any("canal", make(chan int)),
+		slog.String("ids", "id_123456789 nif987654321 x_912 345 678"),
+		slog.String("uuid", uuid),
+	)
+	line := buf.String()
+	for _, leak := range []string{"hunter2-pw", "ana@example.pt", "234567891", "345678912", "PT50000201231234567890154",
+		"123456789", "912345678", "987654321", "912 345 678"} {
+		if strings.Contains(line, leak) {
+			t.Fatalf("linha contém %q: %s", leak, line)
+		}
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(line), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["uuid"] != uuid {
+		t.Fatalf("UUID alterado: %v", out["uuid"])
+	}
+	if p, _ := out["ptr"].(map[string]any); p == nil || p["login"] != "ana" {
+		t.Fatalf("struct: %v", out["ptr"])
+	}
+	if out["canal"] != "***" {
+		t.Fatalf("sem JSON → máscara: %v", out["canal"])
+	}
+	// Números que não são NIF/telefone ficam; colados a outro dígito também.
+	for in, want := range map[string]string{
+		"ref 1234567890":    "ref 1234567890",
+		"pedido 12345":      "pedido 12345",
+		"id_123456789":      "id_***",
+		"1ab123456789":      "1***",
+		"tel:912345678;":    "tel:***;",
+		uuid + " 123456789": uuid + " ***",
+	} {
+		if got := Redact(in); got != want {
+			t.Errorf("Redact(%q)=%q, esperado %q", in, got, want)
+		}
+	}
+}
+
+// Cartão 02/09c (auditoria): []byte dentro de struct não sai em base64 (escaparia aos regex).
+func TestRedactBytesInStruct(t *testing.T) {
+	const iban, nif = "PT50 0002 0123 1234 5678 9015 4", "234567891"
+	type rec struct {
+		Raw   []byte
+		Notes [][]byte
+		Ptr   *[]byte
+		Map   map[string][]byte
+	}
+	b := []byte("nif " + nif)
+	var buf bytes.Buffer
+	NewTo(&buf).Info("bytes", slog.Any("rec", rec{
+		Raw: []byte("conta " + iban), Notes: [][]byte{[]byte(nif)}, Ptr: &b, Map: map[string][]byte{"x": []byte(iban)},
+	}))
+	line := buf.String()
+	for _, leak := range []string{iban, nif, "5678", base64.StdEncoding.EncodeToString([]byte("conta " + iban)),
+		base64.StdEncoding.EncodeToString([]byte(nif)), base64.StdEncoding.EncodeToString([]byte(iban))} {
+		if strings.Contains(line, leak) {
+			t.Fatalf("linha contém %q: %s", leak, line)
+		}
+	}
+	if !strings.Contains(line, `"Raw":"conta ***"`) {
+		t.Fatalf("[]byte não passou a texto: %s", line)
+	}
+}
+
+// Cartão 02/09c (auditoria): números (int, uint, float) com forma de NIF/telefone mascarados; o resto intacto.
+func TestRedactNumbers(t *testing.T) {
+	var buf bytes.Buffer
+	NewTo(&buf).Info("números", slog.Int("x", 234567891), slog.Any("y", 912345678), slog.Uint64("u", 4111111111111111),
+		slog.Float64("f", 912345678), slog.Int("count", 42), slog.Float64("ratio", 0.5))
+	var out map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"x", "y", "u", "f"} {
+		if out[k] != "***" {
+			t.Errorf("%s=%v, esperado ***", k, out[k])
+		}
+	}
+	if out["count"] != float64(42) || out["ratio"] != 0.5 {
+		t.Errorf("números inócuos alterados: %v %v", out["count"], out["ratio"])
 	}
 }

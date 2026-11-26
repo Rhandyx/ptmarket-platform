@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -43,11 +43,13 @@ const (
 	alertBodyLimit = 64 << 10
 )
 
-// Alert: Summary sem dados pessoais; EventID = id do evento (vazio nos alertas internos).
+// Alert: Summary sem dados pessoais; EventID = id do evento (vazio nos alertas internos e nos resumos);
+// TenantID = tenant do evento (só com forma de UUID; senão "-"), chave do agrupamento com o Kind.
 type Alert struct {
-	Kind    string
-	Summary string
-	EventID string
+	Kind     string
+	Summary  string
+	EventID  string
+	TenantID string
 }
 
 // Alerter envia um alerta para todos os canais.
@@ -295,22 +297,37 @@ func (f *Fanout) Notify(ctx context.Context, a Alert) error {
 	return errors.Join(errs...)
 }
 
-// Throttle agrupa rajadas (cartão 02/09b: o onboarding em massa gera um iban_change por loja): por kind,
-// numa janela de Window a contar do 1.º alerta, só os Limit primeiros saem um a um; os seguintes não são
-// enviados e, no fim da janela, sai um único resumo com a contagem. Não toca no WORM (o relay grava cada
-// alerta antes de chamar Notify). Estado em memória: um rearranque perde a contagem por enviar (o detalhe
-// continua no WORM e em audit_alerts); Run faz um último Flush ao parar.
+// Throttle agrupa rajadas (cartões 02/09b e 02/09c: o onboarding em massa gera um iban_change por loja).
+// Chave do agrupamento = (kind, tenant): numa janela de Window a contar do 1.º alerta dessa chave, só os
+// Limit primeiros saem um a um; os seguintes não são enviados e, depois do fim da janela, sai um único
+// resumo com a contagem e os event_id retidos. Nunca agrupados (saem sempre um a um): kinds "audit.*"
+// (alertas da própria caixa negra), os críticos da BD em neverThrottle e qualquer alerta sem tenant ("-").
+// Não toca no WORM (o relay grava cada alerta antes de chamar Notify).
+//
+// Relógio único (cartão 02/09c): a hora é sempre a do Redis (redis.call('TIME') dentro dos scripts), tanto
+// na abertura/fecho das janelas como no corte do Flush; o relógio das réplicas nunca entra.
+//
+// Estado no Redis (partilhado pelas réplicas e sobrevive a um crash), chaves com Prefix (por omissão
+// "audit:alert:{throttle}:"; a hash tag põe tudo no mesmo slot):
+//
+//	cur:<kind>|<tenant>              início da janela em curso (ms), TTL janela + margem
+//	w:<kind>|<tenant>|<início>       hash: sent (lugares um a um), noid/more (retidos sem id/acima do teto)
+//	w:<kind>|<tenant>|<início>:ids   zset dos event_id retidos (score = hora; sem repetidos), TTL idem
+//	pending                          zset "<kind>|<tenant>|<início>" → fim da janela (ms): resumos por enviar
+//	claim:<kind>|<tenant>|<início>   SET NX PX: a réplica que envia o resumo (apagado no fim, com ou sem êxito)
+//
+// Flush (a cada Tick e no arranque de Run) envia os resumos das janelas fechadas (fim <= TIME do Redis);
+// êxito → apaga a janela e o membro de pending; falha → só liberta o claim (sai no Flush seguinte). Redis
+// em baixo → fail-open: o alerta sai um a um e fica um log Warn (nunca se perde um alerta por causa do
+// agrupamento).
 type Throttle struct {
 	Next   Alerter
-	Limit  int           // 0 = 5
-	Window time.Duration // 0 = 5 min
-	Tick   time.Duration // 0 = 30 s (frequência do Flush em Run)
-	Now    func() time.Time
+	Redis  redis.UniversalClient // nil = sem agrupamento (tudo um a um)
+	Prefix string                // testes; vazio = audit:alert:{throttle}:
+	Limit  int                   // 0 = 5
+	Window time.Duration         // 0 = 5 min
+	Tick   time.Duration         // 0 = 30 s (frequência do Flush em Run)
 	Log    *slog.Logger
-
-	mu      sync.Mutex
-	buckets map[string]*throttleBucket
-	pending map[string]*throttleSummary
 }
 
 const (
@@ -318,24 +335,73 @@ const (
 	defaultThrottleWindow = 5 * time.Minute
 	defaultThrottleTick   = 30 * time.Second
 	throttleFlushTimeout  = 30 * time.Second
+	throttlePrefix        = "audit:alert:{throttle}:"
+	throttleMargin        = 7 * 24 * time.Hour // a janela fica no Redis até ao resumo sair (canais em baixo)
+	throttleClaimTTL      = 2 * time.Minute    // > tempo de um Notify (Fanout: 5 s por canal)
+	throttleRedisTimeout  = 2 * time.Second    // Redis lento → fail-open depressa
+	throttleMaxIDs        = 1000               // teto do zset de ids por janela (o resto só conta)
+	throttleShowIDs       = 20
+	throttleFlushBatch    = 100
+	auditKindPrefix       = "audit."
 )
 
-type throttleBucket struct {
-	start      time.Time
-	sent, held int
-}
+// neverThrottle: críticos da BD (audit.critical_kind, migration 0015) que saem sempre um a um.
+var neverThrottle = map[string]bool{"verify_failure": true, "superadmin_login": true}
 
-type throttleSummary struct {
-	from, to time.Time
-	held     int
-}
+// redisNowLua: agora em ms segundo o Redis (texto inteiro, sem notação científica).
+const redisNowLua = `local tm = redis.call('TIME')
+local now = tonumber(tm[1]) * 1000 + math.floor(tonumber(tm[2]) / 1000)
+`
 
-func (t *Throttle) now() time.Time {
-	if t.Now != nil {
-		return t.Now()
-	}
-	return time.Now()
-}
+// throttleHit (atómico): fecha a janela vencida e abre outra; reserva um lugar um a um (1) ou retém (0).
+// KEYS[1] = cur, KEYS[2] = pending. ARGV: janela ms, limite, TTL ms, event_id, prefixo da janela,
+// prefixo do membro (a hora vem do TIME do Redis, nunca de um argumento). As chaves da janela dependem do
+// início (lido aqui) e partilham a hash tag.
+var throttleHitSrc = redisNowLua + `
+local w = tonumber(ARGV[1])
+local s = redis.call('GET', KEYS[1])
+if (not s) or (now - tonumber(s) >= w) then
+  s = string.format('%.0f', now)
+  redis.call('SET', KEYS[1], s, 'PX', ARGV[3])
+end
+local win = ARGV[5] .. s
+local ids = win .. ':ids'
+local sent = tonumber(redis.call('HGET', win, 'sent') or '0')
+if sent < tonumber(ARGV[2]) then
+  redis.call('HINCRBY', win, 'sent', 1)
+  redis.call('PEXPIRE', win, ARGV[3])
+  return {1, s}
+end
+if ARGV[4] == '' then
+  redis.call('HINCRBY', win, 'noid', 1)
+elseif redis.call('ZSCORE', ids, ARGV[4]) == false then
+  if redis.call('ZCARD', ids) < ` + fmt.Sprint(throttleMaxIDs) + ` then
+    redis.call('ZADD', ids, now, ARGV[4])
+    redis.call('PEXPIRE', ids, ARGV[3])
+  else
+    redis.call('HINCRBY', win, 'more', 1)
+  end
+end
+redis.call('PEXPIRE', win, ARGV[3])
+redis.call('ZADD', KEYS[2], string.format('%.0f', tonumber(s) + w), ARGV[6] .. s)
+return {0, s}
+`
+
+var throttleHit = redis.NewScript(throttleHitSrc)
+
+// throttleClosed: membros de pending com fim <= TIME do Redis. KEYS[1] = pending; ARGV[1] = máximo.
+var throttleClosedSrc = redisNowLua + `
+return redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', string.format('%.0f', now), 'LIMIT', 0, tonumber(ARGV[1]))
+`
+
+var throttleClosed = redis.NewScript(throttleClosedSrc)
+
+// throttleRelease: um envio falhado devolve o lugar (só se a janela ainda existe).
+var throttleRelease = redis.NewScript(`
+local n = tonumber(redis.call('HGET', KEYS[1], 'sent') or '0')
+if n > 0 then redis.call('HINCRBY', KEYS[1], 'sent', -1) end
+return n
+`)
 
 func (t *Throttle) limit() int {
 	if t.Limit > 0 {
@@ -351,125 +417,250 @@ func (t *Throttle) window() time.Duration {
 	return defaultThrottleWindow
 }
 
-// closeExpired (com mu): janelas terminadas passam a resumo por enviar (somado por kind).
-func (t *Throttle) closeExpired(now time.Time) {
-	w := t.window()
-	for kind, b := range t.buckets {
-		if now.Sub(b.start) < w {
-			continue
-		}
-		if b.held > 0 {
-			if t.pending == nil {
-				t.pending = map[string]*throttleSummary{}
-			}
-			end := b.start.Add(w)
-			if p := t.pending[kind]; p != nil {
-				p.held += b.held
-				p.to = end
-			} else {
-				t.pending[kind] = &throttleSummary{from: b.start, to: end, held: b.held}
-			}
-		}
-		delete(t.buckets, kind)
+func (t *Throttle) key(parts ...string) string {
+	return or(t.Prefix, throttlePrefix) + strings.Join(parts, "")
+}
+
+func (t *Throttle) warn(msg string, args ...any) {
+	if t.Log != nil {
+		t.Log.Warn(msg, args...)
 	}
+}
+
+// throttleTenant: só UUIDs (minúsculas); o resto "-".
+func throttleTenant(s string) string {
+	s = strings.ToLower(s)
+	if !reAlertUUID.MatchString(s) {
+		return "-"
+	}
+	return s
 }
 
 func (t *Throttle) Notify(ctx context.Context, a Alert) error {
 	if t.Next == nil {
 		return errors.New("alerta: Throttle sem destino")
 	}
-	now := t.now()
-	t.mu.Lock()
-	t.closeExpired(now)
-	if t.buckets == nil {
-		t.buckets = map[string]*throttleBucket{}
+	a.TenantID = throttleTenant(a.TenantID)
+	// Alertas da caixa negra, críticos da BD, alertas sem tenant e kinds fora do formato (não cabem numa
+	// chave) saem sempre um a um.
+	if t.Redis == nil || strings.HasPrefix(a.Kind, auditKindPrefix) || neverThrottle[a.Kind] ||
+		a.TenantID == "-" || !reAlertToken.MatchString(a.Kind) {
+		return t.Next.Notify(ctx, a)
 	}
-	b := t.buckets[a.Kind]
-	if b == nil {
-		b = &throttleBucket{start: now}
-		t.buckets[a.Kind] = b
+	id := a.EventID
+	if !reAlertUUID.MatchString(id) {
+		id = ""
 	}
-	if b.sent >= t.limit() {
-		b.held++
-		t.mu.Unlock()
-		return nil
+	group := a.Kind + "|" + a.TenantID
+	rctx, cancel := context.WithTimeout(ctx, throttleRedisTimeout)
+	res, err := throttleHit.Run(rctx, t.Redis, []string{t.key("cur:", group), t.key("pending")},
+		t.window().Milliseconds(), t.limit(), (t.window() + throttleMargin).Milliseconds(),
+		id, t.key("w:", group, "|"), group+"|").Result()
+	cancel()
+	if err != nil {
+		t.warn("agrupamento de alertas indisponível (Redis): o alerta sai um a um", "kind", a.Kind)
+		return t.Next.Notify(ctx, a)
 	}
-	b.sent++ // reserva o lugar; libertado se o envio falhar (o chamador repete)
-	t.mu.Unlock()
+	send, start, ok := parseHit(res)
+	if !ok {
+		t.warn("agrupamento de alertas: resposta inesperada do Redis; o alerta sai um a um", "kind", a.Kind)
+		return t.Next.Notify(ctx, a)
+	}
+	if !send {
+		return nil // retido: entra no resumo da janela
+	}
 	if err := t.Next.Notify(ctx, a); err != nil {
-		t.mu.Lock()
-		if t.buckets[a.Kind] == b {
-			b.sent--
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRedisTimeout)
+		if rerr := throttleRelease.Run(rctx, t.Redis, []string{t.key("w:", group, "|", start)}).Err(); rerr != nil {
+			t.warn("agrupamento de alertas: lugar não devolvido (Redis)", "kind", a.Kind)
 		}
-		t.mu.Unlock()
+		cancel()
 		return err
 	}
 	return nil
 }
 
-// Flush envia os resumos das janelas terminadas. Um resumo que falha fica para o Flush seguinte.
+// parseHit: {1|0, "<início ms>"}; qualquer outra forma → ok=false (o chamador envia um a um).
+func parseHit(res any) (send bool, start string, ok bool) {
+	l, isList := res.([]any)
+	if !isList || len(l) != 2 {
+		return false, "", false
+	}
+	n, isInt := l[0].(int64)
+	s, isStr := l[1].(string)
+	if !isInt || (n != 0 && n != 1) || !isStr || s == "" || len(s) > 20 {
+		return false, "", false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false, "", false
+		}
+	}
+	return n == 1, s, true
+}
+
+// Flush envia os resumos das janelas fechadas (de qualquer réplica, incluindo as que terminaram sem
+// Flush). Um resumo que falha fica para o Flush seguinte.
 func (t *Throttle) Flush(ctx context.Context) error {
 	if t.Next == nil {
 		return errors.New("alerta: Throttle sem destino")
 	}
-	t.mu.Lock()
-	t.closeExpired(t.now())
-	todo := t.pending
-	t.pending = nil
-	t.mu.Unlock()
+	if t.Redis == nil {
+		return nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, throttleRedisTimeout)
+	members, err := throttleClosed.Run(rctx, t.Redis, []string{t.key("pending")}, throttleFlushBatch).StringSlice()
+	cancel()
+	if err != nil {
+		return errors.New("resumos de alertas: Redis indisponível")
+	}
 	var errs []error
-	for kind, p := range todo {
-		err := t.Next.Notify(ctx, Alert{Kind: kind, Summary: fmt.Sprintf(
-			"resumo: mais %d alerta(s) deste tipo entre %s e %s (só os %d primeiros de cada %s saem um a um; "+
-				"todos estão no WORM)", p.held, p.from.UTC().Format(time.RFC3339), p.to.UTC().Format(time.RFC3339),
-			t.limit(), t.window())})
-		if err == nil {
-			continue
+	for _, m := range members {
+		if err := t.flushOne(ctx, m); err != nil {
+			errs = append(errs, err)
 		}
-		errs = append(errs, err)
-		t.mu.Lock()
-		if t.pending == nil {
-			t.pending = map[string]*throttleSummary{}
-		}
-		if q := t.pending[kind]; q != nil {
-			q.held += p.held
-			if p.from.Before(q.from) {
-				q.from = p.from
-			}
-		} else {
-			t.pending[kind] = p
-		}
-		t.mu.Unlock()
 	}
 	return errors.Join(errs...)
 }
 
-// Run: Flush a cada Tick até ctx terminar; ao parar, um último Flush com prazo próprio.
+// flushOne: claim (SET NX PX) → lê a janela → Notify → apaga (êxito) ou só liberta o claim (falha).
+func (t *Throttle) flushOne(ctx context.Context, member string) error {
+	parts := strings.Split(member, "|")
+	if len(parts) != 3 {
+		return t.dropPending(ctx, member, "membro inválido")
+	}
+	kind, tenant := parts[0], parts[1]
+	ms, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return t.dropPending(ctx, member, "início inválido")
+	}
+	from := time.UnixMilli(ms)
+	claim := t.key("claim:", member)
+	rctx, cancel := context.WithTimeout(ctx, throttleRedisTimeout)
+	defer cancel()
+	ok, err := t.Redis.SetNX(rctx, claim, "1", throttleClaimTTL).Result()
+	if err != nil {
+		return errors.New("resumo de alertas: Redis indisponível")
+	}
+	if !ok {
+		return nil // outra réplica está a enviá-lo
+	}
+	win := t.key("w:", member)
+	ids := win + ":ids"
+	var (
+		inPending *redis.FloatCmd
+		extra     *redis.SliceCmd
+		total     *redis.IntCmd
+		first     *redis.StringSliceCmd
+	)
+	_, err = t.Redis.Pipelined(rctx, func(p redis.Pipeliner) error {
+		inPending = p.ZScore(rctx, t.key("pending"), member)
+		extra = p.HMGet(rctx, win, "noid", "more")
+		total = p.ZCard(rctx, ids)
+		first = p.ZRange(rctx, ids, 0, throttleShowIDs-1)
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
+		t.release(ctx, claim)
+		return errors.New("resumo de alertas: Redis indisponível")
+	}
+	if inPending.Err() != nil { // já enviado por outra réplica entre a listagem e o claim
+		t.release(ctx, claim)
+		return nil
+	}
+	held := total.Val()
+	for _, v := range extra.Val() {
+		if s, ok := v.(string); ok {
+			n, _ := strconv.ParseInt(s, 10, 64)
+			held += n
+		}
+	}
+	if held <= 0 {
+		t.release(ctx, claim)
+		return t.dropPending(ctx, member, "janela expirada antes do resumo (os eventos estão no WORM)")
+	}
+	err = t.Next.Notify(ctx, Alert{Kind: kind, TenantID: tenant, Summary: t.summary(kind, tenant, from, held, first.Val())})
+	dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRedisTimeout)
+	defer dcancel()
+	if err != nil {
+		t.release(dctx, claim)
+		return err
+	}
+	if _, derr := t.Redis.TxPipelined(dctx, func(p redis.Pipeliner) error {
+		p.ZRem(dctx, t.key("pending"), member)
+		p.Del(dctx, win, ids, claim)
+		return nil
+	}); derr != nil {
+		t.warn("resumo de alertas enviado mas não apagado (pode repetir)", "kind", kind)
+	}
+	return nil
+}
+
+func (t *Throttle) release(ctx context.Context, claim string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRedisTimeout)
+	defer cancel()
+	if err := t.Redis.Del(rctx, claim).Err(); err != nil {
+		t.warn("resumo de alertas: claim não libertado (expira sozinho)")
+	}
+}
+
+func (t *Throttle) dropPending(ctx context.Context, member, why string) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRedisTimeout)
+	defer cancel()
+	if t.Log != nil {
+		t.Log.Error("resumo de alertas descartado", "reason", why)
+	}
+	if err := t.Redis.ZRem(rctx, t.key("pending"), member).Err(); err != nil {
+		return errors.New("resumo de alertas: Redis indisponível")
+	}
+	return nil
+}
+
+// summary: contagem, kind, tenant, janela e os event_id retidos (só UUIDs; até 20, depois "+N").
+func (t *Throttle) summary(kind, tenant string, from time.Time, held int64, ids []string) string {
+	shown := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if reAlertUUID.MatchString(id) {
+			shown = append(shown, id)
+		}
+	}
+	list := strings.Join(shown, ", ")
+	if rest := held - int64(len(shown)); rest > 0 {
+		if list != "" {
+			list += " "
+		}
+		list += fmt.Sprintf("+%d", rest)
+	}
+	return fmt.Sprintf("resumo: mais %d alerta(s) %s do tenant %s entre %s e %s (só os %d primeiros de cada %s "+
+		"por tipo e tenant saem um a um; todos estão no WORM) · retidos: %s", held, kind, tenant,
+		from.UTC().Format(time.RFC3339), from.Add(t.window()).UTC().Format(time.RFC3339), t.limit(), t.window(), list)
+}
+
+// Run: Flush no arranque (resumos de janelas fechadas por enviar, ex.: depois de um crash) e a cada Tick
+// até ctx terminar; ao parar, um último Flush com prazo próprio (as janelas em curso ficam no Redis e o
+// resumo sai pela réplica seguinte que fizer Flush).
 func (t *Throttle) Run(ctx context.Context) {
 	every := t.Tick
 	if every <= 0 {
 		every = defaultThrottleTick
 	}
+	flush := func(c context.Context) {
+		if err := t.Flush(c); err != nil && t.Log != nil {
+			t.Log.Error("resumo de alertas agrupados", "err", err.Error())
+		}
+	}
+	flush(ctx)
 	tk := time.NewTicker(every)
 	defer tk.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleFlushTimeout)
-			t.mu.Lock()
-			for _, b := range t.buckets { // fecha as janelas em curso para o resumo sair já
-				b.start = b.start.Add(-t.window())
-			}
-			t.mu.Unlock()
-			if err := t.Flush(fctx); err != nil && t.Log != nil {
-				t.Log.Error("resumo de alertas agrupados", "err", err.Error())
-			}
+			flush(fctx)
 			cancel()
 			return
 		case <-tk.C:
-			if err := t.Flush(ctx); err != nil && t.Log != nil {
-				t.Log.Error("resumo de alertas agrupados", "err", err.Error())
-			}
+			flush(ctx)
 		}
 	}
 }

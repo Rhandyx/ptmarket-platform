@@ -84,8 +84,13 @@ func run() int {
 
 	rdb := goredis.NewClient(ropts)
 	defer rdb.Close()
-	// Rajadas do mesmo kind (ex.: onboarding em massa → iban_change) saem agrupadas: 5 por 5 min + resumo.
-	alerter := &audit.Throttle{Next: &audit.Fanout{Channels: channels, Sent: audit.RedisSent{Redis: rdb}, Log: log}, Log: log}
+	// Rajadas do mesmo (kind, tenant) (ex.: onboarding em massa → iban_change) saem agrupadas: 5 por 5 min +
+	// resumo com os event_id retidos; estado no Redis (réplicas e crash); "audit.*" nunca agrupados; Redis em
+	// baixo → um a um.
+	alerter := &audit.Throttle{
+		Next:  &audit.Fanout{Channels: channels, Sent: audit.RedisSent{Redis: rdb}, Log: log},
+		Redis: rdb, Log: log,
+	}
 	roots := &audit.RootJob{
 		DB: pool, Worm: worm, Alert: alerter,
 		Retention: time.Duration(cfg.Worm.RootsRetentionDays) * day, Log: log,
