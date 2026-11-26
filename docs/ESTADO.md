@@ -32,5 +32,5 @@ Fundação: PG 18.1 + Redis 8, papéis sem superuser, RLS FORCE, Omnibus por tri
 
 ## Pendentes operacionais
 - **Push:** quando o owner o pede, faço eu `git push origin main`, depois de `git remote -v` (remote pessoal `Rhandyx`). Se o classificador bloquear, o owner corre `! git push origin main`.
-- **Backup:** o owner faz duplo clique em `infra/scripts/backup-nvme.command` no fim de cada ronda: bundle git verificado + memórias + `.env` numa imagem encriptada AES-256 (password pedida no Terminal). O macOS bloqueia o acesso ao disco a partir do Claude Code.
+- **Backup:** o owner faz duplo clique em `infra/scripts/backup-nvme.command` no fim de cada ronda: bundle git + memórias + `.env` numa única imagem encriptada AES-256 (password pedida no Terminal), copiada para o NVMe e para `Backups_PTMarket` no Google Drive pessoal (basta um dos dois; o Drive guarda os 10 mais recentes). O macOS bloqueia o acesso ao disco a partir do Claude Code.
 - Worktrees partem do último commit enviado: depois de um push, os executores podem usar `isolation: worktree`.
