@@ -170,7 +170,10 @@ SELECT pg_temp.expect_error(
 -- ---------------------------------------------------------------------------
 -- App: customers fechada; outbox só INSERT.
 -- ---------------------------------------------------------------------------
-SELECT pg_temp.expect_error('SELECT count(*) FROM customers', '42501', 'app não lê customers');
+-- Desde 0017 a app tem SELECT em customers, mas só o ator 'customer' vê (a sua) linha.
+SELECT set_config('app.actor_type', '', true);
+SELECT pg_temp.expect_count('SELECT count(*) FROM customers', 0, 'app sem ator lê 0 linhas de customers');
+SELECT set_config('app.actor_type', 'system', true);
 SELECT pg_temp.expect_error(
     $q$INSERT INTO customers (email) VALUES ('c@teste.invalid')$q$,
     '42501', 'app não escreve customers');
