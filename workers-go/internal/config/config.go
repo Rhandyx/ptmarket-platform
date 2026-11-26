@@ -31,7 +31,8 @@ func LoadEnv() (Env, error) {
 	return "", errors.New("APP_ENV obrigatória: development | test | staging | production")
 }
 
-// Validate recusa, em ambientes Strict, ALERT_DEV_LOG_ONLY=1 e WORM_ENDPOINT sem https://.
+// Validate recusa, em ambientes Strict, ALERT_DEV_LOG_ONLY=1, WORM_ENDPOINT sem https:// e retenções
+// abaixo do mínimo do owner (eventos 730 dias, raízes 3650).
 // As mensagens nunca incluem tokens nem URLs de alerta.
 func Validate(env Env, w Worm, a Alerts) error {
 	if !env.Strict() {
@@ -42,6 +43,12 @@ func Validate(env Env, w Worm, a Alerts) error {
 	}
 	if !strings.HasPrefix(w.Endpoint, "https://") {
 		return errors.New("WORM_ENDPOINT tem de começar por https:// com APP_ENV=" + string(env))
+	}
+	if w.EventsRetentionDays < 730 {
+		return errors.New("WORM_EVENTS_RETENTION_DAYS abaixo do mínimo (730) com APP_ENV=" + string(env))
+	}
+	if w.RootsRetentionDays < 3650 {
+		return errors.New("WORM_ROOTS_RETENTION_DAYS abaixo do mínimo (3650) com APP_ENV=" + string(env))
 	}
 	return nil
 }
