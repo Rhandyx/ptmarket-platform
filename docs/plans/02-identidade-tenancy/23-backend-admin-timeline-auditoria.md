@@ -1,6 +1,6 @@
 # 23 — API da timeline de auditoria no Super-Admin (épico: 02-identidade-tenancy)
 
-**Agente:** rust-core · **Modelo:** opus · **Depende de:** 09a, 20 · **Paralelo com:** 21
+**Agente:** rust-core · **Modelo:** opus · **Depende de:** 09a, 20, 23a (função `audit.admin_read_events`) · **Paralelo com:** 21
 
 ## Objetivo
 O super_admin consulta a caixa negra numa timeline filtrável por tenant, loja, utilizador e encomenda, com antes/depois e o estado da cadeia (decisão do owner, 26/11/2026). A UI fica no 1.º cartão do épico de backoffice; este cartão entrega a API e o contrato OpenAPI.
@@ -10,6 +10,11 @@ O super_admin consulta a caixa negra numa timeline filtrável por tenant, loja, 
 
 ## Não tocar
 - `src/audit/`, `src/identity/`, `src/tenancy/` (usar só as APIs públicas), `migrations/`, `workers-go/`, `frontend-web/`
+
+## Ajustes do supervisor (prevalecem sobre o contexto abaixo)
+- Rota: `GET /api/v1/superadmin/audit/events`, dentro do grupo `superadmin` já fechado pelo `superadmin_gate` (cartão 20). Quem não for super_admin com 2FA recebe o 404 uniforme + `denied`/`superadmin_gate` (não 403).
+- A leitura global faz-se só por `audit.admin_read_events(...)` (cartão 23a), com `query_as` estático + casts (exceção `audit.*`). Um 42501 da função dá 404 + denied; um 22023 dá 400.
+- `src/http/mod.rs` (registar a rota no grupo superadmin) substitui `src/http/router.rs` em "Pode alterar". Teste de integração em `tests/admin_timeline.rs`; a Prova passa a `--test admin_timeline`.
 
 ## Contexto exato
 ```
