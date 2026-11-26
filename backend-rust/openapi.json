@@ -9,6 +9,48 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Inicia sessão de cliente no tenant do `Host`. Falha → 401 sempre igual (exista ou não a conta).",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Sessão iniciada; cookie `__Host-ptm_session` (a sessão anterior deste browser é revogada)"
+          },
+          "401": {
+            "description": "Credenciais inválidas (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"
+          },
+          "403": {
+            "description": "Origin ausente ou de outro site (com sessão: também o token CSRF)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "422": {
+            "description": "Dados inválidos"
+          },
+          "429": {
+            "description": "Demasiadas tentativas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/auth/logout": {
       "post": {
         "tags": [
@@ -72,7 +114,7 @@
             }
           },
           "403": {
-            "description": "Pedido com sessão iniciada"
+            "description": "Pedido com sessão iniciada, ou Origin ausente ou de outro site"
           },
           "404": {
             "description": "Host desconhecido ou tenant inativo"
@@ -362,6 +404,33 @@
             ]
           }
         }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "description": "Pedido de login. Sem `Debug`: leva a password.",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Até 255 caracteres; comparado normalizado (trim, NFC, minúsculas)."
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "description": "1 a 128 caracteres; nunca normalizada nem aparada."
+          },
+          "turnstile_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token do widget Cloudflare Turnstile; obrigatório quando uma resposta anterior trouxe\n`captcha_required: true` (até 2048 caracteres)."
+          }
+        },
+        "additionalProperties": false
       },
       "ProfilePatch": {
         "type": "object",

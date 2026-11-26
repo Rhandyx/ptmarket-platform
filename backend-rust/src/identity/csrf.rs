@@ -11,6 +11,9 @@
 //!   `127.0.0.1` (dev).
 //! - SSR do Next (`X-Internal-Token` válido): pode vir sem `Origin` (o servidor não a tem); o token
 //!   CSRF continua obrigatório. Com `Origin`, compara-se na mesma.
+//! - Registo e login ANÓNIMOS (`/api/v1/auth/register`, `/api/v1/auth/login`): `Origin`
+//!   obrigatória (mesmas regras; o SSR com token interno pode vir sem ela). Falha → 403 +
+//!   `Denied("csrf")`. O logout anónimo (204 sem efeito) fica de fora.
 //! - `capture_host` corre POR FORA de `resolve_host` (que apaga o `X-Internal-Token`) e guarda o
 //!   host efetivo e a marca de proxy interno em `RequestHost`.
 
@@ -180,19 +183,28 @@ fn deny() -> Response {
     (axum::Extension(DENIED_CSRF), AppError::Forbidden).into_response()
 }
 
+/// Rotas de autenticação anónimas que criam estado: exigem `Origin` válida mesmo sem sessão (login
+/// CSRF / registo forçado a partir de outro site). O logout anónimo não muda nada (204 idempotente)
+/// e fica de fora.
+pub const ANONYMOUS_ORIGIN_PATHS: [&str; 2] = ["/api/v1/auth/register", "/api/v1/auth/login"];
+
 /// Layer (`from_fn_with_state`) POR DENTRO da caixa negra: a recusa (403 + `Denied("csrf")`) fica
-/// gravada com o ator. Só atua em mutações com sessão válida (`SessionInfo`).
+/// gravada. Mutações com sessão válida (`SessionInfo`): `Origin` + token. Registo e login anónimos
+/// (`ANONYMOUS_ORIGIN_PATHS`): só `Origin` (não há sessão para o token). Restantes anónimas: passam.
 pub async fn csrf_guard(State(s): State<Sessions>, req: Request, next: Next) -> Response {
     if is_safe(req.method()) {
         return next.run(req).await;
     }
-    let Some(info) = req.extensions().get::<SessionInfo>().copied() else {
-        return next.run(req).await;
-    };
     let origin = req
         .extensions()
         .get::<RequestHost>()
         .is_some_and(|rh| origin_ok(req.headers(), rh));
+    let Some(info) = req.extensions().get::<SessionInfo>().copied() else {
+        if ANONYMOUS_ORIGIN_PATHS.contains(&req.uri().path()) && !origin {
+            return deny();
+        }
+        return next.run(req).await;
+    };
     if !origin {
         return deny();
     }

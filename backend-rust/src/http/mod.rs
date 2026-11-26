@@ -94,6 +94,7 @@ pub fn api(
         .route("/api/v1/auth/session", get(identity::http::session_status))
         .route("/api/v1/auth/logout", post(identity::http::logout))
         .route("/api/v1/auth/register", post(identity::customers::register))
+        .route("/api/v1/auth/login", post(identity::login::login))
         .route(
             "/api/v1/me",
             get(identity::customers::get_me).patch(identity::customers::patch_me),

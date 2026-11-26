@@ -200,8 +200,9 @@ fn verify_blocking(bytes: &[u8], phc: Option<&str>) -> Result<Verified, AppError
     let ok = hasher()?.verify_password(bytes, &parsed).is_ok();
     let weaker = is_weaker_than_current(&parsed);
     if weaker {
-        // Hash antigo verifica mais depressa: completa o custo para o tempo não o revelar.
-        burn_dummy(bytes)?;
+        // Hash antigo verifica mais depressa: completa SÓ o custo que falta para o de uma
+        // verificação atual (o mesmo que o email inexistente), nunca um dummy inteiro a mais.
+        burn_complement(bytes, &parsed)?;
     }
     Ok(Verified {
         ok,
@@ -213,6 +214,50 @@ fn verify_blocking(bytes: &[u8], phc: Option<&str>) -> Result<Verified, AppError
 fn burn_dummy(bytes: &[u8]) -> Result<(), AppError> {
     let dummy = PasswordHash::new(DUMMY_PHC).map_err(|_| internal())?;
     let _ = hasher()?.verify_password(bytes, &dummy);
+    Ok(())
+}
+
+/// Trabalho do Argon2 em blocos de 1 KiB × passagens (m × t); `None` se o PHC não for Argon2.
+fn argon2_work(phc: &PasswordHash) -> Option<u64> {
+    if ![
+        argon2::ARGON2ID_IDENT,
+        argon2::ARGON2I_IDENT,
+        argon2::ARGON2D_IDENT,
+    ]
+    .contains(&phc.algorithm)
+    {
+        return None;
+    }
+    let p = Params::try_from(phc).ok()?;
+    Some(u64::from(p.m_cost()) * u64::from(p.t_cost()))
+}
+
+/// `m_cost` (KiB, com `t` atual) do Argon2 de enchimento para que o PHC fraco + o enchimento custem
+/// o mesmo que uma verificação com os parâmetros atuais. 0 = nada a completar. PHC não Argon2 (a
+/// verificação falhou logo) → o custo inteiro.
+fn complement_m_cost(phc: &PasswordHash) -> u32 {
+    let full = u64::from(ARGON2_M_COST_KIB) * u64::from(ARGON2_T_COST);
+    let done = argon2_work(phc).unwrap_or(0);
+    let missing = full.saturating_sub(done) / u64::from(ARGON2_T_COST);
+    // Mínimo do Argon2: 8 KiB por faixa; abaixo disso o custo é desprezável.
+    match u32::try_from(missing) {
+        Ok(m) if m >= 8 * ARGON2_P_COST => m,
+        _ => 0,
+    }
+}
+
+/// Gasta o custo que falta a um PHC fraco (`complement_m_cost`); o resultado é ignorado.
+fn burn_complement(bytes: &[u8], phc: &PasswordHash) -> Result<(), AppError> {
+    let m = complement_m_cost(phc);
+    if m == 0 {
+        return Ok(());
+    }
+    let params = Params::new(m, ARGON2_T_COST, ARGON2_P_COST, Some(ARGON2_OUTPUT_LEN))
+        .map_err(|_| internal())?;
+    let mut out = [0u8; ARGON2_OUTPUT_LEN];
+    Argon2::new(Algorithm::Argon2id, ARGON2_VERSION, params)
+        .hash_password_into(bytes, b"static-dummy-salt", &mut out)
+        .map_err(|_| internal())?;
     Ok(())
 }
 
@@ -339,6 +384,27 @@ mod tests {
             none_dt * 4 >= real_dt && none_dt <= real_dt * 4,
             "real={real_dt:?} none={none_dt:?}"
         );
+    }
+
+    #[test]
+    fn weak_phc_plus_complement_costs_one_current_verification() {
+        let full = u64::from(ARGON2_M_COST_KIB) * u64::from(ARGON2_T_COST);
+        for (m, t) in [(4096u32, ARGON2_T_COST), (ARGON2_M_COST_KIB, 1), (8192, 1)] {
+            let weak = Params::new(m, t, ARGON2_P_COST, Some(ARGON2_OUTPUT_LEN)).unwrap();
+            let phc = Argon2::default()
+                .hash_password_customized(GOOD.as_bytes(), b"0123456789abcdef", None, None, weak)
+                .unwrap()
+                .to_string();
+            let parsed = PasswordHash::new(&phc).unwrap();
+            let pad = u64::from(complement_m_cost(&parsed)) * u64::from(ARGON2_T_COST);
+            let total = argon2_work(&parsed).unwrap() + pad;
+            // Igual ao de uma verificação atual (± o arredondamento de uma passagem).
+            assert!(total <= full && full - total < u64::from(ARGON2_T_COST), "{m},{t}");
+        }
+        // PHC atual: nada a completar. O dummy usa os parâmetros atuais.
+        let dummy = PasswordHash::new(DUMMY_PHC).unwrap();
+        assert_eq!(complement_m_cost(&dummy), 0);
+        assert_eq!(argon2_work(&dummy), Some(full));
     }
 
     #[tokio::test]

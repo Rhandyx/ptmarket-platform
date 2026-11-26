@@ -30,6 +30,7 @@ use crate::{
     identity::{
         csrf::{CsrfKey, capture_host, csrf_guard},
         customers::Registration,
+        login::Login,
         session::{self, CookieKind, CookieRead, SessionId, SessionKind, SessionRow, Subject},
     },
     tenancy::{ResolvedHost, TenantId, begin_tenant_tx, db::begin_platform_tx},
@@ -56,6 +57,8 @@ struct Inner {
     internal_token: Option<SecretString>,
     /// Captcha e verificação de passwords vazadas do registo (cartão 02/17).
     registration: Option<Registration>,
+    /// Captcha, verificação de passwords e limites do login (cartão 02/18).
+    login: Option<Login>,
 }
 
 impl Sessions {
@@ -92,6 +95,7 @@ impl Sessions {
                 idle,
                 internal_token: None,
                 registration: None,
+                login: None,
             }),
         }
     }
@@ -118,6 +122,28 @@ impl Sessions {
 
     pub(crate) fn registration(&self) -> Option<&Registration> {
         self.inner.registration.as_ref()
+    }
+
+    /// Dependências do login de clientes (`Login::from_config` em produção; fakes nos testes). Sem
+    /// esta chamada o login responde 503 (falha fechado: nunca sem captcha).
+    pub fn with_login(self, login: Login) -> Self {
+        let mut inner = Arc::unwrap_or_clone(self.inner);
+        inner.login = Some(login);
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn login(&self) -> Option<&Login> {
+        self.inner.login.as_ref()
+    }
+
+    pub(crate) fn redis(&self) -> &deadpool_redis::Pool {
+        &self.inner.redis
+    }
+
+    pub(crate) fn ns(&self) -> &str {
+        &self.inner.ns
     }
 
     pub(crate) fn internal_token(&self) -> Option<&SecretString> {
@@ -307,6 +333,10 @@ impl CurrentSession {
 
     pub(crate) fn actor(&self) -> Option<Actor> {
         self.actor
+    }
+
+    pub(crate) fn info(&self) -> Option<SessionInfo> {
+        self.info
     }
 }
 

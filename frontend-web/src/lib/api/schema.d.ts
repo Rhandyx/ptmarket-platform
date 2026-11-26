@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Inicia sessão de cliente no tenant do `Host`. Falha → 401 sempre igual (exista ou não a conta). */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -161,6 +178,21 @@ export interface components {
             nif: string | null;
             phone: string | null;
         };
+        /** @description Pedido de login. Sem `Debug`: leva a password. */
+        LoginRequest: {
+            /** @description Até 255 caracteres; comparado normalizado (trim, NFC, minúsculas). */
+            email: string;
+            /**
+             * Format: password
+             * @description 1 a 128 caracteres; nunca normalizada nem aparada.
+             */
+            password: string;
+            /**
+             * @description Token do widget Cloudflare Turnstile; obrigatório quando uma resposta anterior trouxe
+             *     `captcha_required: true` (até 2048 caracteres).
+             */
+            turnstile_token?: string | null;
+        };
         /**
          * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
          *     Email e password ficam fora (exigem reautenticação).
@@ -247,6 +279,70 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Sessão iniciada; cookie `__Host-ptm_session` (a sessão anterior deste browser é revogada) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Credenciais inválidas (corpo sempre igual). Com `"captcha_required": true` no corpo: repetir com `turnstile_token` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Origin ausente ou de outro site (com sessão: também o token CSRF) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas tentativas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     logout: {
         parameters: {
             query?: never;
@@ -304,7 +400,7 @@ export interface operations {
                     "application/json": components["schemas"]["RegisterAccepted"];
                 };
             };
-            /** @description Pedido com sessão iniciada */
+            /** @description Pedido com sessão iniciada, ou Origin ausente ou de outro site */
             403: {
                 headers: {
                     [name: string]: unknown;

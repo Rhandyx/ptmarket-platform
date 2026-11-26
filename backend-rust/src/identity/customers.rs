@@ -24,7 +24,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::Connection;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -42,6 +41,7 @@ use crate::{
         http::{CurrentSession, RequireCustomer, no_store},
         nif,
         password::{self, Password},
+        throttle::{AccountKey, account_hash},
     },
     outbox::{self, NewEvent},
     state::AppState,
@@ -75,14 +75,21 @@ pub struct Registration {
     breach: Arc<dyn BreachChecker>,
     /// `REGISTER_MIN_RESPONSE`; só os testes o mudam.
     min_response: Duration,
+    /// `ACCOUNT_HASH_KEY`: identificador da conta no evento do email repetido.
+    account: AccountKey,
 }
 
 impl Registration {
-    pub fn new(captcha: Arc<dyn CaptchaVerifier>, breach: Arc<dyn BreachChecker>) -> Self {
+    pub fn new(
+        captcha: Arc<dyn CaptchaVerifier>,
+        breach: Arc<dyn BreachChecker>,
+        account: AccountKey,
+    ) -> Self {
         Self {
             captcha,
             breach,
             min_response: REGISTER_MIN_RESPONSE,
+            account,
         }
     }
 
@@ -94,13 +101,17 @@ impl Registration {
         self
     }
 
-    /// Produção: Turnstile com `TURNSTILE_SECRET` (obrigatório) e HIBP.
+    /// Produção: Turnstile com `TURNSTILE_SECRET` (obrigatório), HIBP e `ACCOUNT_HASH_KEY`.
     pub fn from_config(cfg: &Config) -> anyhow::Result<Self> {
         let secret = cfg.require_turnstile_secret()?;
         let captcha = TurnstileVerifier::new(secret)
             .map_err(|_| anyhow::anyhow!("cliente Turnstile indisponível"))?;
         let breach = HibpRange::new().map_err(|_| anyhow::anyhow!("cliente HIBP indisponível"))?;
-        Ok(Self::new(Arc::new(captcha), Arc::new(breach)))
+        Ok(Self::new(
+            Arc::new(captcha),
+            Arc::new(breach),
+            AccountKey::new(cfg.account_hash_key()),
+        ))
     }
 }
 
@@ -296,13 +307,6 @@ fn bot() -> Response {
     resp
 }
 
-fn sha256_hex(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// Telefone: só `[0-9 +()-]`.
 fn phone_chars_ok(v: &str) -> bool {
     v.chars()
@@ -460,9 +464,13 @@ async fn customer_id_by_email(tx: &mut TenantTx, email: &str) -> Result<Option<U
 }
 
 /// Email repetido (na transação do registo, depois do ROLLBACK TO SAVEPOINT): evento de outbox para
-/// o titular (sem email no payload) e `customer.register_duplicate` com o sha256 do email
-/// normalizado (nunca o email).
-async fn record_duplicate(tx: &mut TenantTx, email: &str) -> Result<(), AppError> {
+/// o titular (sem email no payload) e `customer.register_duplicate` com o `account_hash` (HMAC com
+/// `ACCOUNT_HASH_KEY`) do email normalizado (nunca o email).
+async fn record_duplicate(
+    tx: &mut TenantTx,
+    email: &str,
+    account: &AccountKey,
+) -> Result<(), AppError> {
     if let Some(id) = customer_id_by_email(tx, email).await? {
         outbox::append(
             tx,
@@ -480,7 +488,7 @@ async fn record_duplicate(tx: &mut TenantTx, email: &str) -> Result<(), AppError
         AuditEvent {
             action: "customer.register_duplicate",
             target_type: Some("account_hash"),
-            target_id: Some(sha256_hex(email)),
+            target_id: Some(account_hash(account, email)),
             outcome: Outcome::Success,
             reason: None,
             changes: None,
@@ -568,7 +576,7 @@ async fn update_profile(tx: &mut TenantTx, id: Uuid, p: &ValidPatch) -> Result<b
     responses(
         (status = 202, description = "Pedido aceite (sempre igual, exista ou não a conta)",
             body = RegisterAccepted),
-        (status = 403, description = "Pedido com sessão iniciada"),
+        (status = 403, description = "Pedido com sessão iniciada, ou Origin ausente ou de outro site"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 422, description = "Dados inválidos, password vazada ou verificação anti-robô falhada"),
         (status = 503, description = "Serviço temporariamente indisponível")
@@ -669,7 +677,7 @@ async fn register_steps(
         .await?;
     } else {
         // O 23505 só desfez o SAVEPOINT: a mesma transação grava o outbox e o evento.
-        record_duplicate(&mut tx, &valid.email).await?;
+        record_duplicate(&mut tx, &valid.email, &reg.account).await?;
     }
     tx.commit().await?;
     Ok(accepted())
@@ -855,13 +863,5 @@ mod tests {
         ] {
             assert!(validate_patch(&p(bad), CountryCode::Pt).is_err(), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn duplicate_hash_is_sha256_hex() {
-        assert_eq!(
-            sha256_hex("abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }

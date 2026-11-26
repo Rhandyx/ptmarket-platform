@@ -15,6 +15,12 @@ const MIN_PROXY_PREFIX_V6: u8 = 16;
 pub const MIN_INTERNAL_TOKEN_BYTES: usize = 32;
 /// Tamanho mínimo de `CSRF_KEY`.
 pub const MIN_CSRF_KEY_BYTES: usize = crate::identity::csrf::MIN_KEY_BYTES;
+/// Tamanho mínimo de `ACCOUNT_HASH_KEY`.
+pub const MIN_ACCOUNT_HASH_KEY_BYTES: usize = 32;
+/// Chave fixa e PÚBLICA (está no código) de `ACCOUNT_HASH_KEY`, só para development/test sem a
+/// variável. Em staging/production a variável é obrigatória (`check_strict`).
+const DEV_ACCOUNT_HASH_KEY: &str =
+    "2c1b5f0e7f3e4c9a8d6b1f2e3a4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e";
 
 /// Erro de configuração legível; nunca contém valores de segredos.
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +93,11 @@ pub struct Config {
     /// `TURNSTILE_SECRET` (chave secreta do Cloudflare Turnstile; `siteverify` no registo). Sem ela
     /// o registo de clientes não é servido (`Config::require_turnstile_secret`).
     pub turnstile_secret: Option<SecretString>,
+    /// `ACCOUNT_HASH_KEY` (≥ 32 bytes; ex.: `openssl rand -hex 32`): chave HMAC-SHA256 do
+    /// identificador de conta (email normalizado) na caixa negra e nas chaves Redis do login.
+    /// Mudá-la desliga os eventos antigos dos novos e reinicia os contadores do login. Obrigatória
+    /// em staging/production; em development/test, ausente → chave fixa de dev (com aviso).
+    pub account_hash_key: Option<SecretString>,
 }
 
 fn platform_host(raw: Option<String>) -> Result<Option<String>, ConfigError> {
@@ -139,6 +150,22 @@ fn csrf_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
 }
 
 const TURNSTILE_SECRET: &str = "TURNSTILE_SECRET";
+const ACCOUNT_HASH_KEY: &str = "ACCOUNT_HASH_KEY";
+
+fn account_hash_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
+    let Some(v) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let key = SecretString::from(v);
+    let k = key.expose_secret();
+    if k.len() < MIN_ACCOUNT_HASH_KEY_BYTES || k.trim() != k {
+        return Err(ConfigError::Invalid(
+            ACCOUNT_HASH_KEY,
+            "mínimo 32 bytes, sem espaços nas pontas",
+        ));
+    }
+    Ok(Some(key))
+}
 
 fn turnstile_secret(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
     let Some(v) = raw.filter(|v| !v.is_empty()) else {
@@ -209,6 +236,21 @@ impl Config {
             .ok_or(ConfigError::Missing(TURNSTILE_SECRET))
     }
 
+    /// `ACCOUNT_HASH_KEY` (HMAC do identificador de conta). Em staging/production é garantida pelo
+    /// arranque; em development/test, ausente → chave fixa de dev e um aviso no log.
+    pub fn account_hash_key(&self) -> SecretString {
+        match &self.account_hash_key {
+            Some(k) => k.clone(),
+            None => {
+                tracing::warn!(
+                    app_env = ?self.app_env,
+                    "ACCOUNT_HASH_KEY ausente: a usar a chave fixa de desenvolvimento (nunca em produção)"
+                );
+                SecretString::from(DEV_ACCOUNT_HASH_KEY)
+            }
+        }
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let app_env = AppEnv::parse(get("APP_ENV"))?;
         let pg = ["postgres://", "postgresql://"];
@@ -228,6 +270,7 @@ impl Config {
             internal_proxy_token: internal_token(get("INTERNAL_PROXY_TOKEN"))?,
             csrf_key: csrf_key(get("CSRF_KEY"))?,
             turnstile_secret: turnstile_secret(get(TURNSTILE_SECRET))?,
+            account_hash_key: account_hash_key(get(ACCOUNT_HASH_KEY))?,
         };
         if app_env.is_strict() {
             cfg.check_strict()?;
@@ -258,6 +301,12 @@ impl Config {
         if self.platform_admin_host.is_none() {
             return Err(ConfigError::Invalid(
                 "PLATFORM_ADMIN_HOST",
+                "obrigatória em staging/production",
+            ));
+        }
+        if self.account_hash_key.is_none() {
+            return Err(ConfigError::Invalid(
+                ACCOUNT_HASH_KEY,
                 "obrigatória em staging/production",
             ));
         }
@@ -389,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn account_hash_key_validated_dev_fallback_and_hidden() {
+        // Dev/test sem a variável: chave fixa de desenvolvimento.
+        let c = Config::from_lookup(env(&OK));
+        assert!(c.as_ref().is_ok_and(|c| c.account_hash_key.is_none()));
+        assert!(c.is_ok_and(|c| c.account_hash_key().expose_secret() == DEV_ACCOUNT_HASH_KEY));
+        for bad in ["curta", " chave-conta-segredo-com-32-bytes-ok"] {
+            let mut v = OK.to_vec();
+            v.push(("ACCOUNT_HASH_KEY", bad));
+            let e = Config::from_lookup(env(&v)).err().map(|e| e.to_string());
+            assert!(
+                e.as_deref()
+                    .is_some_and(|s| s.contains("ACCOUNT_HASH_KEY") && !s.contains("chave-conta")),
+                "{bad}"
+            );
+        }
+        let mut v = OK.to_vec();
+        v.push(("ACCOUNT_HASH_KEY", "chave-conta-segredo-com-32-bytes-ok"));
+        let c = Config::from_lookup(env(&v));
+        assert!(!format!("{c:?}").contains("chave-conta"));
+        assert!(c.is_ok_and(|c| c.account_hash_key().expose_secret()
+            == "chave-conta-segredo-com-32-bytes-ok"));
+    }
+
+    #[test]
     fn csrf_key_required_and_min_32_bytes() {
         let v: Vec<_> = OK
             .iter()
@@ -493,7 +566,7 @@ mod tests {
         }
     }
 
-    const PROD: [(&str, &str); 10] = [
+    const PROD: [(&str, &str); 11] = [
         ("APP_ENV", "production"),
         ("DATABASE_PRIMARY_URL", "postgres://u:segredo1@h/db"),
         ("DATABASE_REPLICA_URL", "postgres://u:segredo1@h/db"),
@@ -507,6 +580,7 @@ mod tests {
         ("PLATFORM_ADMIN_HOST", "admin.ptmarket.pt"),
         ("TURNSTILE_SECRET", "0x4AAAsegredo-turnstile"),
         ("BIND_ADDR", "0.0.0.0:8080"),
+        ("ACCOUNT_HASH_KEY", "chave-conta-segredo-com-32-bytes-ok"),
     ];
 
     fn err_of(v: &[(&str, &str)]) -> Option<String> {
@@ -557,6 +631,7 @@ mod tests {
             "CSRF_KEY",
             "PLATFORM_ADMIN_HOST",
             "TURNSTILE_SECRET",
+            "ACCOUNT_HASH_KEY",
         ] {
             let v: Vec<_> = PROD.iter().copied().filter(|(k, _)| *k != key).collect();
             let e = err_of(&v);

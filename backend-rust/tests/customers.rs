@@ -20,7 +20,8 @@ use ptmarket_api::{
     audit::{ActorType, AuditCtx},
     http::{api, audit_layer::AuditLayerState, client_ip::TrustedProxies},
     identity::{
-        BreachChecker, CaptchaVerifier, Password, Registration, Sessions, Subject,
+        AccountKey, BreachChecker, CaptchaVerifier, Password, Registration, Sessions, Subject,
+        account_hash,
         csrf::X_CSRF_TOKEN,
         password,
         session::{self, COOKIE_TENANT},
@@ -30,7 +31,6 @@ use ptmarket_api::{
     tenancy::{HostResolver, TenantId, begin_tenant_tx},
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{
     PgPool, Postgres,
     pool::PoolOptions,
@@ -213,7 +213,11 @@ fn app_router_with(
     min_response: Duration,
 ) -> anyhow::Result<Router> {
     let st = state(app)?;
-    let registration = Registration::new(Arc::new(FakeCaptcha), Arc::new(StaticBreach(breached)))
+    let registration = Registration::new(
+        Arc::new(FakeCaptcha),
+        Arc::new(StaticBreach(breached)),
+        account_key(),
+    )
         .with_min_response_for_tests(min_response);
     let sessions = Sessions::for_tests(app.clone(), redis()?, CSRF_KEY.to_owned().into(), ns, None)
         .with_internal_token(Some(INTERNAL_TOKEN.to_owned().into()))
@@ -341,18 +345,27 @@ fn register_body(email: &str, name: &str) -> Value {
     })
 }
 
+/// Registo a partir do próprio site (`Origin` do tenant: obrigatória nas mutações anónimas de
+/// `/api/v1/auth/*`).
 async fn register(app: &Router, t: &Tenant, body: &Value) -> anyhow::Result<Reply> {
-    send(
-        app,
-        Method::POST,
-        REGISTER_URI,
-        &[
-            (header::HOST, &t.domain),
-            (header::CONTENT_TYPE, "application/json"),
-        ],
-        &body.to_string(),
-    )
-    .await
+    let origin = t.origin();
+    register_from(app, t, Some(&origin), body).await
+}
+
+async fn register_from(
+    app: &Router,
+    t: &Tenant,
+    origin: Option<&str>,
+    body: &Value,
+) -> anyhow::Result<Reply> {
+    let mut h = vec![
+        (header::HOST, t.domain.as_str()),
+        (header::CONTENT_TYPE, "application/json"),
+    ];
+    if let Some(o) = origin {
+        h.push((header::ORIGIN, o));
+    }
+    send(app, Method::POST, REGISTER_URI, &h, &body.to_string()).await
 }
 
 /// Total de contas (como `ptmarket_identity`: só vê id/email/hash).
@@ -473,11 +486,10 @@ async fn patch_me(
     send(app, Method::PATCH, ME_URI, &h, &body.to_string()).await
 }
 
-fn sha256_hex(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+const ACCOUNT_KEY: &str = "chave-de-conta-de-teste-com-mais-de-32-bytes";
+
+fn account_key() -> AccountKey {
+    AccountKey::new(ACCOUNT_KEY.to_owned().into())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -558,7 +570,7 @@ async fn register_creates_account_and_duplicates_are_indistinguishable(
         assert!(
             evs.iter().any(|e| e.0 == "customer.register_duplicate"
                 && e.5.as_deref() == Some("account_hash")
-                && e.6.as_deref() == Some(sha256_hex(email).as_str())),
+                && e.6.as_deref() == Some(account_hash(&account_key(), email).as_str())),
             "{evs:?}"
         );
         assert!(
@@ -598,6 +610,26 @@ async fn invalid_registrations_are_422_without_rows(
     let a = seed_tenant(&d.owner, "camara-a", "PT").await?;
     let ns = namespace();
     let app = app_router(&d.app, &ns, false, None)?;
+
+    // Sem `Origin` do próprio site (registo forçado a partir de outro site) → 403 + `denied`.
+    let body = register_body("csrf@exemplo.pt", "Carla");
+    let r = register_from(&app, &a, None, &body).await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    let evs = events(&d.app, &a, Some(r.rid()?), None).await?;
+    assert!(
+        evs.iter()
+            .any(|e| e.1 == "denied" && e.2.as_deref() == Some("csrf")),
+        "{evs:?}"
+    );
+    for bad in [
+        "https://outro-site.invalid",
+        "null",
+        "http://camara-a.ptmarket.invalid",
+    ] {
+        let r = register_from(&app, &a, Some(bad), &body).await?;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{bad}: {}", r.body);
+    }
+    assert_eq!(customer_count(&d).await?, 0);
     let ok = register_body("x@exemplo.pt", "X");
 
     let mut no_terms = ok.clone();

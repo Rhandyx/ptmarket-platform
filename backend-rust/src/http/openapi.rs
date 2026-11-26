@@ -13,6 +13,7 @@ use crate::{http::health, identity, tenancy};
         identity::http::session_status,
         identity::http::logout,
         identity::customers::register,
+        identity::login::login,
         identity::customers::get_me,
         identity::customers::patch_me
     ),
