@@ -476,7 +476,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p
        WHERE p.oid IN ('identity_session_lookup(bytea)'::regprocedure, 'identity_passkey_lookup(bytea)'::regprocedure)
          AND p.prosecdef AND p.provolatile = 's' AND p.proowner = 'ptmarket_identity'::regrole
-         AND p.proconfig = ARRAY['search_path=pg_catalog, public']$q$,
+         AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']$q$,
     2, 'lookups: DEFINER, STABLE, dono ptmarket_identity, search_path fixo');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p

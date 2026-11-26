@@ -388,7 +388,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p
        WHERE p.oid = 'identity_user_credentials(text)'::regprocedure
          AND p.prosecdef AND p.provolatile = 's' AND p.proowner = 'ptmarket_identity'::regrole
-         AND p.proconfig = ARRAY['search_path=pg_catalog, public']
+         AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']
          AND pg_get_function_result(p.oid) = 'TABLE(id uuid, password_hash text, totp_enabled boolean)'$q$,
     1, 'lookup: DEFINER, STABLE, dono ptmarket_identity, search_path fixo, só id + hash + totp_enabled');
 SELECT pg_temp.expect_count(

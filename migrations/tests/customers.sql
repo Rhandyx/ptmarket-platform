@@ -208,7 +208,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p
        WHERE p.oid = 'identity_customer_credentials(text)'::regprocedure
          AND p.prosecdef AND p.provolatile = 's' AND p.proowner = 'ptmarket_identity'::regrole
-         AND p.proconfig = ARRAY['search_path=pg_catalog, public']
+         AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']
          AND pg_get_function_result(p.oid) = 'TABLE(id uuid, password_hash text)'$q$,
     1, 'lookup: DEFINER, STABLE, dono ptmarket_identity, search_path fixo, só id + password_hash');
 -- 13: segunda função de lookup · 14: lookups de sessão e passkey

@@ -1,4 +1,5 @@
--- Teste do portal nacional (0016): leitura só de lojas/produtos/variantes publicadas, mesmo país,
+-- Teste do portal nacional (0016; lojas de outros tenants pela view portal_stores desde a 0021): leitura só de
+-- lojas/produtos/variantes publicadas, mesmo país,
 -- tenant do contexto = national_portal ativo; escritas continuam isoladas.
 -- Asserções correm sempre com SET ROLE ptmarket_app. Só os tenants (tabela global sem grant de escrita)
 -- são criados pelo dono das migrations. Tudo numa transação com ROLLBACK: a BD fica como estava.
@@ -181,26 +182,27 @@ SET app.current_tenant_id = '00000000-0000-7000-8000-0000000020f0';
 SET app.portal_national = 'on';
 SELECT pg_temp.expect_count('SELECT (SELECT app_is_national_portal())::int', 1, 'portal P com flag: modo portal ativo');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0'$q$,
-    2, 'portal vê 2 lojas de outros tenants');
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0'$q$,
+    2, 'portal vê 2 lojas de outros tenants (portal_stores)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE id IN ('00000000-0000-7000-8000-0000000020a1',
-                                                '00000000-0000-7000-8000-0000000020b1')$q$,
-    2, 'portal vê a loja publicada de A e a de B');
+    $q$SELECT count(*) FROM portal_stores WHERE id IN ('00000000-0000-7000-8000-0000000020a1',
+                                                       '00000000-0000-7000-8000-0000000020b1')$q$,
+    2, 'portal vê a loja publicada de A e a de B (portal_stores)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores
-       WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0' AND NOT publish_to_national_portal$q$,
-    0, 'portal não vê nenhuma loja não publicada de outro tenant');
+    $q$SELECT count(*) FROM portal_stores WHERE id IN ('00000000-0000-7000-8000-0000000020a4',
+                                                       '00000000-0000-7000-8000-0000000020c1')$q$,
+    0, 'portal não vê nenhuma loja não publicada de outro tenant (A4, M1)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE id = '00000000-0000-7000-8000-0000000020a3'$q$,
+    $q$SELECT count(*) FROM portal_stores WHERE id = '00000000-0000-7000-8000-0000000020a3'$q$,
     0, 'portal não vê loja publicada mas inativa');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id = '00000000-0000-7000-8000-00000000200e'$q$,
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id = '00000000-0000-7000-8000-00000000200e'$q$,
     0, 'portal PT não vê loja de tenant ES');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id = '00000000-0000-7000-8000-00000000200d'$q$,
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id = '00000000-0000-7000-8000-00000000200d'$q$,
     0, 'portal não vê loja de tenant inativo');
-SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 3, 'portal vê 3 lojas no total (1 própria + A1 + B1)');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 2,
+    'portal_stores tem 2 lojas no total (A1 + B1; a própria não está publicada)');
 
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM products WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0'$q$,
@@ -250,8 +252,8 @@ SELECT pg_temp.expect_no_seqscan(
                                  AND store_id = '00000000-0000-7000-8000-0000000020b1'$q$,
     'products', 'produtos por (tenant_id, store_id) em modo portal usam índice');
 SELECT pg_temp.expect_no_seqscan(
-    $q$SELECT id FROM stores WHERE publish_to_national_portal$q$,
-    'stores', 'listagem de lojas do portal usa stores_national_portal_idx');
+    $q$SELECT id FROM portal_stores$q$,
+    'stores', 'listagem de lojas do portal (portal_stores) sem seq scan em stores');
 
 -- ---------------------------------------------------------------------------
 -- 2. Em modo portal, escritas em linhas de outro tenant: erro ou 0 linhas.
@@ -301,7 +303,7 @@ SELECT pg_temp.expect_count(
     0, 'portal: SELECT … FOR UPDATE da loja A1 não tranca nada');
 -- As linhas continuam lá e intactas (lidas em modo portal).
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores s
+    $q$SELECT count(*) FROM portal_stores s
        JOIN products p ON p.store_id = s.id AND p.tenant_id = s.tenant_id
        JOIN product_variants v ON v.product_id = p.id AND v.tenant_id = p.tenant_id
        WHERE (s.id = '00000000-0000-7000-8000-0000000020a1' AND s.name = 'Loja A1'
@@ -318,8 +320,8 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM products', 1, 'portal sem flag
 SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1, 'portal sem flag: 1 variante (a sua)');
 SET app.portal_national = 'true';
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0'$q$,
-    0, 'portal com flag = true (≠ on): só as suas lojas');
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id <> '00000000-0000-7000-8000-0000000020f0'$q$,
+    0, 'portal com flag = true (≠ on): portal_stores vazia');
 
 -- ---------------------------------------------------------------------------
 -- 4. Tenant municipal COM a flag continua isolado (anti-IDOR); portal inativo idem; sem contexto: 0.
@@ -331,35 +333,35 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 1, 'municipal com fla
 SELECT pg_temp.expect_count('SELECT count(*) FROM products', 1, 'municipal com flag: 1 produto (o seu)');
 SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1, 'municipal com flag: 1 variante (a sua)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id <> '00000000-0000-7000-8000-00000000200c'$q$,
-    0, 'municipal com flag não vê lojas de outros tenants');
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id <> '00000000-0000-7000-8000-00000000200c'$q$,
+    0, 'municipal com flag não vê lojas de outros tenants (portal_stores)');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM product_variants WHERE tenant_id <> '00000000-0000-7000-8000-00000000200c'$q$,
     0, 'municipal com flag não vê variantes de outros tenants');
 
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000200a';
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE tenant_id <> '00000000-0000-7000-8000-00000000200a'$q$,
-    0, 'municipal A (com lojas publicadas) e flag não vê lojas de outros tenants');
+    $q$SELECT count(*) FROM portal_stores WHERE tenant_id <> '00000000-0000-7000-8000-00000000200a'$q$,
+    0, 'municipal A (com lojas publicadas) e flag não vê lojas de outros tenants (portal_stores)');
 
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000020f1';
-SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'portal inativo com flag: 0 lojas');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'portal inativo com flag: 0 lojas');
 SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'portal inativo com flag: 0 produtos');
 
 RESET app.current_tenant_id;
-SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'sem contexto com flag: 0 lojas');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'sem contexto com flag: 0 lojas');
 SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'sem contexto com flag: 0 produtos');
 SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 0, 'sem contexto com flag: 0 variantes');
 SET app.current_tenant_id = '';
-SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'contexto vazio com flag: 0 lojas');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'contexto vazio com flag: 0 lojas');
 
 -- ---------------------------------------------------------------------------
 -- 5. Portal ES vê só a loja ES publicada (país do portal).
 -- ---------------------------------------------------------------------------
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000020f2';
-SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 1, 'portal ES vê 1 loja');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 1, 'portal ES vê 1 loja');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM stores WHERE id = '00000000-0000-7000-8000-0000000020e1'$q$,
+    $q$SELECT count(*) FROM portal_stores WHERE id = '00000000-0000-7000-8000-0000000020e1'$q$,
     1, 'portal ES vê a loja ES publicada');
 SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1, 'portal ES vê 1 variante (E2)');
 
