@@ -1,7 +1,8 @@
 //! `AuditCtx`: quem faz o pedido (spec 13 §3.1). Sem ele não se abre transação nenhuma.
 //!
 //! Campos privados e sem `Default`: só nasce no extractor HTTP (cartão 07, `pub(crate)`), em
-//! `AuditCtx::system` (jobs) ou, com a feature `test-support`, em `AuditCtx::for_tests`.
+//! `AuditCtx::system` (jobs do crate, `pub(crate)`) ou, com a feature `test-support`, em
+//! `AuditCtx::for_tests`.
 //! Não existe construtor, flag ou variável de ambiente que desligue a auditoria.
 
 use std::{
@@ -44,6 +45,12 @@ impl ActorType {
 /// Contexto de ator de um pedido ou job. Um `clone` partilha a marca `recorded`: o middleware
 /// (cartão 07) guarda uma cópia e vê se um evento de `audit::record` chegou a ser confirmado
 /// (COMMIT) durante o pedido.
+///
+/// Fora do crate ninguém se faz passar por `system` (um handler não abre transações como job):
+///
+/// ```compile_fail,E0624
+/// let _ = ptmarket_api::audit::AuditCtx::system("job");
+/// ```
 #[derive(Debug, Clone)]
 pub struct AuditCtx {
     actor_type: ActorType,
@@ -87,8 +94,10 @@ impl AuditCtx {
         }
     }
 
-    /// Ator de um job/processo interno: `system` com o nome do job em `actor_label`.
-    pub fn system(job: &'static str) -> Self {
+    /// Ator de um job/processo interno: `system` com o nome do job em `actor_label`. Só para jobs
+    /// do crate: fora dele (handlers externos, `tests/`) não é visível.
+    #[allow(dead_code, reason = "para os jobs Rust do crate (ainda nenhum)")]
+    pub(crate) fn system(job: &'static str) -> Self {
         Self {
             actor_type: ActorType::System,
             actor_id: None,

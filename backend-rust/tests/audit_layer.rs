@@ -6,13 +6,17 @@
 //! `Extension` posta no router. Cada teste usa um prefixo Redis próprio e apaga-o no fim.
 //! Leituras de `audit.*` sem `query!` (o migrator não tem SELECT na caixa negra): SQL estático.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
     Extension, Router,
     body::Body,
     extract::ConnectInfo,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     routing::{get, options, post},
 };
 use deadpool_redis::{Runtime, redis};
@@ -23,6 +27,7 @@ use ptmarket_api::{
     http::{
         audit_layer::{AuditLayerState, audited},
         client_ip::TrustedProxies,
+        with_edge_layers, with_edge_layers_for_tests,
     },
     tenancy::{TenantId, begin_tenant_tx},
 };
@@ -33,6 +38,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 use tower::ServiceExt;
+use tower_http::request_id::RequestId;
 use uuid::Uuid;
 
 type TestResult = anyhow::Result<()>;
@@ -128,8 +134,17 @@ fn namespace() -> String {
 
 /// Middleware de teste: o proxy de teste (`10.0.0.0/8`) é de confiança.
 fn layer(db: PgPool, redis: deadpool_redis::Pool, ns: &str) -> AuditLayerState {
+    layer_with_window(db, redis, ns, WINDOW)
+}
+
+fn layer_with_window(
+    db: PgPool,
+    redis: deadpool_redis::Pool,
+    ns: &str,
+    window: Duration,
+) -> AuditLayerState {
     let trusted = TrustedProxies::new(PROXY_NETS.iter().filter_map(|n| n.parse().ok()).collect());
-    AuditLayerState::for_tests(db, redis, trusted, ns, WINDOW)
+    AuditLayerState::for_tests(db, redis, trusted, ns, window)
 }
 
 async fn cleanup(redis: &deadpool_redis::Pool, ns: &str) -> TestResult {
@@ -168,6 +183,36 @@ fn stream_for(events: &[serde_json::Value], rid: Uuid) -> Vec<serde_json::Value>
         .filter(|e| e["request_id"] == rid.to_string())
         .cloned()
         .collect()
+}
+
+/// Espera (até `max`) que o Stream do teste tenha pelo menos `n` entradas.
+async fn wait_stream(
+    redis: &deadpool_redis::Pool,
+    ns: &str,
+    n: usize,
+    max: Duration,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let start = std::time::Instant::now();
+    loop {
+        let evs = stream(redis, ns).await?;
+        if evs.len() >= n || start.elapsed() > max {
+            return Ok(evs);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Quantos eventos há com estes request_id (lidos como app, dentro do tenant).
+async fn count_events(app: &PgPool, tenant: TenantId, rids: &[Uuid]) -> anyhow::Result<i64> {
+    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    let mut tx = begin_tenant_tx(app, tenant, &reader).await?;
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit.audit_events WHERE request_id = ANY($1)")
+            .bind(rids)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.rollback().await?;
+    Ok(n)
 }
 
 /// Eventos gravados com este request_id (lidos como app, dentro do tenant).
@@ -250,8 +295,39 @@ fn test_router(st: AuditLayerState, db: PgPool) -> Router {
         }
     });
     // Sem `AuditClass`: tem de valer `ReadSync`.
+    // 17 parâmetros: só os 16 primeiros entram no evento.
+    let many: String = (b'a'..=b'q')
+        .map(|c| format!("/{{{}}}", char::from(c)))
+        .collect();
     let default_class = Router::new()
-        .route("/items/{id}", get(|| async { "secret-body-xyz" }))
+        .route(
+            "/items/{id}",
+            get(|| async { "secret-body-xyz" }).delete(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(&format!("/p{many}"), get(|| async { "many" }))
+        .route(
+            "/slow",
+            get(|| async {
+                tracing::info!("slow-start");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                "late"
+            }),
+        )
+        .route(
+            "/rid",
+            get(
+                |Extension(rid): Extension<RequestId>, headers: HeaderMap| async move {
+                    let ext = rid.header_value().to_str().unwrap_or_default().to_owned();
+                    let hdr = headers
+                        .get("x-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    tracing::info!("handler-log");
+                    format!("{ext}|{hdr}")
+                },
+            ),
+        )
         .route(
             "/unauth",
             get(|| async { Err::<(), _>(AppError::Unauthorized) }),
@@ -300,6 +376,8 @@ struct Call<'a> {
     client: &'a str,
     headers: Vec<(&'a str, &'a str)>,
     body: &'a str,
+    /// Envia `x-request-id: <client_rid>` (como um cliente que o escolhe).
+    send_client_rid: bool,
 }
 
 impl<'a> Call<'a> {
@@ -313,6 +391,7 @@ impl<'a> Call<'a> {
             client: CLIENT,
             headers: vec![("user-agent", UA)],
             body: "",
+            send_client_rid: true,
         }
     }
 }
@@ -320,15 +399,18 @@ impl<'a> Call<'a> {
 struct Reply {
     status: StatusCode,
     body: String,
+    /// `request_id` do servidor (o `x-request-id` da resposta).
     rid: Uuid,
+    /// O `x-request-id` que o cliente enviou.
+    client_rid: Uuid,
 }
 
 async fn send(app: &Router, c: Call<'_>) -> anyhow::Result<Reply> {
-    let rid = Uuid::now_v7();
-    let mut b = Request::builder()
-        .method(c.method)
-        .uri(c.uri)
-        .header("x-request-id", rid.to_string());
+    let client_rid = Uuid::now_v7();
+    let mut b = Request::builder().method(c.method).uri(c.uri);
+    if c.send_client_rid {
+        b = b.header("x-request-id", client_rid.to_string());
+    }
     if !c.client.is_empty() {
         b = b.header("cf-connecting-ip", c.client);
     }
@@ -346,11 +428,18 @@ async fn send(app: &Router, c: Call<'_>) -> anyhow::Result<Reply> {
     }
     let res = app.clone().oneshot(req).await?;
     let status = res.status();
+    let server_rid = res
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_default();
     let bytes = res.into_body().collect().await?.to_bytes();
     Ok(Reply {
         status,
         body: String::from_utf8_lossy(&bytes).into_owned(),
-        rid,
+        rid: server_rid,
+        client_rid,
     })
 }
 
@@ -824,7 +913,7 @@ async fn no_kill_switch(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResu
     assert_eq!(events(&db, t, r.rid).await?.len(), 1);
     assert!(stream_for(&stream(&redis, &ns).await?, r.rid).is_empty());
 
-    // Cliente direto (peer não confiável): CF-Connecting-IP e x-request-id ignorados.
+    // Cliente direto (peer não confiável): CF-Connecting-IP ignorado.
     let direct = merchant();
     let mut c = Call::new("GET", "/items/3", Some(direct), t);
     c.peer = "198.51.100.20:5555";
@@ -833,22 +922,15 @@ async fn no_kill_switch(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResu
     let rows = events_by_actor(&db, t, direct).await?;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].1.as_deref(), Some("198.51.100.20"));
-    let rid = rows[0].0.unwrap_or_default();
-    assert_ne!(rid, r.rid, "cliente direto escolheu o request_id");
-    assert_eq!(rid.get_version_num(), 7);
-    assert!(events(&db, t, r.rid).await?.is_empty());
+    assert_eq!(rows[0].0, Some(r.rid));
 
-    // Proxy de confiança: os dois aceites.
+    // Proxy de confiança: o IP aceite.
     let mut c = Call::new("GET", "/items/3", Some(who), t);
     c.peer = "10.1.2.3:443";
     c.client = "203.0.113.50";
     let r = send(&app, c).await?;
     let rows = events(&db, t, r.rid).await?;
-    assert_eq!(
-        rows.len(),
-        1,
-        "o x-request-id do proxy tem de ser o request_id"
-    );
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].8.as_deref(), Some("203.0.113.50"));
 
     // Nem cookies, nem corpo, nem valores de query (BD e Stream).
@@ -893,5 +975,323 @@ async fn no_kill_switch(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResu
     for s in secrets {
         assert!(!text.contains(s), "{s} no Stream: {text}");
     }
+    cleanup(&redis, &ns).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// 07b: endurecimento (NUL, flood anónimo, request_id do servidor, /64, abort do cliente)
+// ---------------------------------------------------------------------------------------------
+
+#[sqlx::test(migrations = "../migrations")]
+async fn nul_in_path_params_is_recorded_with_replacement(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 4).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    let app = test_router(layer(db.clone(), redis.clone(), &ns), db.clone());
+    let who = merchant();
+
+    // GET autenticado (ReadSync) e DELETE anónimo: gravados, sem 503, com U+FFFD.
+    for (method, actor, status) in [
+        ("GET", Some(who), StatusCode::OK),
+        ("DELETE", None, StatusCode::NO_CONTENT),
+    ] {
+        let r = send(&app, Call::new(method, "/items/%00abc", actor, t)).await?;
+        assert_eq!(r.status, status, "{method}");
+        let rows = events(&db, t, r.rid).await?;
+        assert_eq!(rows.len(), 1, "{method}: {rows:?}");
+        let changes = rows[0].7.clone().unwrap_or_default();
+        assert_eq!(changes["path_params"]["id"], "\u{FFFD}abc", "{method}");
+    }
+
+    // ReadAsync: o Stream também leva U+FFFD (a fila morta não enche).
+    let r = send(&app, Call::new("GET", "/async/items/%00x", Some(who), t)).await?;
+    assert_eq!(r.status, StatusCode::OK);
+    let evs = stream_for(&stream(&redis, &ns).await?, r.rid);
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["changes"]["path_params"]["id"], "\u{FFFD}x");
+    assert!(!evs[0].to_string().contains("\\u0000"));
+
+    // Valores longos cortados a 256 caracteres; no máximo 16 parâmetros.
+    let long = "é".repeat(300);
+    let uri = format!("/items/{long}");
+    let r = send(&app, Call::new("GET", &uri, Some(who), t)).await?;
+    let rows = events(&db, t, r.rid).await?;
+    let id = rows[0].7.clone().unwrap_or_default()["path_params"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .count();
+    assert_eq!(id, 256);
+    let many: String = (1..=17).map(|i| format!("/v{i}")).collect();
+    let uri = format!("/p{many}");
+    let r = send(&app, Call::new("GET", &uri, Some(who), t)).await?;
+    assert_eq!(r.status, StatusCode::OK);
+    let rows = events(&db, t, r.rid).await?;
+    let params = rows[0].7.clone().unwrap_or_default()["path_params"].clone();
+    assert_eq!(params.as_object().map(|m| m.len()), Some(16), "{params}");
+    cleanup(&redis, &ns).await
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn anonymous_flood_is_counted_but_authenticated_denials_always_sync(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 4).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    let window = Duration::from_secs(3);
+    let app = test_router(
+        layer_with_window(db.clone(), redis.clone(), &ns, window),
+        db.clone(),
+    );
+
+    // 50 × 401 anónimos do mesmo IP: 1 síncrono, 49 contados.
+    let mut rids = Vec::new();
+    for _ in 0..50 {
+        let r = send(&app, Call::new("GET", "/unauth", None, t)).await?;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+        rids.push(r.rid);
+    }
+    assert_eq!(events(&db, t, rids[0]).await?.len(), 1, "o 1.º é síncrono");
+    assert_eq!(count_events(&db, t, &rids).await?, 1);
+
+    // Mutações anónimas do mesmo IP: classe própria (a janela de auth_fail não as cala).
+    let mut posts = Vec::new();
+    for _ in 0..3 {
+        let r = send(&app, Call::new("POST", "/plain", None, t)).await?;
+        assert_eq!(r.status, StatusCode::CREATED);
+        posts.push(r.rid);
+    }
+    assert_eq!(events(&db, t, posts[0]).await?.len(), 1);
+    assert_eq!(count_events(&db, t, &posts).await?, 1);
+
+    // 403 autenticado: sempre 1 evento cada.
+    let who = merchant();
+    let mut denied = Vec::new();
+    for _ in 0..5 {
+        let r = send(&app, Call::new("GET", "/forbidden", Some(who), t)).await?;
+        assert_eq!(r.status, StatusCode::FORBIDDEN);
+        denied.push(r.rid);
+    }
+    assert_eq!(count_events(&db, t, &denied).await?, 5);
+
+    // No fim da janela: 1 resumo por classe com a contagem.
+    let evs = wait_stream(&redis, &ns, 2, window * 3).await?;
+    assert_eq!(evs.len(), 2, "{evs:?}");
+    let by = |a: &str| evs.iter().find(|e| e["action"] == a).cloned();
+    let auth = by("security.auth_fail_summary").unwrap_or_default();
+    assert_eq!(auth["changes"]["count"], 49, "{auth}");
+    assert_eq!(
+        (auth["outcome"].as_str(), auth["reason"].as_str()),
+        (Some("denied"), Some("auth_fail"))
+    );
+    assert_eq!(
+        (auth["actor_type"].as_str(), auth["ip"].as_str()),
+        (Some("anonymous"), Some(CLIENT))
+    );
+    assert!(auth["tenant_id"].is_null(), "resumo de plataforma");
+    let anon = by("security.anon_mutation_summary").unwrap_or_default();
+    assert_eq!(anon["changes"]["count"], 2, "{anon}");
+    assert_eq!(anon["outcome"], "success");
+    cleanup(&redis, &ns).await
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn ipv6_same_64_shares_the_window(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 4).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    let app = test_router(
+        layer_with_window(db.clone(), redis.clone(), &ns, Duration::from_secs(10)),
+        db.clone(),
+    );
+    for (ip, expected) in [
+        ("2001:db8:1:2::1", 1),
+        ("2001:db8:1:2:ffff::abcd", 0),
+        ("2001:db8:1:3::1", 1),
+    ] {
+        let mut c = Call::new("GET", "/limited", None, t);
+        c.client = ip;
+        let r = send(&app, c).await?;
+        assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(events(&db, t, r.rid).await?.len(), expected, "{ip}");
+    }
+    cleanup(&redis, &ns).await
+}
+
+/// Escritor de logs para o teste (memória partilhada).
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut g) = self.0.lock() {
+            g.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    fn text(&self) -> String {
+        self.0
+            .lock()
+            .map(|g| String::from_utf8_lossy(&g).into_owned())
+            .unwrap_or_default()
+    }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn request_id_is_always_server_generated(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 4).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    // As layers de entrada de `http::router_with` por fora da caixa negra.
+    let app = with_edge_layers(test_router(
+        layer(db.clone(), redis.clone(), &ns),
+        db.clone(),
+    ));
+    let (logs, _guard) = capture_logs();
+    let who = merchant();
+
+    // Proxy de confiança e cliente direto: nenhum escolhe o request_id.
+    for peer in [PEER, "198.51.100.20:5555"] {
+        let mut c = Call::new("GET", "/rid", Some(who), t);
+        c.peer = peer;
+        let r = send(&app, c).await?;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_ne!(r.rid, r.client_rid, "{peer}");
+        assert_eq!(r.rid.get_version_num(), 7);
+        assert!(events(&db, t, r.client_rid).await?.is_empty(), "{peer}");
+        let rows = events(&db, t, r.rid).await?;
+        assert_eq!(rows.len(), 1, "{peer}");
+        let changes = rows[0].7.clone().unwrap_or_default();
+        assert_eq!(changes["client_request_id"], r.client_rid.to_string());
+        // O handler (extensão `RequestId` e cabeçalho) e a resposta veem o id do evento.
+        assert_eq!(r.body, format!("{0}|{0}", r.rid), "{peer}");
+        // Os logs do pedido levam o id do evento, nunca o do cliente.
+        let text = logs.text();
+        let line = text
+            .lines()
+            .find(|l| l.contains("handler-log") && l.contains(&r.rid.to_string()));
+        assert!(line.is_some(), "{text}");
+        assert!(!text.contains(&r.client_rid.to_string()), "{text}");
+    }
+
+    // Sem cabeçalho do cliente, ou com um que não é UUID: sem `client_request_id`.
+    for client_header in [None, Some("nope")] {
+        let mut c = Call::new("POST", "/plain", Some(who), t);
+        c.send_client_rid = false;
+        if let Some(h) = client_header {
+            c.headers.push(("x-request-id", h));
+        }
+        let r = send(&app, c).await?;
+        assert_eq!(r.rid.get_version_num(), 7, "{client_header:?}");
+        let rows = events(&db, t, r.rid).await?;
+        assert_eq!(rows.len(), 1, "{client_header:?}");
+        let changes = rows[0].7.clone().unwrap_or_default();
+        assert!(changes.get("client_request_id").is_none(), "{changes}");
+    }
+    cleanup(&redis, &ns).await
+}
+
+/// Logs do teste em memória (subscriber só desta thread; o runtime do teste é de uma thread).
+fn capture_logs() -> (LogBuf, tracing::subscriber::DefaultGuard) {
+    let logs = LogBuf::default();
+    let writer = logs.clone();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    (logs, guard)
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn timeout_408_carries_the_logged_request_id(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 2).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    let app = with_edge_layers_for_tests(
+        test_router(layer(db.clone(), redis.clone(), &ns), db.clone()),
+        Duration::from_millis(300),
+    );
+    let (logs, _guard) = capture_logs();
+
+    let r = send(&app, Call::new("GET", "/slow", Some(merchant()), t)).await?;
+    assert_eq!(r.status, StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(r.rid.get_version_num(), 7, "o 408 sai sem o id do servidor");
+    assert_ne!(r.rid, r.client_rid);
+    let text = logs.text();
+    let line = text.lines().find(|l| l.contains("slow-start"));
+    assert!(
+        line.is_some_and(|l| l.contains(&r.rid.to_string())),
+        "o log não leva o id do 408: {text}"
+    );
+    assert!(!text.contains(&r.client_rid.to_string()), "{text}");
+    cleanup(&redis, &ns).await
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn client_abort_mid_mutation_still_records(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let t = seed_tenant(&owner, "camara-a").await?;
+    let db = app_pool(&opts, &conn, 2).await?;
+    // A pool da caixa negra tem 1 ligação, que o teste segura: a gravação fica à espera.
+    let audit_db = app_pool(&opts, &conn, 1).await?;
+    let redis = live_redis()?;
+    let ns = namespace();
+    let app = test_router(layer(audit_db.clone(), redis.clone(), &ns), db.clone());
+    let who = merchant();
+
+    let held = audit_db.acquire().await?;
+    let aborted = tokio::time::timeout(
+        Duration::from_millis(300),
+        send(&app, Call::new("POST", "/plain", Some(who), t)),
+    )
+    .await;
+    assert!(
+        aborted.is_err(),
+        "o pedido devia estar à espera da gravação"
+    );
+    drop(held);
+
+    let mut rows = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        rows = events_by_actor(&db, t, who).await?;
+        if !rows.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(rows.len(), 1, "o abort do cliente cancelou a gravação");
     cleanup(&redis, &ns).await
 }

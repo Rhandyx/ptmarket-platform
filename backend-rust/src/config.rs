@@ -6,6 +6,9 @@ use ipnet::IpNet;
 use secrecy::SecretString;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
+/// Prefixo mínimo aceite em `TRUSTED_PROXY_CIDRS`.
+const MIN_PROXY_PREFIX_V4: u8 = 8;
+const MIN_PROXY_PREFIX_V6: u8 = 16;
 
 /// Erro de configuração legível; nunca contém valores de segredos.
 #[derive(Debug, thiserror::Error)]
@@ -23,7 +26,8 @@ pub struct Config {
     pub redis_url: SecretString,
     pub bind_addr: SocketAddr,
     /// `TRUSTED_PROXY_CIDRS` (separadas por vírgula): só destes peers se aceita `CF-Connecting-IP`.
-    /// Ausente ou vazia = nunca confiar. `/0` é recusado (seria confiar em toda a Internet).
+    /// Ausente ou vazia = nunca confiar. Prefixos IPv4 < /8 e IPv6 < /16 são recusados (seria
+    /// confiar em boa parte da Internet).
     pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
@@ -35,8 +39,15 @@ fn trusted_proxies(raw: Option<String>) -> Result<Vec<IpNet>, ConfigError> {
         let net: IpNet = item
             .parse()
             .map_err(|_| ConfigError::Invalid(KEY, "esperado CIDR, ex.: 173.245.48.0/20"))?;
-        if net.prefix_len() == 0 {
-            return Err(ConfigError::Invalid(KEY, "rede /0 não é permitida"));
+        let min = match net {
+            IpNet::V4(_) => MIN_PROXY_PREFIX_V4,
+            IpNet::V6(_) => MIN_PROXY_PREFIX_V6,
+        };
+        if net.prefix_len() < min {
+            return Err(ConfigError::Invalid(
+                KEY,
+                "rede demasiado larga: o prefixo mínimo é /8 em IPv4 e /16 em IPv6",
+            ));
         }
         nets.push(net.trunc());
     }
@@ -140,10 +151,34 @@ mod tests {
         let c = Config::from_lookup(env(&v));
         assert!(c.is_ok_and(|c| c.trusted_proxy_cidrs.len() == 2));
 
-        for bad in ["nope", "10.0.0.1", "0.0.0.0/0", "::/0"] {
+        for bad in [
+            "nope",
+            "10.0.0.1",
+            "0.0.0.0/0",
+            "::/0",
+            "0.0.0.0/1",
+            "10.0.0.0/7",
+            "2400::/15",
+            "10.0.0.0/8, 0.0.0.0/1",
+        ] {
             let mut v = OK.to_vec();
             v.push(("TRUSTED_PROXY_CIDRS", bad));
             assert!(Config::from_lookup(env(&v)).is_err(), "{bad}");
+        }
+        let mut v = OK.to_vec();
+        v.push(("TRUSTED_PROXY_CIDRS", "0.0.0.0/1"));
+        let e = Config::from_lookup(env(&v)).err().map(|e| e.to_string());
+        assert_eq!(
+            e.as_deref(),
+            Some(
+                "variável de ambiente inválida: TRUSTED_PROXY_CIDRS (rede demasiado larga: o \
+                 prefixo mínimo é /8 em IPv4 e /16 em IPv6)"
+            )
+        );
+        for edge in ["10.0.0.0/8", "2400::/16"] {
+            let mut v = OK.to_vec();
+            v.push(("TRUSTED_PROXY_CIDRS", edge));
+            assert!(Config::from_lookup(env(&v)).is_ok(), "{edge}");
         }
     }
 

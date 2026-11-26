@@ -7,18 +7,24 @@ pub mod telemetry;
 
 use std::time::Duration;
 
-use axum::{Router, http::HeaderName, http::StatusCode, routing::get};
+use axum::{
+    Router,
+    body::Body,
+    http::{HeaderName, Request, StatusCode},
+    routing::get,
+};
 use tower::ServiceBuilder;
 use tower_http::{
     limit::RequestBodyLimitLayer,
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    request_id::{PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use tracing::Span;
 
 use crate::{
     http::{
-        audit_layer::{AuditLayerState, audited},
+        audit_layer::{AuditLayerState, MakeRequestUuidV7, audited, take_client_request_id},
         client_ip::TrustedProxies,
     },
     state::AppState,
@@ -38,21 +44,54 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with(state: AppState, trusted: TrustedProxies) -> Router {
     let audit = AuditLayerState::new(state.db_primary.clone(), state.redis.clone(), trusted);
     let api: Router<AppState> = Router::new();
-    let rid = HeaderName::from_static("x-request-id");
-    // TraceLayer por omissão não regista corpos nem cabeçalhos.
-    let layers = ServiceBuilder::new()
-        .layer(SetRequestIdLayer::new(rid.clone(), MakeRequestUuid))
-        .layer(TraceLayer::new_for_http())
-        .layer(PropagateRequestIdLayer::new(rid))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
-    Router::new()
+    let app = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .merge(audited(api, audit))
-        .with_state(state)
-        .layer(layers)
+        .with_state(state);
+    with_edge_layers(app)
+}
+
+/// Layers de entrada (por esta ordem, de fora para dentro): o `x-request-id` do cliente sai do
+/// pedido para `ClientRequestId`; a `SetRequestIdLayer` gera SEMPRE um UUIDv7; o span `request`
+/// dos logs leva esse id; a resposta (também o 408 do timeout) leva-o no `x-request-id`; timeout;
+/// limite do corpo. A caixa negra usa o mesmo id como `request_id`.
+pub fn with_edge_layers(router: Router) -> Router {
+    edge_layers(router, REQUEST_TIMEOUT)
+}
+
+/// Só para testes: as mesmas layers com outro timeout. Não existe em `cargo build --release`.
+#[cfg(feature = "test-support")]
+pub fn with_edge_layers_for_tests(router: Router, timeout: Duration) -> Router {
+    edge_layers(router, timeout)
+}
+
+fn edge_layers(router: Router, timeout: Duration) -> Router {
+    let rid = HeaderName::from_static("x-request-id");
+    // O span só leva o método e o id: nem corpo, nem cabeçalhos, nem caminho/query (podem trazer
+    // tokens; a rota-modelo só se conhece depois do roteamento, na caixa negra).
+    let layers = ServiceBuilder::new()
+        .layer(axum::middleware::from_fn(take_client_request_id))
+        .layer(SetRequestIdLayer::new(rid.clone(), MakeRequestUuidV7))
+        .layer(TraceLayer::new_for_http().make_span_with(request_span))
+        .layer(PropagateRequestIdLayer::new(rid))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            timeout,
+        ))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+    router.layer(layers)
+}
+
+fn request_span(req: &Request<Body>) -> Span {
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .and_then(|r| r.header_value().to_str().ok())
+        .unwrap_or_default();
+    tracing::info_span!(
+        "request",
+        method = %req.method(),
+        request_id = %request_id,
+    )
 }

@@ -7,25 +7,42 @@
 //! roteamento: vê `MatchedPath` e os parâmetros da rota.
 //!
 //! Decisão depois do handler (por esta ordem):
-//! 1. 401/403 ou `Denied` → síncrono `denied` (transação própria). Falhou → 503.
-//! 2. 429 → o 1.º por (ator ou IP, rota) em cada janela de 60 s é síncrono (`rate_limit`); os
-//!    seguintes só contam no Redis; no fim da janela sai 1 `security.rate_limit_summary` no Stream.
-//!    Redis indisponível → 503.
+//! 1. Recusa (401/403 ou `Denied`): ator autenticado → síncrono `denied` (transação própria),
+//!    sempre; falhou → 503. Anónimo → contada por (IP, `auth_fail`).
+//! 2. 429 → contado por (ator ou IP, rota) (`rate_limit`).
 //! 3. Mutação (método ≠ GET/HEAD/OPTIONS): se o `AuditCtx` já foi registado (evento de
-//!    `audit::record` confirmado por COMMIT) → nada; senão síncrono (5xx = `error`). Também anónimas.
+//!    `audit::record` confirmado por COMMIT) → nada; autenticada → síncrono (5xx = `error`);
+//!    anónima → contada por (IP, `anon_mutation`, resultado).
 //! 4. Leitura (GET/HEAD/OPTIONS) autenticada + `ReadSync` (ou sem classe) → síncrono; falhou → 503
 //!    sem o corpo.
 //! 5. Leitura autenticada + `ReadAsync` → XADD; falhou → síncrono; falhou → 503.
 //! 6. Leitura anónima (OPTIONS incluído) → nada.
 //!
-//! `x-request-id` e `CF-Connecting-IP` só contam se o peer TCP for um proxy de confiança; senão o
-//! `request_id` é um UUIDv7 novo e o IP é o do peer.
+//! "Contado": o 1.º por chave em cada janela de 60 s é síncrono; os seguintes só contam no Redis;
+//! no fim da janela sai 1 resumo `security.<classe>_summary` no Stream com a contagem. Um flood
+//! sem credenciais não serializa na cabeça da cadeia nem esgota a pool. Redis indisponível → 503.
+//! O IP conta por endereço em IPv4 e por /64 em IPv6 (rodar endereços de um /64 não abre janelas).
+//!
+//! A decisão corre numa task própria (`tokio::spawn`) e o pedido espera pelo resultado: um timeout
+//! ou o cliente a fechar a ligação não cancelam a gravação.
+//!
+//! O `request_id` da caixa negra é SEMPRE um UUIDv7 do servidor (a Cloudflare não apaga o
+//! `x-request-id` do cliente): o que a `SetRequestIdLayer` gerou com `MakeRequestUuidV7`, depois de
+//! `take_client_request_id` (a layer mais exterior) tirar o do cliente para `ClientRequestId` — é o
+//! mesmo id nos logs (span `request`), na resposta (também no 408 da `TimeoutLayer`) e no evento.
+//! Sem essas layers, o middleware gera o seu e lê o cabeçalho do cliente. O handler vê sempre esse
+//! id no cabeçalho e na extensão `RequestId`. O `x-request-id` do cliente, só se for UUID, fica em
+//! `changes.client_request_id`. `CF-Connecting-IP` só conta se o peer TCP
+//! for um proxy de confiança; senão o IP é o do peer.
+//!
+//! Todo o texto do pedido que entra no evento (rota, parâmetros, chaves da query, motivo) é limpo:
+//! NUL → U+FFFD (o jsonb recusa `\u0000`), no máximo 256 caracteres por valor e 16 parâmetros.
 //!
 //! Exceção consciente à regra "um handler nunca publica no Redis": só este middleware, só no
 //! stream `audit:stream` (contrato com o worker do cartão 08 e com `audit.audit_append_event`).
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -33,13 +50,17 @@ use std::{
 use axum::{
     Router,
     extract::{ConnectInfo, FromRequestParts, MatchedPath, RawPathParams, Request, State},
-    http::{HeaderMap, Method, StatusCode, header::USER_AGENT, request::Parts},
+    http::{
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header::USER_AGENT, request::Parts,
+    },
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use deadpool_redis::redis;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tower_http::request_id::{MakeRequestId, RequestId};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -60,10 +81,13 @@ pub const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Limite para cada operação no Redis; passado isto, conta como indisponível.
 const REDIS_TIMEOUT: Duration = Duration::from_secs(1);
-/// Limites de tamanho do que vai para `changes`.
+/// Limites de tamanho do texto do pedido que entra no evento.
 const MAX_QUERY_KEYS: usize = 32;
 const MAX_KEY_CHARS: usize = 64;
-const MAX_PARAM_CHARS: usize = 128;
+const MAX_PATH_PARAMS: usize = 16;
+const MAX_TEXT_CHARS: usize = 256;
+/// Cabeçalho do id do pedido (o do cliente entra; o do servidor sai).
+const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 /// Marcador da contagem no modelo do resumo (substituído no Redis, de forma atómica).
 const COUNT_PLACEHOLDER: &str = "__RL_COUNT__";
 
@@ -186,38 +210,131 @@ impl<S: Send + Sync> FromRequestParts<S> for AuditCtx {
     }
 }
 
-/// O que o middleware guarda do pedido antes de o passar ao handler.
+/// Posta pela layer mais exterior (`take_client_request_id`, em `http::with_edge_layers`): o
+/// `x-request-id` do cliente (só se for UUID), já retirado do pedido. A presença desta extensão diz
+/// ao middleware que o `RequestId` do pedido foi gerado no servidor (`MakeRequestUuidV7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientRequestId(Option<Uuid>);
+
+impl ClientRequestId {
+    pub fn get(&self) -> Option<Uuid> {
+        self.0
+    }
+}
+
+/// Layer mais exterior: tira o `x-request-id` do cliente para `ClientRequestId` e apaga o
+/// cabeçalho, para a `SetRequestIdLayer` gerar sempre o id (o cliente nunca o escolhe).
+pub async fn take_client_request_id(mut req: Request, next: Next) -> Response {
+    let client = client_request_id(req.headers());
+    req.headers_mut().remove(X_REQUEST_ID);
+    req.extensions_mut().insert(ClientRequestId(client));
+    next.run(req).await
+}
+
+/// `MakeRequestId` da `SetRequestIdLayer`: UUIDv7 novo em cada pedido.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MakeRequestUuidV7;
+
+impl MakeRequestId for MakeRequestUuidV7 {
+    fn make_request_id<B>(&mut self, _request: &axum::http::Request<B>) -> Option<RequestId> {
+        HeaderValue::from_str(&Uuid::now_v7().to_string())
+            .ok()
+            .map(RequestId::new)
+    }
+}
+
+/// O que o middleware guarda do pedido antes de o passar ao handler (texto já limpo).
 struct ReqInfo {
     method: Method,
     route: Option<String>,
     path_params: Map<String, Value>,
     query_keys: Vec<String>,
+    /// `x-request-id` do cliente, só se for um UUID (nunca é o `request_id` do evento).
+    client_request_id: Option<Uuid>,
     tenant: Option<TenantId>,
     class: AuditClass,
     authenticated: bool,
 }
 
-async fn audit_middleware(State(st): State<AuditLayerState>, req: Request, next: Next) -> Response {
-    let (mut parts, body) = req.into_parts();
-    let (info, ctx) = inspect(&st, &mut parts).await;
-    parts.extensions.insert(ctx.clone());
-    let resp = next.run(Request::from_parts(parts, body)).await;
-    decide(&st, &info, &ctx, resp).await
+/// `request_id` do evento e `x-request-id` do cliente. Com as layers de entrada
+/// (`ClientRequestId` presente): o `RequestId` gerado pela `SetRequestIdLayer`. Sem elas (router
+/// montado à mão): um UUIDv7 novo, e o cabeçalho do cliente lido aqui.
+fn request_ids(req: &Request) -> (Uuid, bool, Option<Uuid>) {
+    let Some(ClientRequestId(client)) = req.extensions().get::<ClientRequestId>().copied() else {
+        return (Uuid::now_v7(), false, client_request_id(req.headers()));
+    };
+    let server = req
+        .extensions()
+        .get::<RequestId>()
+        .and_then(|r| r.header_value().to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    match server {
+        Some(rid) => (rid, true, client),
+        None => (Uuid::now_v7(), false, client),
+    }
 }
 
-async fn inspect(st: &AuditLayerState, parts: &mut Parts) -> (ReqInfo, AuditCtx) {
+async fn audit_middleware(State(st): State<AuditLayerState>, req: Request, next: Next) -> Response {
+    let (rid, from_edge, client_rid) = request_ids(&req);
+    let rid_header = HeaderValue::from_str(&rid.to_string()).ok();
+    // Com as layers de entrada o span `request` já leva o id; sem elas, um span próprio.
+    let span = if from_edge {
+        tracing::Span::none()
+    } else {
+        tracing::info_span!("audit", request_id = %rid)
+    };
+    async move {
+        let (mut parts, body) = req.into_parts();
+        let (info, ctx) = inspect(&st, &mut parts, rid, client_rid).await;
+        // O handler (e quem o registe) vê o id do servidor, nunca o do cliente.
+        parts.headers.remove(X_REQUEST_ID);
+        if let Some(h) = &rid_header {
+            parts.headers.insert(X_REQUEST_ID, h.clone());
+            parts.extensions.insert(RequestId::new(h.clone()));
+        }
+        parts.extensions.insert(ctx.clone());
+        let resp = next.run(Request::from_parts(parts, body)).await;
+        // Task própria: o abort do cliente ou um timeout por fora não cancelam a gravação.
+        let task = tokio::spawn(decide(st, info, ctx, resp).in_current_span());
+        let mut resp = match task.await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = ?e, "auditoria: gravação sem resultado; resposta 503");
+                AppError::ServiceUnavailable.into_response()
+            }
+        };
+        if let Some(h) = rid_header {
+            resp.headers_mut().insert(X_REQUEST_ID, h);
+        }
+        resp
+    }
+    .instrument(span)
+    .await
+}
+
+async fn inspect(
+    st: &AuditLayerState,
+    parts: &mut Parts,
+    rid: Uuid,
+    client_rid: Option<Uuid>,
+) -> (ReqInfo, AuditCtx) {
     let actor = parts.extensions.get::<Actor>().copied();
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
     let ip = client_ip(peer, &parts.headers, &st.inner.trusted);
-    let rid = request_id(&parts.headers, st.inner.trusted.trusts(peer));
     let ctx = build_ctx(actor, rid, ip, &parts.headers);
     let path_params = match RawPathParams::from_request_parts(parts, &()).await {
         Ok(p) => p
             .iter()
-            .map(|(k, v)| (k.to_owned(), Value::String(truncate(v, MAX_PARAM_CHARS))))
+            .take(MAX_PATH_PARAMS)
+            .map(|(k, v)| {
+                (
+                    clean(k, MAX_KEY_CHARS),
+                    Value::String(clean(v, MAX_TEXT_CHARS)),
+                )
+            })
             .collect(),
         Err(_) => Map::new(),
     };
@@ -226,9 +343,10 @@ async fn inspect(st: &AuditLayerState, parts: &mut Parts) -> (ReqInfo, AuditCtx)
         route: parts
             .extensions
             .get::<MatchedPath>()
-            .map(|m| m.as_str().to_owned()),
+            .map(|m| clean(m.as_str(), MAX_TEXT_CHARS)),
         path_params,
         query_keys: query_keys(parts.uri.query()),
+        client_request_id: client_rid,
         tenant: parts.extensions.get::<TenantId>().copied(),
         class: parts
             .extensions
@@ -267,17 +385,14 @@ fn build_ctx(
     )
 }
 
-/// `x-request-id` só se o peer for um proxy de confiança e o valor for um UUID; senão um UUIDv7
-/// novo (um cliente direto não escolhe o `request_id` que fica na caixa negra).
-fn request_id(headers: &HeaderMap, trusted_peer: bool) -> Uuid {
-    if !trusted_peer {
-        return Uuid::now_v7();
+/// `x-request-id` do cliente (um só valor e só se for UUID). Só informativo: o `request_id` da
+/// caixa negra é sempre gerado no servidor, venha o pedido de onde vier.
+fn client_request_id(headers: &HeaderMap) -> Option<Uuid> {
+    let mut values = headers.get_all(X_REQUEST_ID).iter();
+    match (values.next(), values.next()) {
+        (Some(v), None) => v.to_str().ok().and_then(|s| Uuid::parse_str(s.trim()).ok()),
+        _ => None,
     }
-    headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| Uuid::parse_str(s.trim()).ok())
-        .unwrap_or_else(Uuid::now_v7)
 }
 
 /// GET, HEAD e OPTIONS são leituras; tudo o resto é mutação.
@@ -293,7 +408,7 @@ fn query_keys(query: Option<&str>) -> Vec<String> {
         if key.is_empty() {
             continue;
         }
-        let key = truncate(key, MAX_KEY_CHARS);
+        let key = clean(key, MAX_KEY_CHARS);
         if !keys.contains(&key) {
             keys.push(key);
         }
@@ -304,8 +419,19 @@ fn query_keys(query: Option<&str>) -> Vec<String> {
     keys
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
+/// Texto do pedido para o evento: NUL → U+FFFD (o jsonb e o `text` recusam-no) e no máximo `max`
+/// caracteres.
+fn clean(s: &str, max: usize) -> String {
+    s.chars()
+        .take(max)
+        .map(|c| {
+            if c == '\0' {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn action(m: &Method) -> &'static str {
@@ -330,11 +456,22 @@ fn changes(info: &ReqInfo, status: StatusCode) -> Value {
         "query_keys": info.query_keys,
     });
     redact(&mut v);
+    // Depois da máscara: é um UUID canónico (a máscara de PAN podia estragá-lo).
+    if let (Some(id), Value::Object(m)) = (info.client_request_id, &mut v) {
+        m.insert(
+            "client_request_id".to_owned(),
+            Value::String(id.to_string()),
+        );
+    }
     v
 }
 
-fn outcome_for(status: StatusCode) -> Outcome {
-    if status.is_server_error() {
+/// 401, 403 ou `Denied` → `denied`; 5xx → `error`; o resto (404/400/409 sem `Denied` incluídos)
+/// → `success` (a app marca o IDOR com `Denied`).
+fn outcome_for(status: StatusCode, denied: Option<Denied>) -> Outcome {
+    if denied.is_some() || status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        Outcome::Denied
+    } else if status.is_server_error() {
         Outcome::Error
     } else {
         Outcome::Success
@@ -352,39 +489,51 @@ fn http_event(
         target_type: Some("route"),
         target_id: info.route.clone(),
         outcome,
-        reason: reason.map(str::to_owned),
+        reason: reason.map(|r| clean(r, MAX_TEXT_CHARS)),
         changes: Some(changes(info, status)),
         store_id: None,
     }
 }
 
-async fn decide(st: &AuditLayerState, info: &ReqInfo, ctx: &AuditCtx, resp: Response) -> Response {
+async fn decide(st: AuditLayerState, info: ReqInfo, ctx: AuditCtx, resp: Response) -> Response {
     let status = resp.status();
     let denied = resp.extensions().get::<Denied>().copied();
+    let outcome = outcome_for(status, denied);
 
-    // 1. Recusa (a transação do handler fez rollback): transação própria.
-    if denied.is_some() || status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+    // 1. Recusa (a transação do handler fez rollback): transação própria. Autenticada = sempre
+    //    síncrona; anónima = contada por IP (um flood sem credenciais não serializa na cadeia).
+    if outcome == Outcome::Denied {
         let reason = match denied {
             Some(Denied(r)) => r,
             None if status == StatusCode::UNAUTHORIZED => "unauthorized",
             None => "forbidden",
         };
-        let ev = http_event(info, status, Outcome::Denied, Some(reason));
-        return or_unavailable(write_sync(st, info, ctx, ev).await, resp);
+        let ev = http_event(&info, status, Outcome::Denied, Some(reason));
+        if info.authenticated {
+            return or_unavailable(write_sync(&st, info.tenant, &ctx, ev).await, resp);
+        }
+        let th = Throttle::flood(&st, &ctx, Flood::AuthFail, Outcome::Denied);
+        return throttled(&st, info.tenant, &ctx, resp, th, ev).await;
     }
 
-    // 2. Rate-limit: 1 escrita síncrona por chave por janela; o resto conta no Redis.
+    // 2. Rate-limit: contado por (ator ou IP, rota).
     if status == StatusCode::TOO_MANY_REQUESTS {
-        return rate_limited(st, info, ctx, resp).await;
+        let ev = http_event(&info, status, Outcome::Denied, Some("rate_limit"));
+        let th = Throttle::rate_limit(&st, &info, &ctx, status);
+        return throttled(&st, info.tenant, &ctx, resp, th, ev).await;
     }
 
-    // 3. Mutações (também anónimas).
+    // 3. Mutações: autenticadas síncronas; anónimas contadas por (IP, resultado).
     if !is_read(&info.method) {
         if ctx.is_recorded() {
             return resp;
         }
-        let ev = http_event(info, status, outcome_for(status), None);
-        return or_unavailable(write_sync(st, info, ctx, ev).await, resp);
+        let ev = http_event(&info, status, outcome, None);
+        if info.authenticated {
+            return or_unavailable(write_sync(&st, info.tenant, &ctx, ev).await, resp);
+        }
+        let th = Throttle::flood(&st, &ctx, Flood::AnonMutation, outcome);
+        return throttled(&st, info.tenant, &ctx, resp, th, ev).await;
     }
 
     // 6. Leitura anónima: só logs/métricas.
@@ -392,18 +541,24 @@ async fn decide(st: &AuditLayerState, info: &ReqInfo, ctx: &AuditCtx, resp: Resp
         return resp;
     }
 
-    let ev = http_event(info, status, outcome_for(status), None);
+    let ev = http_event(&info, status, outcome, None);
     match info.class {
         // 4. Leitura sensível: síncrona.
-        AuditClass::ReadSync => or_unavailable(write_sync(st, info, ctx, ev).await, resp),
+        AuditClass::ReadSync => or_unavailable(write_sync(&st, info.tenant, &ctx, ev).await, resp),
         // 5. Leitura comum: Stream; se falhar, síncrona; se falhar, 503.
         AuditClass::ReadAsync => {
-            let payload = stream_event(info, ctx, &ev, Uuid::now_v7(), &rfc3339(SystemTime::now()));
-            match xadd(st, &payload).await {
+            let payload = stream_event(
+                info.tenant,
+                &ctx,
+                &ev,
+                Uuid::now_v7(),
+                &rfc3339(SystemTime::now()),
+            );
+            match xadd(&st, &payload).await {
                 Ok(()) => resp,
                 Err(e) => {
                     tracing::warn!(error = ?e, "auditoria: XADD falhou; a gravar de forma síncrona");
-                    or_unavailable(write_sync(st, info, ctx, ev).await, resp)
+                    or_unavailable(write_sync(&st, info.tenant, &ctx, ev).await, resp)
                 }
             }
         }
@@ -425,13 +580,13 @@ fn or_unavailable(res: Result<(), AppError>, resp: Response) -> Response {
 /// Grava o evento numa transação própria com o ator do pedido (tenant se houver; senão plataforma).
 async fn write_sync(
     st: &AuditLayerState,
-    info: &ReqInfo,
+    tenant: Option<TenantId>,
     ctx: &AuditCtx,
     ev: AuditEvent,
 ) -> Result<(), AppError> {
     let db = &st.inner.db;
     let fut = async {
-        match info.tenant {
+        match tenant {
             Some(t) => {
                 let mut tx = begin_tenant_tx(db, t, ctx).await?;
                 record(&mut tx, ev).await?;
@@ -451,7 +606,7 @@ async fn write_sync(
 
 /// JSON do contrato do Stream (o mesmo de `audit.audit_append_event`); ausentes = null.
 fn stream_event(
-    info: &ReqInfo,
+    tenant: Option<TenantId>,
     ctx: &AuditCtx,
     ev: &AuditEvent,
     id: Uuid,
@@ -460,7 +615,7 @@ fn stream_event(
     let ua = ctx.user_agent_hash_hex();
     json!({
         "id": id.to_string(),
-        "tenant_id": info.tenant.map(|t| t.as_uuid().to_string()),
+        "tenant_id": tenant.map(|t| t.as_uuid().to_string()),
         "store_id": ev.store_id.map(|s| s.to_string()),
         "actor_type": ctx.actor_type().as_str(),
         "actor_id": ctx.actor_id().map(|a| a.to_string()),
@@ -509,11 +664,12 @@ async fn xadd(st: &AuditLayerState, payload: &Value) -> Result<(), AppError> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 429: 1.º por janela síncrono; os seguintes contam; 1 resumo por janela no Stream.
+// Contagem (429, recusas e mutações anónimas): 1.º por janela síncrono; os seguintes contam; 1
+// resumo por janela no Stream.
 //
 // Chaves (todas com o prefixo `ns`): `audit:rl:first:<k>` (abre a janela, expira com ela),
 // `audit:rl:count:<k>` (hash: n = contagem, tpl = JSON do resumo), `audit:rl:pending` (zset das
-// contagens por publicar, pontuação = fim da janela em ms). `<k>` = sha256(sujeito, rota): nem IPs
+// contagens por publicar, pontuação = fim da janela em ms). `<k>` = sha256(classe, sujeito, ...): nem IPs
 // nem ids ficam no nome das chaves. Tudo em scripts Lua: contar, fechar e publicar é atómico (nada
 // se perde nem se duplica, mesmo com várias instâncias). Redis sem cluster (chaves derivadas no
 // script).
@@ -579,49 +735,129 @@ return n
 "#
 );
 
-fn rate_limit_key(info: &ReqInfo, ctx: &AuditCtx) -> String {
-    let subject = match (info.authenticated, ctx.actor_id(), ctx.ip()) {
-        (true, Some(id), _) => format!("a:{}:{id}", ctx.actor_type().as_str()),
-        (_, _, Some(ip)) => format!("ip:{ip}"),
-        _ => "none".to_owned(),
-    };
-    let route = info.route.as_deref().unwrap_or("-");
-    let digest = Sha256::digest(format!("{subject}\n{route}").as_bytes());
+/// Classes contadas por IP (sem credenciais): recusas e mutações anónimas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flood {
+    AuthFail,
+    AnonMutation,
+}
+
+impl Flood {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthFail => "auth_fail",
+            Self::AnonMutation => "anon_mutation",
+        }
+    }
+
+    fn summary_action(self) -> &'static str {
+        match self {
+            Self::AuthFail => "security.auth_fail_summary",
+            Self::AnonMutation => "security.anon_mutation_summary",
+        }
+    }
+}
+
+/// Chave de contagem e modelo do resumo (JSON do Stream com `COUNT_PLACEHOLDER` na contagem).
+struct Throttle {
+    key: String,
+    template: Value,
+}
+
+impl Throttle {
+    /// 429: por (ator autenticado ou IP, rota). O resumo fica no tenant do pedido.
+    fn rate_limit(
+        st: &AuditLayerState,
+        info: &ReqInfo,
+        ctx: &AuditCtx,
+        status: StatusCode,
+    ) -> Self {
+        let subject = match (info.authenticated, ctx.actor_id()) {
+            (true, Some(id)) => format!("a:{}:{id}", ctx.actor_type().as_str()),
+            _ => ip_subject(ctx.ip()),
+        };
+        let route = info.route.as_deref().unwrap_or("-");
+        let summary = AuditEvent {
+            action: "security.rate_limit_summary",
+            target_type: Some("route"),
+            target_id: info.route.clone(),
+            outcome: Outcome::Denied,
+            reason: Some("rate_limit".to_owned()),
+            changes: Some(json!({
+                "status": status.as_u16(),
+                "window_seconds": st.inner.window.as_secs(),
+                "count": COUNT_PLACEHOLDER,
+            })),
+            store_id: None,
+        };
+        Self {
+            key: digest_key(&["rate_limit", &subject, route]),
+            template: summary_template(info.tenant, ctx, &summary),
+        }
+    }
+
+    /// Sem credenciais: por (IP normalizado, classe, resultado), em todas as rotas e tenants. O
+    /// resumo é de plataforma (sem tenant): mistura pedidos de vários tenants.
+    fn flood(st: &AuditLayerState, ctx: &AuditCtx, class: Flood, outcome: Outcome) -> Self {
+        let summary = AuditEvent {
+            action: class.summary_action(),
+            target_type: None,
+            target_id: None,
+            outcome,
+            reason: Some(class.as_str().to_owned()),
+            changes: Some(json!({
+                "class": class.as_str(),
+                "window_seconds": st.inner.window.as_secs(),
+                "count": COUNT_PLACEHOLDER,
+            })),
+            store_id: None,
+        };
+        Self {
+            key: digest_key(&[class.as_str(), outcome.as_str(), &ip_subject(ctx.ip())]),
+            template: summary_template(None, ctx, &summary),
+        }
+    }
+}
+
+fn summary_template(tenant: Option<TenantId>, ctx: &AuditCtx, summary: &AuditEvent) -> Value {
+    stream_event(
+        tenant,
+        ctx,
+        summary,
+        Uuid::now_v7(),
+        &rfc3339(SystemTime::now()),
+    )
+}
+
+/// IP para as chaves de contagem: IPv4 inteiro; IPv6 pelo /64 (a unidade que um cliente recebe).
+fn ip_subject(ip: Option<IpAddr>) -> String {
+    match ip {
+        Some(IpAddr::V4(v4)) => format!("ip:{v4}"),
+        Some(IpAddr::V6(v6)) => {
+            let net = Ipv6Addr::from(u128::from(v6) & !u128::from(u64::MAX));
+            format!("ip6:{net}/64")
+        }
+        None => "none".to_owned(),
+    }
+}
+
+/// sha256 das partes (primeiros 16 bytes em hex): nem IPs nem ids ficam no nome das chaves.
+fn digest_key(parts: &[&str]) -> String {
+    let digest = Sha256::digest(parts.join("\n").as_bytes());
     digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
-async fn rate_limited(
+/// 1.º por chave em cada janela: `first` síncrono; os seguintes só contam; 1 resumo por janela.
+async fn throttled(
     st: &AuditLayerState,
-    info: &ReqInfo,
+    tenant: Option<TenantId>,
     ctx: &AuditCtx,
     resp: Response,
+    th: Throttle,
+    first_event: AuditEvent,
 ) -> Response {
-    let status = resp.status();
-    let k = rate_limit_key(info, ctx);
-    let first = st.key(&format!("audit:rl:first:{k}"));
-    let count = st.key(&format!("audit:rl:count:{k}"));
-
-    let summary = AuditEvent {
-        action: "security.rate_limit_summary",
-        target_type: Some("route"),
-        target_id: info.route.clone(),
-        outcome: Outcome::Denied,
-        reason: Some("rate_limit".to_owned()),
-        changes: None,
-        store_id: None,
-    };
-    let mut tpl = stream_event(
-        info,
-        ctx,
-        &summary,
-        Uuid::now_v7(),
-        &rfc3339(SystemTime::now()),
-    );
-    tpl["changes"] = json!({
-        "status": status.as_u16(),
-        "window_seconds": st.inner.window.as_secs(),
-        "count": COUNT_PLACEHOLDER,
-    });
+    let first = st.key(&format!("audit:rl:first:{}", th.key));
+    let count = st.key(&format!("audit:rl:count:{}", th.key));
 
     let mut cmd = redis::cmd("EVAL");
     cmd.arg(HIT_SCRIPT)
@@ -631,37 +867,36 @@ async fn rate_limited(
         .arg(st.key(PENDING_KEY))
         .arg(st.key(STREAM_KEY))
         .arg(st.window_ms())
-        .arg(tpl.to_string())
+        .arg(th.template.to_string())
         .arg(now_ms());
     match redis_query::<i64>(st, cmd).await {
         Ok(0) => {
-            let ev = http_event(info, status, Outcome::Denied, Some("rate_limit"));
-            let res = write_sync(st, info, ctx, ev).await;
+            let res = write_sync(st, tenant, ctx, first_event).await;
             if res.is_err() {
-                // Reabre a janela: o próximo 429 volta a tentar a escrita síncrona.
+                // Reabre a janela: o próximo volta a tentar a escrita síncrona.
                 let mut del = redis::cmd("DEL");
                 del.arg(&first);
                 if let Err(e) = redis_query::<i64>(st, del).await {
-                    tracing::warn!(error = ?e, "auditoria: não foi possível reabrir a janela de 429");
+                    tracing::warn!(error = ?e, "auditoria: não foi possível reabrir a janela");
                 }
             }
             or_unavailable(res, resp)
         }
         Ok(1) => {
-            // 1.º 429 contado nesta janela: no fim dela sai o resumo.
+            // 1.º contado nesta janela: no fim dela sai o resumo.
             let st = st.clone();
             let wait = st.inner.window + Duration::from_millis(200);
             tokio::spawn(async move {
                 tokio::time::sleep(wait).await;
                 if let Err(e) = st.flush_due_rate_limit_summaries().await {
-                    tracing::warn!(error = ?e, "auditoria: resumos de 429 por publicar");
+                    tracing::warn!(error = ?e, "auditoria: resumos por publicar");
                 }
             });
             resp
         }
         Ok(_) => resp,
         Err(e) => {
-            tracing::error!(error = ?e, "auditoria: Redis indisponível para 429; resposta 503");
+            tracing::error!(error = ?e, "auditoria: Redis indisponível para a contagem; resposta 503");
             drop(resp);
             AppError::ServiceUnavailable.into_response()
         }
@@ -733,19 +968,75 @@ mod tests {
     }
 
     #[test]
-    fn request_id_from_header_or_fresh() {
-        let mut h = HeaderMap::new();
+    fn client_request_id_only_single_uuid() {
         let id = Uuid::now_v7();
+        let mut h = HeaderMap::new();
         if let Ok(v) = id.to_string().parse() {
-            h.insert("x-request-id", v);
+            h.insert(X_REQUEST_ID, v);
         }
-        assert_eq!(request_id(&h, true), id);
-        let fresh = request_id(&h, false);
-        assert_ne!(fresh, id, "peer não confiável não escolhe o request_id");
-        assert_eq!(fresh.get_version_num(), 7);
+        assert_eq!(client_request_id(&h), Some(id));
         let mut bad = HeaderMap::new();
-        bad.insert("x-request-id", axum::http::HeaderValue::from_static("nope"));
-        assert_eq!(request_id(&bad, true).get_version_num(), 7);
+        bad.insert(X_REQUEST_ID, HeaderValue::from_static("nope"));
+        assert_eq!(client_request_id(&bad), None);
+        h.append(X_REQUEST_ID, HeaderValue::from_static("x"));
+        assert_eq!(client_request_id(&h), None, "dois valores = nenhum");
+        assert_eq!(client_request_id(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn clean_replaces_nul_and_bounds_chars() {
+        assert_eq!(clean("a\0b", 10), "a\u{FFFD}b");
+        assert_eq!(clean(&"é".repeat(300), MAX_TEXT_CHARS).chars().count(), 256);
+        assert_eq!(clean("abc", 2), "ab");
+        let k = query_keys(Some("a%00b=1"));
+        assert_eq!(k, vec!["a%00b"], "a query não é descodificada");
+    }
+
+    #[test]
+    fn outcome_defaults() {
+        assert_eq!(outcome_for(StatusCode::UNAUTHORIZED, None), Outcome::Denied);
+        assert_eq!(outcome_for(StatusCode::FORBIDDEN, None), Outcome::Denied);
+        assert_eq!(
+            outcome_for(StatusCode::NOT_FOUND, Some(Denied("idor"))),
+            Outcome::Denied
+        );
+        for s in [
+            StatusCode::NOT_FOUND,
+            StatusCode::BAD_REQUEST,
+            StatusCode::CONFLICT,
+            StatusCode::OK,
+        ] {
+            assert_eq!(outcome_for(s, None), Outcome::Success, "{s}");
+        }
+        assert_eq!(
+            outcome_for(StatusCode::SERVICE_UNAVAILABLE, None),
+            Outcome::Error
+        );
+    }
+
+    #[test]
+    fn ip_subject_ipv6_by_64() {
+        let ip = |s: &str| s.parse::<IpAddr>().ok();
+        assert_eq!(
+            ip_subject(ip("2001:db8:1:2::1")),
+            ip_subject(ip("2001:db8:1:2:ffff:ffff:ffff:ffff"))
+        );
+        assert_ne!(
+            ip_subject(ip("2001:db8:1:2::1")),
+            ip_subject(ip("2001:db8:1:3::1"))
+        );
+        assert_eq!(ip_subject(ip("2001:db8:1:2::1")), "ip6:2001:db8:1:2::/64");
+        assert_ne!(ip_subject(ip("192.0.2.1")), ip_subject(ip("192.0.2.2")));
+        assert_eq!(ip_subject(None), "none");
+    }
+
+    #[test]
+    fn keys_differ_by_class() {
+        assert_ne!(
+            digest_key(&["auth_fail", "denied", "ip:192.0.2.1"]),
+            digest_key(&["anon_mutation", "denied", "ip:192.0.2.1"])
+        );
+        assert_eq!(digest_key(&["x"]).len(), 32);
     }
 
     #[test]

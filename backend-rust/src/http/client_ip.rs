@@ -34,7 +34,7 @@ impl TrustedProxies {
     }
 
     /// O peer TCP é um proxy de confiança (só então contam cabeçalhos postos por ele, como
-    /// `CF-Connecting-IP` e `x-request-id`). Sem peer = não.
+    /// `CF-Connecting-IP`). Sem peer = não. O `x-request-id` nunca conta (cartão 07b).
     pub fn trusts(&self, peer: Option<IpAddr>) -> bool {
         peer.is_some_and(|p| self.contains(p.to_canonical()))
     }

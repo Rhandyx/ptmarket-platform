@@ -302,7 +302,8 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     tx.rollback().await?;
 
     // Plataforma (sem tenant): job de sistema grava; nenhum tenant o lê.
-    let sys = AuditCtx::system("audit_ctx_test");
+    // `AuditCtx::system` é `pub(crate)` (07b): aqui um ator `system` de teste.
+    let sys = AuditCtx::for_tests(ActorType::System, None, None, None);
     let mut ptx = begin_platform_tx(&app, &sys).await?;
     let pid = record(&mut ptx, event("platform.job_ran", None)).await?;
     ptx.commit().await?;
@@ -407,5 +408,59 @@ async fn chain_race_in_repeatable_read_retries_and_stays_contiguous(
     let expected: Vec<i64> = (1..=i64::try_from(seqs.len())?).collect();
     assert_eq!(seqs, expected, "cadeia com buracos ou repetidos");
     assert_eq!(seqs.len(), 8);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn record_rejects_oversized_event_without_truncating(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let a = seed_tenant(&owner, "camara-a").await?;
+    let app = app_pool(&opts, &conn, 1).await?;
+    let ctx = merchant(None);
+    let mut tx = begin_tenant_tx(&app, a, &ctx).await?;
+
+    // changes > 64 KiB → Validation (nada gravado; a transação continua utilizável).
+    let big = serde_json::json!({ "blob": "x".repeat(64 * 1024) });
+    let res = record(&mut tx, event("store.settings_changed", Some(big))).await;
+    assert!(
+        matches!(&res, Err(AppError::Validation(f)) if f.iter().any(|e| e.field == "audit.changes")),
+        "{res:?}"
+    );
+    let mut long_reason = event("store.ping", None);
+    long_reason.reason = Some("r".repeat(1025));
+    assert!(matches!(
+        record(&mut tx, long_reason).await,
+        Err(AppError::Validation(_))
+    ));
+    let mut long_target = event("store.ping", None);
+    long_target.target_id = Some("t".repeat(257));
+    assert!(matches!(
+        record(&mut tx, long_target).await,
+        Err(AppError::Validation(_))
+    ));
+
+    // NUL em qualquer texto → U+FFFD; o evento fica gravado.
+    let mut nul = event(
+        "store.ping",
+        Some(serde_json::json!({ "note": "a\u{0}b", "k\u{0}": 1 })),
+    );
+    nul.reason = Some("r\u{0}".to_owned());
+    nul.target_id = Some("\u{0}id".to_owned());
+    let id = record(&mut tx, nul).await?;
+    let (target_id, reason, changes): (Option<String>, Option<String>, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT target_id, reason, changes FROM audit.audit_events WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(target_id.as_deref(), Some("\u{FFFD}id"));
+    assert_eq!(reason.as_deref(), Some("r\u{FFFD}"));
+    let changes = changes.unwrap_or_default();
+    assert_eq!(changes["note"], "a\u{FFFD}b");
+    assert_eq!(changes["k\u{FFFD}"], 1);
+    tx.commit().await?;
+    assert!(ctx.is_recorded());
     Ok(())
 }
