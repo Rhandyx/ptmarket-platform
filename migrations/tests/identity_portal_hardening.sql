@@ -268,19 +268,21 @@ SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system', '');
 -- A: a1 publicada · a2 não publicada · a3 publicada mas inativa. B: b1 publicada. M: m1 não publicada.
 -- E (ES): e1 publicada. X (inativo): x1 publicada.
+-- custom_commission_bps/kyc_verified ficam no default: desde a 0029 a app não os escreve (as asserções do portal
+-- abaixo não dependem do valor).
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021a0';
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email, phone, eupago_split_key,
-                    invoicing_credentials_enc, stripe_account_id, custom_commission_bps, kyc_verified,
+                    invoicing_credentials_enc, stripe_account_id,
                     invoicing_provider, shipping_config, publish_to_national_portal, is_active, vat_exempt_art53) VALUES
     ('00000000-0000-7000-8000-00000021a001', '00000000-0000-7000-8000-0000000021a0', 'Loja A1', 'h21-a1', 'A1 Lda',
      '500002101', 'PT50000000000000000002101', 'a1@teste.invalid', '+351210000001', 'split-a1', 'enc-a1', 'acct_a1',
-     150, true, 'moloni', '{"zona": "a1"}', true, true, true),
+     'moloni', '{"zona": "a1"}', true, true, true),
     ('00000000-0000-7000-8000-00000021a002', '00000000-0000-7000-8000-0000000021a0', 'Loja A2', 'h21-a2', 'A2 Lda',
      '500002102', 'PT50000000000000000002102', 'a2@teste.invalid', NULL, 'split-a2', 'enc-a2', 'acct_a2',
-     150, true, 'moloni', '{}', false, true, false),
+     'moloni', '{}', false, true, false),
     ('00000000-0000-7000-8000-00000021a003', '00000000-0000-7000-8000-0000000021a0', 'Loja A3', 'h21-a3', 'A3 Lda',
      '500002103', 'PT50000000000000000002103', 'a3@teste.invalid', NULL, NULL, NULL, NULL,
-     NULL, false, 'none', '{}', true, false, false);
+     'none', '{}', true, false, false);
 INSERT INTO products (id, tenant_id, store_id, title, vat_rate_bps, is_published) VALUES
     ('00000000-0000-7000-8000-00000021a101', '00000000-0000-7000-8000-0000000021a0',
      '00000000-0000-7000-8000-00000021a001', '{"pt":"Produto A1"}', 0, true);

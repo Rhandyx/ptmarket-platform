@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET custom_commission_bps = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "220383a76c328bd2a98d9412dc81cb4087fcf490f1426b9a349d231a0e620346"
+}

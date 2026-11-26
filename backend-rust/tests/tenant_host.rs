@@ -178,15 +178,19 @@ async fn seed_tenant(
 }
 
 /// Loja com todas as colunas sensíveis preenchidas.
-async fn seed_store(app: &PgPool, t: &Tenant, slug: &str, publish: bool) -> anyhow::Result<()> {
+async fn seed_store(
+    app: &PgPool,
+    owner: &PgPool,
+    t: &Tenant, slug: &str,
+    publish: bool,
+) -> anyhow::Result<()> {
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email,
                              invoicing_credentials_enc, eupago_split_key, stripe_account_id,
-                             publish_to_national_portal, custom_commission_bps, kyc_verified)
-         VALUES ($1, $2, $3, $4, $5, '500000000', $6, 'loja@test.invalid', $7, $8, $9, $10,
-                 777, true)",
+                             publish_to_national_portal)
+         VALUES ($1, $2, $3, $4, $5, '500000000', $6, 'loja@test.invalid', $7, $8, $9, $10)",
         Uuid::now_v7(),
         t.id,
         slug,
@@ -201,6 +205,24 @@ async fn seed_store(app: &PgPool, t: &Tenant, slug: &str, publish: bool) -> anyh
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    // Trinco da 0029: a app não escreve estas colunas; o dono (migrator) sim.
+    let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
+    let denied = sqlx::query!("UPDATE stores SET custom_commission_bps = 1")
+        .execute(&mut *tx)
+        .await
+        .expect_err("a app não pode escrever custom_commission_bps");
+    assert_eq!(
+        denied.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
+    );
+    drop(tx);
+    sqlx::query!(
+        "UPDATE stores SET custom_commission_bps = 777, kyc_verified = true WHERE tenant_id = $1 AND slug = $2",
+        t.id,
+        slug
+    )
+    .execute(owner)
+    .await?;
     Ok(())
 }
 
@@ -492,10 +514,10 @@ async fn portal_reads_published_stores_of_all_tenants_without_secrets_and_is_rea
     let es = seed_tenant(&owner, "ayto-es", "municipal", "ES", true).await?;
     let p = seed_tenant(&owner, "portal", "national_portal", "PT", true).await?;
     let app = app_pool(&opts, &conn).await?;
-    seed_store(&app, &a, "a-publicada", true).await?;
-    seed_store(&app, &a, "a-privada", false).await?;
-    seed_store(&app, &b, "b-publicada", true).await?;
-    seed_store(&app, &es, "es-publicada", true).await?;
+    seed_store(&app, &owner, &a, "a-publicada", true).await?;
+    seed_store(&app, &owner, &a, "a-privada", false).await?;
+    seed_store(&app, &owner, &b, "b-publicada", true).await?;
+    seed_store(&app, &owner, &es, "es-publicada", true).await?;
 
     let portal = resolve(&app, &p).await?;
     let ctx = AuditCtx::for_tests(ActorType::Anonymous, None, None, None);
