@@ -2684,6 +2684,172 @@ END
 $do$;
 $chg_0020$);
 
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0023_mask_uuid (cartão 02/03f). Disparada por migrations/0023_audit_mask_uuid.sql. Exige 0020.
+--   audit._redact_text deixa de corromper UUIDs dentro de texto (a regra do IBAN apanhava "ac77-73f5-8fa6" no
+--   meio de um UUIDv7). Como o Rust (redact_str) e o Go (Redact): JWT/chaves e e-mail sobre o texto inteiro;
+--   IBAN e NIB só nos troços FORA dos UUID (8-4-4-4-12 hex, qualquer caixa, entre fronteiras de palavra), que
+--   voltam a entrar intactos; PAN, NIF, DNI/NIE e telefone procurados nos troços unidos por uma quebra de linha
+--   (só para detetar, nunca devolvida; nenhuma regra a atravessa). Só esta função muda (assinatura, dono, grants,
+--   IMMUTABLE PARALLEL SAFE e search_path ficam: CREATE OR REPLACE).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0023_mask_uuid', '0020_mask_v2', $chg_0023$
+CREATE OR REPLACE FUNCTION audit._redact_text(p_value text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    c_uuid constant text :=
+        '\m[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\M';
+    v_out  text;
+    v_scan text;
+    v_seg  text[];
+    v_uuid text[];
+    v_s    text;
+    v_m    text;
+    v_a    text[];
+    v_d    text;
+    v_g    text[];
+    v_acc  text;
+    v_i    integer;
+    v_j    integer;
+    v_k    integer;
+    v_x    integer;
+    v_sum  integer;
+    v_n    bigint;
+BEGIN
+    -- 1. Marcadores já postos.
+    IF p_value IS NULL OR p_value IN ('[redacted]', '[pii]', '[depth]') THEN
+        RETURN p_value;
+    END IF;
+    -- 2. JWT (três segmentos base64url), prefixos de chaves de API (texto inteiro).
+    IF p_value ~ '\meyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.'
+       OR p_value ~ '[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}'
+       OR p_value ~ '\m(sk_|rk_|ghp_|pk_live_|xox[bp]-)[A-Za-z0-9]'
+       OR p_value ~ '\mAKIA[0-9A-Z]{16}' THEN
+        RETURN '[redacted]';
+    END IF;
+    -- 3. E-mail (texto inteiro).
+    IF p_value ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' THEN
+        RETURN '[pii]';
+    END IF;
+    -- Troços fora dos UUID (n + 1) e os UUID (n), pela ordem. Um troço só começa com letra/dígito no início do
+    -- texto e só acaba com letra/dígito no fim (antes e depois de um UUID há sempre uma não-palavra): as fronteiras
+    -- \m \M dentro de um troço são as do texto inteiro. Contagens incoerentes → falha fechada.
+    v_seg  := regexp_split_to_array(p_value, c_uuid);
+    v_uuid := ARRAY(SELECT m[1] FROM regexp_matches(p_value, '(' || c_uuid || ')', 'g') AS m);
+    IF cardinality(v_seg) IS DISTINCT FROM cardinality(v_uuid) + 1 THEN
+        RETURN '[redacted]';
+    END IF;
+    v_out  := '';
+    v_scan := '';
+    FOR v_i IN 1 .. cardinality(v_seg) LOOP
+        v_s := v_seg[v_i];
+        -- 4. IBAN no sítio (qualquer caixa; entre grupos: espaço(s), NBSP, "-" ou ".") → ****4 últimos.
+        FOR v_m IN
+            SELECT m[1]
+            FROM regexp_matches(v_s,
+                '\m([A-Za-z]{2}[0-9]{2}(?:[A-Za-z0-9]{11,30}|(?:(?: +| |-|\.)[A-Za-z0-9]{4}){2,7}(?:(?: +| |-|\.)[A-Za-z0-9]{1,4})?)|[Pp][Tt]50(?:(?: +| |-|\.)?[0-9]){21})\M',
+                'g') AS m
+        LOOP
+            v_s := replace(v_s, v_m, '****' || right(regexp_replace(v_m, '[^A-Za-z0-9]', '', 'g'), 4));
+        END LOOP;
+        -- 5. NIB PT: 21 dígitos (mesmos separadores) com os 2 dígitos de controlo certos → ****4 últimos.
+        FOR v_m IN
+            SELECT m[1]
+            FROM regexp_matches(v_s, '\m([0-9](?:(?: +| |-|\.)?[0-9]){20})\M', 'g') AS m
+        LOOP
+            v_d := regexp_replace(v_m, '[^0-9]', '', 'g');
+            IF 98 - ((left(v_d, 19)::numeric * 100) % 97) = right(v_d, 2)::numeric THEN
+                v_s := replace(v_s, v_m, '****' || right(v_d, 4));
+            END IF;
+        END LOOP;
+        IF v_i <= cardinality(v_uuid) THEN
+            v_out  := v_out || v_s || v_uuid[v_i];
+            v_scan := v_scan || v_s || E'\n';
+        ELSE
+            v_out  := v_out || v_s;
+            v_scan := v_scan || v_s;
+        END IF;
+    END LOOP;
+    -- 6. Só um UUID ou só uma data/hora ISO 8601: como está.
+    IF v_out ~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+       OR v_out ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}([Tt ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.,][0-9]+)?)?([Zz]|[+-][0-9]{2}(:?[0-9]{2})?)?)?$' THEN
+        RETURN v_out;
+    END IF;
+    -- 7–10 procuram em v_scan (troços fora dos UUID, separados por uma quebra de linha); devolvem v_out.
+    -- 7. PAN: 13–19 dígitos (espaço ou "-" entre eles) com Luhn válido, entre fronteiras de palavra (não dentro de
+    --    um hash hexadecimal). Por grupos contíguos da sequência (um PAN seguido de outros números também conta).
+    FOR v_m IN SELECT m[1] FROM regexp_matches(v_scan, '\m([0-9](?:[ -]?[0-9])*)\M', 'g') AS m LOOP
+        CONTINUE WHEN length(v_m) < 13;
+        v_g := regexp_split_to_array(v_m, '[ -]');
+        FOR v_i IN 1 .. cardinality(v_g) LOOP
+            v_acc := '';
+            FOR v_j IN v_i .. cardinality(v_g) LOOP
+                v_acc := v_acc || v_g[v_j];
+                EXIT WHEN length(v_acc) > 19;
+                CONTINUE WHEN length(v_acc) < 13;
+                v_sum := 0;
+                FOR v_k IN 1 .. length(v_acc) LOOP
+                    v_x := substr(v_acc, length(v_acc) - v_k + 1, 1)::integer;
+                    IF v_k % 2 = 0 THEN
+                        v_x := v_x * 2;
+                        IF v_x > 9 THEN
+                            v_x := v_x - 9;
+                        END IF;
+                    END IF;
+                    v_sum := v_sum + v_x;
+                END LOOP;
+                IF v_sum % 10 = 0 THEN
+                    RETURN '[redacted]';
+                END IF;
+            END LOOP;
+        END LOOP;
+    END LOOP;
+    -- 8. NIF PT: 9 dígitos entre fronteiras de palavra ("PT" opcional), 1.º ≠ 0, controlo módulo 11.
+    FOR v_m IN SELECT m[1] FROM regexp_matches(v_scan, '\m(?:[Pp][Tt])?([1-9][0-9]{8})\M', 'g') AS m LOOP
+        v_sum := 0;
+        FOR v_k IN 1 .. 8 LOOP
+            v_sum := v_sum + substr(v_m, v_k, 1)::integer * (10 - v_k);
+        END LOOP;
+        v_sum := v_sum % 11;
+        IF (CASE WHEN v_sum < 2 THEN 0 ELSE 11 - v_sum END) = substr(v_m, 9, 1)::integer THEN
+            RETURN '[pii]';
+        END IF;
+    END LOOP;
+    -- 9. DNI (8 dígitos + letra) / NIE (X/Y/Z + 7 dígitos + letra) ES: letra = tabela[n mod 23].
+    FOR v_a IN SELECT m FROM regexp_matches(v_scan, '\m([XYZxyz]?)([0-9]{7,8})([A-Za-z])\M', 'g') AS m LOOP
+        IF (v_a[1] = '' AND length(v_a[2]) = 8) OR (v_a[1] <> '' AND length(v_a[2]) = 7) THEN
+            v_n := (translate(upper(v_a[1]), 'XYZ', '012') || v_a[2])::bigint;
+            IF substr('TRWAGMYFPDXBNJZSQVHLCKE', (v_n % 23)::integer + 1, 1) = upper(v_a[3]) THEN
+                RETURN '[pii]';
+            END IF;
+        END IF;
+    END LOOP;
+    -- 10. Telefone: E.164 ("+" ou "00" + 8–15 dígitos; separadores espaço . - ( )) e PT nacional (9 dígitos a
+    --     começar por 2 ou 9, com ou sem grupos de 3).
+    FOR v_m IN
+        SELECT m[1] FROM regexp_matches(v_scan, '(?:\+|(?:^|[^0-9A-Za-z_])00)((?:[ .()-]*[0-9])+)', 'g') AS m
+    LOOP
+        v_acc := '';
+        FOREACH v_d IN ARRAY regexp_split_to_array(v_m, '[ .()-]+') LOOP
+            v_acc := v_acc || v_d;
+            IF length(v_acc) BETWEEN 8 AND 15 THEN
+                RETURN '[pii]';
+            END IF;
+        END LOOP;
+    END LOOP;
+    IF v_scan ~ '\m[29][0-9]{2}(?:[ .-]?[0-9]{3}){2}\M' THEN
+        RETURN '[pii]';
+    END IF;
+    RETURN v_out;
+END
+$body$;
+$chg_0023$);
+
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
 DECLARE

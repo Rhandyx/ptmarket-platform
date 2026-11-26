@@ -62,7 +62,7 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
      migration é desfeita. O sqlx fixa o checksum da migration e o superuser fixa o texto: os dois têm de bater.
   **Cadeia linear:** cada entrada indica a anterior (`INSERT … (name, requires, sql)`; `requires` NULL só na
   primeira): `0011_db_user` → `0012_hardening` → `0013_ddl_owner_exec` → `0014_mask_limits` →
-  `0015_critical_timeline` → `0020_mask_v2`. O bootstrap recusa
+  `0015_critical_timeline` → `0020_mask_v2` → `0023_mask_uuid`. O bootstrap recusa
   `requires` que não seja uma alteração aprovada ou uma cadeia com ramos; `audit_upgrade` recusa uma alteração cuja
   anterior não esteja em `sealed_changes_applied` nesta BD ("<nome> exige <anterior> aplicada antes").
   `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem

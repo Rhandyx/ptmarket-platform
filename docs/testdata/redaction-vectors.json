@@ -864,5 +864,58 @@
       "rust",
       "go"
     ]
+  },
+  {
+    "id": "clear-uuid-v7-iban-like-middle",
+    "kind": "text",
+    "input": "01a2185a-ac77-73f5-8fa6-b4840a004eeb",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-uuid-v7-in-text",
+    "kind": "text",
+    "input": "pedido 01a2185a-bd21-7437-b788-4e359b080843 falhou",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "clear-two-uuids-space",
+    "kind": "text",
+    "input": "01a2185a-dd68-71a1-9c3e-5f1a2b3c4d5e 01a2185a-ee44-73f2-a1b2-c3d4e5f60718",
+    "must_not_contain": [],
+    "must_equal_input": true,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
+  },
+  {
+    "id": "value-iban-then-uuid",
+    "kind": "text",
+    "input": "PT50 0002 0123 1234 5678 9015 4 ref 01a2185a-ac77-73f5-8fa6-b4840a004eeb",
+    "must_not_contain": [
+      "0002",
+      "0123",
+      "1234",
+      "5678"
+    ],
+    "must_equal_input": false,
+    "layers": [
+      "db",
+      "rust",
+      "go"
+    ]
   }
 ]
