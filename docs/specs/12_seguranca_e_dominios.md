@@ -1,5 +1,7 @@
 # 12. Segurança ("nível máximo anti-hacker") e Domínios das Câmaras
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 **Estado:** aprovado pelo owner em 25/11/2026. **Prevalece sobre as specs 02 e 10** em TLS/edge e segurança.
 **Padrão medível:** **OWASP ASVS 5.0 — nível 2 em toda a plataforma, nível 3 em `payments`, `admin` e `identity`.** O `security-auditor` revê cada diff contra esta lista.
 
@@ -16,6 +18,9 @@
 - **TLS na edge é da Cloudflare** (emissão e renovação automáticas). O Caddy fica como reverse proxy interno com certificado *Origin CA* da Cloudflare. O `on_demand_tls` das specs 02/10 passa a **fallback** (só se um cliente recusar Cloudflare).
 - **Origem fechada:** o servidor só aceita tráfego dos IP ranges da Cloudflare (firewall). *Cloudflare Tunnel* (sem portas abertas) a avaliar na Fase 2 — não confirmado como origem de custom hostnames.
 - **DDoS/WAF:** proteção da Cloudflare + regras WAF gratuitas (bloquear países/ASN só se houver ataque medido; nada de geobloqueio às cegas).
+
+### 1.1 Quem tem domínio (ver spec 14 §1)
+- **Só os canais têm domínio:** `tenants.custom_domain` continua `NOT NULL`. As entidades patrocinadoras sem domínio próprio vivem em `sponsor_entities` e não geram hostname.
 
 ## 2. Anti-bot e anti-spam (duas camadas, sempre as duas)
 
@@ -39,6 +44,10 @@
 - **Duração das sessões** (decisão do owner, 25/11/2026): cliente 7 dias absolutos no máximo; staff 12 h, ou 30 min de inatividade; plataforma 8 h, ou 15 min.
 - **CSRF:** token em todos os formulários que alteram estado (além de SameSite).
 
+**Login do staff** (ver spec 14 §8)
+- Todo o staff (lojistas, `sponsor_admin`, `super_admin`) autentica-se **só em `admin.ptmarket.pt`**. O âmbito vem do **papel**, nunca do Host. Há **um só `rp_id`** de passkeys (`admin.ptmarket.pt`).
+- Os **clientes** continuam a comprar e a autenticar-se em qualquer canal.
+
 **Autorização**
 - RLS no PostgreSQL **e** verificação de dono/tenant em **cada** handler (defesa em profundidade). Cada endpoint que recebe um ID tem um teste que tenta aceder ao recurso de outro tenant/cliente e **tem de falhar** (anti-IDOR).
 - Princípio do menor privilégio: utilizador de BD da API sem `SUPERUSER`/`BYPASSRLS`; Data Studio com utilizador próprio.
@@ -57,6 +66,7 @@
 - Nunca marcar `paid` sem estas 5 verificações; divergência = alerta + estado `review`.
 
 **Uploads**
+- **Documentos privados** (verificação de lojas): armazenamento privado, nunca servidos como `/media`; acesso só por **URL assinado de 5 min**, auditado (ver spec 14 §6).
 - Imagens recodificadas no servidor (decodificar → reencodar AVIF/WebP): remove EXIF e mata ficheiros poliglotas; limite de tamanho e de dimensões; nome de ficheiro gerado (UUID), nunca o original.
 
 **Segredos e logs**

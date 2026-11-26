@@ -1,5 +1,7 @@
 # 03. Pagamentos Split (Eupago & Stripe), Faturação AT, IVA e Logística
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 **Regra de Ouro Financeira:** A **Segjar Soluções, Lda** nunca detém custódia do dinheiro dos comerciantes (evitando enquadramento como Instituição de Pagamento junto do Banco de Portugal) e nunca absorve taxas variáveis de gateways nem subscrições de faturação de terceiros.
 
 ---
@@ -9,10 +11,13 @@
 | Custo / Serviço | Quem Suporta? | Como Funciona na Prática |
 | :--- | :--- | :--- |
 | **Taxas Eupago (MB WAY / Multibanco) ou Stripe Connect** | **O Lojista** (deduzido automaticamente no *split*). | O gateway desconta a taxa transacional da parcela do comerciante antes de liquidar o valor líquido no IBAN da loja. Custo **0€** para a Segjar. |
-| **Comissão da Plataforma (`commission_bps`)** | **0% nas Câmaras** / **5% a 8% no Portal Nacional**. | Calculada dinamicamente no Rust: `COALESCE(store.custom_commission_bps, tenant.default_commission_bps)`. O mesmo produto paga **0%** no site da Câmara e **6,5%** se vendido em `lojaportugal.pt`. |
+| **Comissão da Plataforma (`commission_bps`)** | **Loja patrocinada: 0%** (em qualquer canal). **Loja independente: plano de faturação** (`commission_payg` 8% / 6% acima de 20.000 €/mês, ou `tiered_subscription`). | Calculada no Rust por `sub_order`, por precedência: patrocínio ativo → exceção `custom_commission_bps` → plano (ver spec 14 §3 e §4). Independe do domínio da compra. Escalões em `billing_plan_tiers`, nunca hardcoded. `sponsored_discount_cents` regista a poupança face à referência. A cobrança das mensalidades fica para o épico de pagamentos. |
 | **Software de Faturação AT (Moloni, InvoiceXpress, Vendus)** | **O Lojista** (*BYOK — Bring Your Own Key*). | O lojista já paga o seu programa de faturação na loja física (API incluída). Só insere a chave API no painel. Custo **0€** para a Segjar. |
 | **Portes e Guias de Transporte (CTT, DPD, Sendcloud)** | **Comprador** (no checkout) ou **Lojista**. | A etiqueta é gerada via API usando o contrato do próprio lojista ou conta agregadora. |
 | **Emails Transacionais (AWS SES / Resend)** | **Segjar Soluções** (coberto pela avença anual). | Custo residual (~5€/mês para 50.000 emails de encomendas e faturas PDF). |
+
+
+**Nota (spec 14 §3):** `sub_orders` guarda `sponsored_discount_cents = round(subtotal × reference_bps) − platform_fee_cents` (nunca negativo; 0 sem patrocínio). **IVA sobre a comissão: pendente de contabilista**; por defeito `platform_fee_cents` é sem IVA e o IVA de 23% do serviço é faturado pela Segjar na fatura mensal ao lojista.
 
 ---
 
@@ -29,8 +34,8 @@
         ┌──────────────┴──────────────┐     ┌──────────────┴──────────────┐
         ▼                             ▼     ▼                             ▼
 [Padaria: 30,00 €]            [Segjar Soluções]           [Sapataria: 60,00 €]
- • Canal Câmara: 0% comissão   • Canal Câmara: 0,00 €      • Canal Câmara: 0% comissão
- • Canal Nacional: -6,5%       • Canal Nacional: +5,85 €   • Canal Nacional: -6,5%
+ • Loja patrocinada: 0%        • Loja patrocinada: 0,00 € • Loja patrocinada: 0% (qualquer canal)
+ • Loja independente: plano    • Independente: via plano  • Loja independente: plano (spec 14 §3-4)
         │                                                           │
         ▼                                                           ▼
 [IBAN da Padaria]                                           [IBAN da Sapataria]
@@ -40,7 +45,7 @@
 Como a empresa já possui conta Eupago, a abordagem ao gestor comercial deve solicitar migração para o **Tier Marketplace / Split Payments**, validando 4 pontos:
 1. **Tabela de Volume Agregado:** Negociar redução nas taxas fixas e percentuais de MB WAY e Multibanco (crucial porque no comércio tradicional os carrinhos médios rondam 15€ a 45€).
 2. **Onboarding / KYC de Subcontas via API:** Confirmar como automatizar o registo de cada beneficiário (NIF, IBAN, certidão permanente) para evitar gestão manual por email.
-3. **Suporte Explícito a Comissão `0.00€`:** Confirmar na documentação da API que o parâmetro de comissão da plataforma aceita zero absoluto nos *tenants* municipais.
+3. **Suporte Explícito a Comissão `0.00€`:** Confirmar na documentação da API que o parâmetro de comissão da plataforma aceita zero absoluto nas lojas patrocinadas (qualquer canal).
 4. **Prazo de Liquidação (D+N):** Negociar liquidação direta ao IBAN do lojista (ex: D+2 ou D+5 para proteção contra chargebacks ou anulações imediatas).
 
 ### 2.3 Estratégia Dual-Gateway (Portugal + Espanha)

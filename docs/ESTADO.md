@@ -5,7 +5,7 @@
 
 ## 26/11/2026 — Fase 2 CONCLUÍDA (épico `02-identidade-tenancy`, cartões em `docs/plans/02-identidade-tenancy/`)
 - **Feito:** todos os cartões (01–24b, 20b/20c, 23a). Cada um passou pela auditoria ASVS (L3 em admin/identity) e os achados foram corrigidos na mesma ronda. No fim: Rust (suite completa), `run.sh` (com L2) e `npm run verify` verdes; o Go não muda desde o 24a.
-- **Próximo:** épico 03. O `architect-master` escreve os cartões. Candidatos: frontend de autenticação (registo, login, 2FA, passkeys com prova em browser real) + backoffice (o 1.º cartão é a UI da timeline); depois o catálogo. O supervisor decide a ordem.
+- **Próximo:** épico 03 = **canais, patrocínio, geografia e verificação** (modelo novo do owner, spec 14). O Passo 1 (docs) está feito e à espera de validação do owner. O Passo 2 é o `architect-master` escrever os cartões. Ordem dos passos e riscos: relatório da auditoria de 26/11 (passos 3–12: DICOFRE → `sponsor_entities` → colunas de `stores` → `store_sponsorships` → `platform_settings` + `billing_plan_tiers` + `effective_commission_bps` → visibilidade RLS → painel único → `store_verifications` → onboarding UI → `sub_orders`). Depois: frontend de autenticação e backoffice (o 1.º cartão é a UI da timeline).
 - **Dev:** BD na 0026 com L2; a cadeia selada termina em `0026_admin_read_events_v2`. Os `.env` locais (Rust e Go) precisam de `APP_ENV=development` (o owner acrescenta). Depois de mudar o `openapi.json`: `npm run gen:api`. Depois de mexer no bootstrap: 1) reaplicá-lo como superuser, 2) `sqlx migrate run`, 3) `event-triggers.sql` (se faltarem). Os executores Rust correm um de cada vez (o mesmo `target/`; o hook faz `cargo fmt`); Go e BD podem ir em paralelo com o Rust só se as migrations não estiverem a mudar.
 - **Identidade (como está):**
   - **Emails:** hash sempre com `throttle::account_hash` (HMAC, `ACCOUNT_HASH_KEY`).
@@ -36,6 +36,10 @@
 2. Alertas imediatos Telegram + Discord, só para eventos críticos (IBAN, falhas de pagamento/faturação, login de superadmin, falha do verify-audit). Mais de 5 do mesmo kind/tenant em 5 min → resumo; `audit.*`, `verify_failure`, `superadmin_login` e sem tenant nunca se agrupam.
 3. Timeline no Super-Admin, filtrável por tenant/loja/utilizador/encomenda: a API é o cartão 23; a UI é o 1.º cartão do épico de backoffice.
 4. 429: o 1.º por chave/minuto é gravado de forma síncrona; os restantes contam-se e saem num resumo; Redis em baixo → 503 (vale também para o travão de Hosts fora da cache; a cache, mesmo expirada, continua a ser servida). Sessões: cliente 7 dias no máximo; staff 12 h/30 min; plataforma 8 h/15 min.
+6. **Modelo comercial (26/11, spec 14 canónica):**
+   - **Canais e catálogo:** `tenants` = canais com domínio (`custom_domain` continua NOT NULL) e `sponsor_entities` = Câmara, Junta ou Associação (N:N com as lojas por `store_sponsorships`: pending/active/rejected/expired/revoked). Catálogo universal em `lojaportugal.pt`, sem opt-out (`shipping_scope` controla a entrega); `stores.tenant_id` = canal nacional do país.
+   - **Comissão:** patrocínio ativo → `MIN(commission_override_bps)` (0); senão `custom_commission_bps` (só super_admin); senão o plano (`commission_payg` 8%/6% marginal por defeito, ou `tiered_subscription`), com escalões em `billing_plan_tiers` (nunca hardcoded). `sponsored_discount_cents` = (referência 8% ou exceção) − fee, sobre o subtotal sem portes, half-up. A cobrança das mensalidades fica para o épico de pagamentos.
+   - **Painel e preços:** painel único `admin.ptmarket.pt` (âmbito pelo papel; `sponsor_admin`). Patrocínio sem domínio: Junta/Associação 750–1.500 € + 1.200–1.800 €/ano; Câmara 2.500–3.500 € + 2.400–3.000 €/ano.
 5. Pendentes: textos dos Termos/Privacidade (o owner traz um documento antigo; agente jurídico, só local; bloqueia a produção). IVA ES / NIF ES no futuro. Marca (fontes/paleta). Retenção da BD: default 10/2/1 anos.
 
 ## Dívida técnica conhecida

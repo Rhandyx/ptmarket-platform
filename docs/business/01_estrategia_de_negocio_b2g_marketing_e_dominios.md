@@ -4,6 +4,8 @@
 **Enquadramento Fiscal:** Contabilidade Organizada — Regime Misto de IVA (Mediação de Seguros isenta ao abrigo do Art. 9.º do CIVA devidamente segregada das operações tecnológicas e comerciais sujeitas a IVA)  
 **Data de Referência:** Novembro de 2026
 
+> **Atualizado a 26/11/2026 (decisões do owner):** catálogo universal em `lojaportugal.pt` + domínios white-label filtrados, patrocínio múltiplo (Câmara, Junta, Associação), comissão pelo patrocínio da loja e planos para lojas independentes. Regras técnicas e financeiras completas: `docs/specs/14_canais_patrocinio_comissoes_e_planos.md`.
+
 ---
 
 ## 1. Arquitetura do Ecossistema de Marcas e Domínios
@@ -16,20 +18,26 @@ Para evitar misturar a atividade histórica de mediação de seguros com a venda
          ├──► ptsolucoes.pt  (Marca Comercial TI / Software House para Setor Público e Empresas)
          │
          └──► ptmarket.pt    (O Produto SaaS / Motor Tecnológico Multi-Tenant)
-                   │           • admin.ptmarket.pt (Painel Unificado: Lojistas, Câmaras e Super-Admin)
+                   │           • admin.ptmarket.pt (Painel Unificado: Lojistas, Câmaras/Juntas/Associações e Super-Admin; âmbito pelo papel)
                    │           • api.ptmarket.pt   (API Core Rust + Webhooks Go)
                    │           • demo.ptmarket.pt  (Município Fictício de Demonstração Comercial)
                    │
-                   ├──► Canal 1 (B2G): Domínio Próprio da Câmara (ex: compreem[concelho].pt)
-                   │      • Pago pela Câmara Municipal / Associação Comercial (Setup + Avença)
-                   │      • Comissão sobre vendas do lojista: 0%
+                   ├──► Canal Nacional (B2C): lojaportugal.pt — CATÁLOGO UNIVERSAL
+                   │      • TODAS as lojas ativas aparecem (sem opt-out); entrega limitada por shipping_scope
+                   │      • Loja patrocinada (≥1 patrocínio ativo): ~~8%~~ 0% em qualquer canal
+                   │      • Loja independente: Plano 1 (8% / 6% marginal) ou Plano 2 (subscrição por escalões)
                    │
-                   ├──► Canal 2 (B2C Nacional): lojaportugal.pt (Portal Agregador Nacional)
-                   │      • Montra onde aparecem produtos de lojas locais que ativem visibilidade nacional
-                   │      • Comissão sobre vendas (Split automático): 5% a 8% (ex: 6,5%)
+                   ├──► Canais White-Label: domínio próprio da entidade (ex: compreem[concelho].pt)
+                   │      • Vista filtrada do mesmo catálogo: só lojas patrocinadas pela entidade
+                   │      • Tema (theme_config), 1 dos 3 templates (bairro/editorial/catalogo) e PWA próprios
+                   │      • Pago pela entidade (Setup + Avença); comissão da loja segue o patrocínio, não o domínio
                    │
-                   └──► Canal 3 (Futuro — Nichos Verticais / Ibérico PT+ES):
-                          • Mesma infraestrutura, configurável por tenant com comissão personalizada
+                   ├──► Patrocinadores (N:N com as lojas): Câmara Municipal · Junta de Freguesia · Associação
+                   │      • Uma loja pode ter 0, 1, 2 ou mais patrocinadores ativos (vigência independente)
+                   │      • Com ou sem domínio próprio; sem domínio = selos + página/filtro no lojaportugal.pt
+                   │
+                   └──► Canal Futuro — Nichos Verticais / Ibérico PT+ES:
+                          • Mesma infraestrutura, configurável por canal
 ```
 
 ### 1.1 Especificação das Páginas Básicas por Domínio
@@ -103,10 +111,14 @@ Ao abrigo do Código dos Contratos Públicos (CCP) em Portugal:
 
 | Módulo / Pacote | Preço Indicativo (s/ IVA) | O que Inclui |
 | :--- | :--- | :--- |
-| **Pacote Base Município / Associação (Ano 1)** | **12.500€ a 14.500€** | Instância dedicada no domínio da Câmara, escolha de 1 dos 3 templates, integração Eupago/Stripe + Moloni/InvoiceXpress, Cartão da Cidade (PWA + QR Code), migração assistida de catálogo, formação presencial/remota aos comerciantes e 12 meses de alojamento/suporte. |
+| **Pacote Base Município / Associação (Ano 1)** | **12.500€ a 14.500€** | Canal white-label no domínio da entidade (vista filtrada do catálogo universal: lojas patrocinadas), escolha de 1 dos 3 templates, integração Eupago/Stripe + Moloni/InvoiceXpress, Cartão da Cidade (PWA + QR Code), migração assistida de catálogo, formação presencial/remota aos comerciantes e 12 meses de alojamento/suporte. |
 | **Renovação Anual SaaS (Ano 2+)** | **2.700€ a 3.600€ / ano** | Alojamento em servidor europeu, backups diários, atualizações de segurança e conformidade legal, suporte técnico de 2.º nível. |
 | **Add-on: App Nativa iOS & Android (Capacitor)** | **+3.000€ setup + 600€/ano** | Compilação e publicação da app personalizada na Apple App Store e Google Play (na conta institucional da própria Câmara). |
-| **Canal Nacional (`lojaportugal.pt`)** | **0€ adesão / 5% a 8% por venda** | Adesão voluntária dos lojistas já presentes nos municípios (ou externos) para venderem a nível nacional com *split* automático de comissão. |
+| **Canal Nacional (`lojaportugal.pt`)** | **0€ adesão** | Presença obrigatória de todas as lojas ativas (sem opt-out). Loja patrocinada: **0%** (âncora `~~8%~~ 0%`). Loja independente escolhe um dos planos abaixo. |
+| **Plano 1 — Comissão (`commission_payg`, por defeito)** | **0€/mês + 8%** por venda até 20.000€/mês; **6%** só sobre o excedente | Escalões marginais (tipo IRS), sem saltos. Base configurável em `platform_settings`. |
+| **Plano 2 — Subscrição (`tiered_subscription`)** | **5€ / 10€ / 50€ por mês** até 1.000€ / 5.000€ / 10.000€ (0%); 10.000€–20.000€: **50€ + 8%** sobre o excedente; >20.000€: **850€ + 6%** sobre o excedente | Escalões marginais editáveis pelo Super-Admin (`billing_plan_tiers`). |
+| **Patrocínio sem domínio — Junta de Freguesia / Associação Local** | **750€–1.500€ setup + 1.200€–1.800€/ano** | Página/filtro em `lojaportugal.pt`, selos nas lojas patrocinadas, painel de aprovação em `admin.ptmarket.pt` e relatórios agregados (sem dupla contagem). |
+| **Patrocínio sem domínio — Câmara Municipal** | **2.500€–3.500€ setup + 2.400€–3.000€/ano** | Idem, para Câmaras que não contratem domínio próprio. |
 
 ### 4.2 Estratégia de Vendas no Terreno (Passo a Passo)
 1. **Alvo Primário (Ciclo Rápido):** Associações Comerciais e Empresariais locais (decisão em 2 a 4 semanas, gestão direta dos fundos dos Bairros Comerciais Digitais) e Juntas de Freguesia urbanas.

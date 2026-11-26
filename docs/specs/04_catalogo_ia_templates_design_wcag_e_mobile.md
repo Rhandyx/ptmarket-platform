@@ -1,5 +1,7 @@
 # 04. Catalogação por IA, Templates White-Label, Acessibilidade WCAG e Mobile
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 **Objetivo:** Eliminar o cadastro manual de milhares de categorias/atributos, oferecer uma montra personalizada a cada município sobre uma única base de código, cumprir as exigências legais de acessibilidade do setor público e cobrir Web, PWA, Android e iPhone.
 
 ---
@@ -34,6 +36,14 @@ O middleware do Next.js lê o cabeçalho `Host` (ex: `compreemgaia.pt` vs. `loja
 | **1. `bairro` ("Bairro & Proximidade")** | Mapa interativo das lojas aderentes do concelho, atalho *"Levantar em Loja Hoje"*, destaque para comércio diário e banner do Cartão da Cidade. | Câmaras Municipais de pequena/média dimensão e Bairros Comerciais Digitais. |
 | **2. `editorial` ("Montra Moderna")** | Hero visual de ecrã largo, coleções temáticas sazonais (*Natal Local*, *Vinhos & Azeites*), fotografia limpa estilo Shopify. | Associações Comerciais urbanas, moda, artesanato, produtos *gourmet*. |
 | **3. `catalogo` ("Catálogo Denso / B2B")** | Barra de pesquisa central proeminente, filtros laterais rápidos por atributo/preço/concelho e grelha compacta orientada a conversão. | Portal Nacional **`lojaportugal.pt`**, mercados transfronteiriços PT/ES e nichos B2B. |
+
+### 2.3 Canais, patrocinadores e selos (ver spec 14 §1–§2)
+Os templates, o `theme_config` e a PWA mantêm-se integralmente. Acrescenta-se:
+- **Domínio próprio = vista filtrada do catálogo universal:** só mostra as lojas com patrocínio ativo de uma entidade cujo `channel_tenant_id` é esse canal. Não há cópia de produtos nem de stock.
+- **Novas chaves de `theme_config`:** brasão, banners, rodapé institucional/PRR e PWA própria (nome, ícone, cores).
+- **Selos dos patrocinadores** nas fichas de produto e nas páginas de loja, na ordem `municipality` → `parish` → `association` (dentro do mesmo tipo, por nome); também no `lojaportugal.pt`.
+- **Entidades sem domínio:** página/filtro `/entidade/<slug>` no portal nacional.
+- **Âncora `~~8%~~ 0%` acessível (WCAG 2.2 AA):** o texto riscado tem de ser lido corretamente pelos leitores de ecrã. Usar `<del>8%</del> <ins>0%</ins>` (ou texto alternativo visualmente oculto, por exemplo "antes 8%, agora 0%"); nunca só estilo CSS de rasurado. O contraste do texto riscado cumpre 4.5:1.
 
 ---
 

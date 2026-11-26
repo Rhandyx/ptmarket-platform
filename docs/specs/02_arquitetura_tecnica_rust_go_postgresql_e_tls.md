@@ -1,5 +1,7 @@
 # 02. Especificação da Arquitetura Técnica (Rust + Go + PostgreSQL 17 + Next.js)
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 > **Revisto em 25/11/2026:** o modelo de dados (§4) muda segundo a **spec 11 §2**: `product_variants`, stock atómico com reservas, `outbox_events`, `customers`, UUIDv7, **PostgreSQL 18 em vez de 17**, IVA em bps e preços com IVA. A edge/TLS (§1) muda segundo a **spec 12 §1**: Cloudflare for SaaS, com o Caddy On-Demand TLS só como fallback. Em caso de conflito, prevalecem as specs 11 e 12.
 
 **Princípio Orientador:** Máxima segurança financeira e isolamento multi-tenant no núcleo (**Rust + PostgreSQL**), velocidade de adaptação em integrações externas (**Go**) e zero dessincronização entre backend e frontend (**OpenAPI tipado**).
@@ -89,10 +91,10 @@ CREATE TABLE tenants (
     slug VARCHAR(64) UNIQUE NOT NULL,
     custom_domain VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
-    tenant_type VARCHAR(24) NOT NULL DEFAULT 'municipal', -- 'municipal', 'national_portal', 'niche'
+    tenant_type VARCHAR(24) NOT NULL DEFAULT 'municipal', -- canal (spec 14 §1): 'national_portal' (um por país), 'municipal' (domínio white-label de entidade; também Juntas/Associações com domínio), 'niche'
     country_code VARCHAR(2) NOT NULL DEFAULT 'PT',        -- 'PT' ou 'ES'
     currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
-    default_commission_bps INT NOT NULL DEFAULT 0,        -- 0 = 0.00% (Câmaras); 650 = 6.50% (lojaportugal.pt)
+    default_commission_bps INT NOT NULL DEFAULT 0,        -- LEGADO: sem efeito na comissão (ver spec 14 §3)
     template_layout VARCHAR(32) NOT NULL DEFAULT 'bairro', -- 'bairro', 'editorial', 'catalogo'
     theme_config JSONB NOT NULL DEFAULT '{
         "primary_color": "#0F4C81",
@@ -130,7 +132,7 @@ CREATE INDEX idx_categories_parent ON categories(parent_id);
 -- 3. LOJAS / COMERCIANTES (Inclui KYC DSA, Fiscalidade AT, Horários e Modo Férias)
 CREATE TABLE stores (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, -- canal nacional do país da loja (catálogo universal, spec 14 §1)
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(120) NOT NULL,
     legal_name VARCHAR(255) NOT NULL,                     -- Obrigatório DSA (Digital Services Act)
@@ -138,7 +140,15 @@ CREATE TABLE stores (
     iban VARCHAR(34) NOT NULL,
     email VARCHAR(255) NOT NULL,
     phone VARCHAR(50),
-    address_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    address_json JSONB NOT NULL DEFAULT '{}'::jsonb,      -- DEPRECADO (spec 14 §5)
+    fiscal_address JSONB,                                 -- morada de faturação (spec 14 §5)
+    storefront_address JSONB,                             -- morada física; dá elegibilidade ao patrocínio
+    storefront_dicofre VARCHAR(6) REFERENCES geo_dicofre(code), -- freguesia DICOFRE confirmada
+    shipping_scope VARCHAR(16) NOT NULL DEFAULT 'national', -- 'national', 'local_only', 'pickup_only' (spec 14 §1.1)
+    billing_plan_code VARCHAR(32) NOT NULL DEFAULT 'commission_payg', -- spec 14 §4
+    accepted_base_commission_bps INT,                     -- aceite no registo (spec 14 §6)
+    terms_version VARCHAR(32),
+    terms_accepted_at TIMESTAMPTZ,
     geo_lat DOUBLE PRECISION,
     geo_lng DOUBLE PRECISION,
     -- Operação Local (Horários, Férias, Click & Collect)
@@ -156,16 +166,24 @@ CREATE TABLE stores (
     -- Pagamentos Split
     eupago_split_key VARCHAR(255),
     stripe_account_id VARCHAR(255),
-    custom_commission_bps INT,                            -- NULL = herda do tenant
+    custom_commission_bps INT,                            -- NULL por defeito; exceção negociada, só o super_admin a define, auditada (spec 14 §3)
     -- Aprovação e Canal Nacional
     kyc_verified BOOLEAN NOT NULL DEFAULT false,          -- Validação Câmara/DSA
-    publish_to_national_portal BOOLEAN NOT NULL DEFAULT false,
+    publish_to_national_portal BOOLEAN NOT NULL DEFAULT false, -- DEPRECADO: deixa de ser lido; todas as lojas ativas aparecem no canal nacional (spec 14 §1.1)
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(tenant_id, slug)
 );
 CREATE INDEX idx_stores_tenant ON stores(tenant_id);
-CREATE INDEX idx_stores_national ON stores(publish_to_national_portal) WHERE publish_to_national_portal = true;
+CREATE INDEX idx_stores_national ON stores(publish_to_national_portal) WHERE publish_to_national_portal = true; -- legado, sai com a coluna
+
+-- 3b. CANAIS, PATROCÍNIO, GEOGRAFIA E PLANOS (resumo; definição completa na spec 14)
+-- sponsor_entities     : Câmara/Junta/Associação (type, área DICOFRE, logótipo, channel_tenant_id NULL = sem domínio) (§1)
+-- store_sponsorships   : N:N loja <-> entidade; status, valid_from/valid_to, commission_override_bps; EXCLUDE gist anti-sobreposição (§2)
+-- geo_dicofre          : referência CAOP/DGT (distrito DD, concelho DDCC, freguesia DDCCFF, caop_version), carga por seed (§5)
+-- platform_settings    : base_commission_bps (800), configurável, auditada (§3)
+-- billing_plan_tiers   : escalões dos planos (plan_code, gmv_from/to_cents, monthly_fee_cents, marginal_commission_bps); só super_admin (§4)
+-- store_verifications  : NIF/documentos (kind, sha256, storage_key privado, status, delete_after) (§6)
 
 -- 4. PRODUTOS (Multi-idioma, Variantes JSONB, Perecíveis e Diretiva Omnibus)
 CREATE TABLE products (
@@ -231,8 +249,16 @@ CREATE TABLE sub_orders (
     tenant_id UUID NOT NULL REFERENCES tenants(id),
     subtotal_cents BIGINT NOT NULL,
     shipping_cents BIGINT NOT NULL DEFAULT 0,
-    commission_bps_applied INT NOT NULL DEFAULT 0,
+    applied_commission_bps INT NOT NULL DEFAULT 0,        -- snapshot (spec 14 §7)
     platform_fee_cents BIGINT NOT NULL DEFAULT 0,
+    -- Snapshot congelado no checkout, nunca recalculado (spec 14 §7)
+    base_commission_bps INT NOT NULL DEFAULT 0,           -- referência (âncora)
+    sponsored_discount_cents BIGINT NOT NULL DEFAULT 0,
+    billing_plan_code VARCHAR(32),
+    store_monthly_gmv_before_cents BIGINT NOT NULL DEFAULT 0,
+    active_sponsor_ids UUID[] NOT NULL DEFAULT '{}',
+    store_dicofre VARCHAR(6),
+    origin_channel_id UUID REFERENCES tenants(id),        -- canal onde foi feita a compra
     store_payout_cents BIGINT NOT NULL,
     delivery_method VARCHAR(30) NOT NULL,                 -- 'click_collect', 'local_courier', 'ctt', 'dpd'
     pickup_slot JSONB,                                    -- Janela horária de levantamento
@@ -245,6 +271,11 @@ CREATE TABLE sub_orders (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_sub_orders_store ON sub_orders(store_id);
+CREATE INDEX idx_sub_orders_sponsors ON sub_orders USING GIN (active_sponsor_ids);
+
+-- Relatórios deduplicados (spec 14 §7): entidade = `active_sponsor_ids @> ARRAY[:entity]`; união de vários = `&&`;
+-- interseção (co-patrocinado por todos) = `@> ARRAY[...]`. Totais calculam-se sobre `sub_orders` únicas, nunca somando
+-- linhas desagregadas por entidade; relatórios das entidades não expõem dados de compradores.
 
 -- 7. LINHAS DA SUB-ENCOMENDA (SNAPSHOT IMUTÁVEL)
 CREATE TABLE sub_order_items (

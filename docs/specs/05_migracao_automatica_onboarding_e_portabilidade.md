@@ -1,5 +1,7 @@
 # 05. Migração Automática de Clientes, Onboarding e Cláusula de Saída
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 **Objetivo:** Remover o maior obstáculo psicológico e operacional tanto para Câmaras com plataformas antigas como para comerciantes sem tempo: a transferência de catálogos sem digitação manual e a garantia de que os dados nunca ficam "presos".
 
 ---
@@ -50,7 +52,14 @@ Para evitar telefonemas de suporte constantes, o painel do comerciante apresenta
 2. **Recebimento (Split):** Botão guiado para criar/ligar subconta Eupago ou Stripe Connect + validação de IBAN.
 3. **Faturação AT & IVA:** Escolher regime (Normal vs. Isento Art. 53.º) e colar chave API do Moloni/InvoiceXpress/Vendus (ou marcar "Emissão Manual" caso não tenha ERP com API).
 4. **Entregas:** Ativar *Click & Collect*, Estafeta Local ou CTT/DPD.
-5. **Catálogo & Canal Nacional:** Importar produtos (Modo A/B/C) e escolher se deseja ativar o interruptor *"Publicar também em `lojaportugal.pt` (Comissão 6,5%)"*.
+5. **Catálogo & Canal Nacional:** Importar produtos (Modo A/B/C). A presença no `lojaportugal.pt` é **obrigatória, sem opt-out**; as restrições de entrega controlam-se por `shipping_scope` (`national` / `local_only` / `pickup_only`), não escondem a loja (ver spec 14 §1.1).
+
+### 4.1 Fluxo de registo da loja (ver spec 14 §5–§6)
+1. **Morada física** (`storefront_address`): o código postal sugere o concelho e as freguesias possíveis; o lojista **confirma a freguesia** (`storefront_dicofre`).
+2. **Deteção de patrocinadores** pela freguesia confirmada: mostra `~~8%~~ 0%` com os logótipos das entidades parceiras e avisa que a isenção depende de validação e que, se cessar, se aplica a comissão padrão do plano escolhido.
+3. **Escolha do plano:** `commission_payg` (por defeito) ou `tiered_subscription` (spec 14 §4).
+4. **NIF e documentos por tipo** (módulo 11): empresa (`5…`) com código da Certidão Permanente; ENI (`1`, `2`, `3`) com Declaração de Atividade ou Comprovativo de Domicílio Fiscal; outros prefixos em revisão manual. Ficheiros em armazenamento privado, apagados até 30 dias após a decisão (spec 14 §6).
+5. **Aceitação contratual** (`accepted_base_commission_bps`, `terms_version`, `terms_accepted_at`) gravada na mesma transação do registo e auditada.
 
 ---
 

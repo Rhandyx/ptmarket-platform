@@ -1,5 +1,7 @@
 # 11. Escala ("pronto para ser um Amazon") e Padrões de Qualidade
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 **Estado:** aprovado pelo owner em 25/11/2026. **Prevalece sobre a spec 02** nos pontos marcados abaixo.
 **Princípio:** decidir já o que é barato agora e caro depois de haver dados; adiar o que só custa quando se escala.
 
@@ -27,6 +29,7 @@
 | D8 | `currency CHAR(3) NOT NULL DEFAULT 'EUR'` em `orders`, `sub_orders`, `refunds`. | Custo zero agora; evita migração se houver outra moeda. |
 | D9 | **Pesquisa atrás de `SearchBackend`** (trait, como `StorageBackend`): `PostgresSearch` (FTS + trigram) agora; `Meilisearch`/`OpenSearch` mais tarde, alimentado pelo outbox. | Trocar o motor de pesquisa sem tocar no resto. |
 | D10 | Tabelas que crescem sem parar (`orders`, `outbox_events`, `product_price_history`, `admin_audit_logs`) com índice por `created_at`; **particionamento por mês só quando medido** (> ~50 M linhas). | Preparado, não pago antes do tempo. |
+| D11 | **Snapshot de comissão/patrocínio em `sub_orders`** (`base_commission_bps`, `applied_commission_bps`, `sponsored_discount_cents`, `billing_plan_code`, `store_monthly_gmv_before_cents`, `store_dicofre`, `origin_channel_id`) + **`active_sponsor_ids UUID[]` com índice GIN**; relatórios sobre `sub_orders` únicas (spec 14 §7). Escalões em `billing_plan_tiers`, nunca hardcoded. | Relatórios sem dupla contagem com co-patrocínio; histórico imutável; escalões editáveis sem deploy. |
 
 Índices compostos começam sempre por `tenant_id` (exceto tabelas globais: `customers`, `catalog_items`).
 

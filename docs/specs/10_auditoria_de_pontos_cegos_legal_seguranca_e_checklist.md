@@ -1,5 +1,7 @@
 # 10. Auditoria de Pontos Cegos: Tudo o que Faltava Prever (Legal, Técnico e Operacional)
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 > **Revisto em 25/11/2026:** TLS e domínios das Câmaras passam para a **spec 12 §1** (Cloudflare for SaaS); a segurança técnica detalhada está na **spec 12 §3** (ASVS).
 
 **Objetivo:** Antecipar problemas jurídicos, fiscais, operacionais e de engenharia que normalmente só aparecem depois de o sistema estar em produção ou durante a assinatura do primeiro contrato com uma Câmara Municipal.
@@ -16,6 +18,12 @@
 | **4. Digital Services Act (DSA — UE)** | Marketplaces online são obrigados a validar a identidade comercial do vendedor (KYC: denominação social, NIF, morada, contacto) e disponibilizar um botão de *"Denunciar conteúdo/produto ilegal"*. | Campos `legal_name`, `nif`, `kyc_verified` na tabela `stores` + formulário simples de denúncia no rodapé da ficha de produto. |
 | **5. Livro de Reclamações Eletrónico e RAL (DL 74/2017)** | Obrigatório no rodapé de qualquer loja online em Portugal, juntamente com a indicação da entidade de Resolução Alternativa de Litígios (ex: CNIACC / CICAP). | Campos configuráveis em `tenants.legal_config` exibidos automaticamente no rodapé de todos os portais. |
 | **6. Direito de Livre Resolução (14 Dias — DL 24/2014) vs. Perecíveis** | O cliente tem 14 dias para devolver compras online, **exceto** bens perecíveis (padaria, talho, flores) ou personalizados. | Flag `is_perishable` nos produtos bloqueia devolução automática pós-entrega e exibe o aviso legal claro antes do pagamento no checkout. |
+
+### 1.1 Acrescentos de 26/11/2026 (ver spec 14 §6 e §7)
+- **RGPD dos documentos de verificação das lojas:** minimização (só o documento necessário ao tipo de NIF), guardados em armazenamento privado, eliminados até 30 dias depois da decisão (ficam só o `sha256` e os metadados). Base legal: **execução de contrato e diligência** (ver spec 14 §6).
+- **Termos contratuais versionados:** em `stores`, `terms_version`, `terms_accepted_at` e `accepted_base_commission_bps`, gravados na mesma transação do registo e auditados.
+- **Regulamento (UE) 2019/1150 (P2B):** qualquer alteração aos termos, incluindo comissões e escalões, é notificada aos lojistas com **pelo menos 15 dias de antecedência**. Os termos aceites têm de dizer com clareza que o fim de um patrocínio implica a passagem à comissão do plano.
+- **Relatórios às autarquias:** sem dados pessoais dos compradores, só agregados por loja, data, canal e DICOFRE (ver spec 14 §7).
 
 ---
 

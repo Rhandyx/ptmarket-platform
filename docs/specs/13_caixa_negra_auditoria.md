@@ -1,5 +1,7 @@
 # 13. Caixa negra: auditoria de tudo o que acontece na plataforma
 
+> Atualizada a 26/11/2026: canais, patrocínio, comissões e planos seguem a spec 14 (prevalece).
+
 > Pedido do owner (25/11/2026). Prevalece sobre a spec 07 §3.4 e a 12 §3, que só cobriam ações de admin: `admin_audit_logs` passa a ser a categoria `admin` desta tabela única.
 
 ## 0. Princípio (owner): "mega auditoria", logs de tudo na base de dados
@@ -39,7 +41,7 @@
 - **Ninguém está acima da auditoria (superadmin incluído):**
   - não existe papel, flag ou endpoint para desligar, filtrar ou editar a auditoria;
   - as ações de superadmin e os eventos críticos são exportados para o WORM quase em tempo real (minutos, não só a raiz diária);
-  - **alertas imediatos no Telegram e no Discord** só para eventos críticos: mudança de IBAN, falhas de pagamento e de faturação, login de superadmin e falha do `verify-audit`. A lista vive numa função da caixa negra; o sinal vem da tabela `audit.audit_alerts` e não do outbox (decisão do owner, 26/11/2026);
+  - **alertas imediatos no Telegram e no Discord** só para eventos críticos: mudança de IBAN, falhas de pagamento e de faturação, login de superadmin e falha do `verify-audit`, e ainda a mudança de `base_commission_bps`, dos escalões (`billing_plan_tiers`), de `custom_commission_bps` e a revogação de patrocínio (ver spec 14 §9). A lista vive numa função da caixa negra; o sinal vem da tabela `audit.audit_alerts` e não do outbox (decisão do owner, 26/11/2026);
   - **timeline no Super-Admin:** vista filtrável por tenant, loja, utilizador e encomenda, com antes/depois e o estado da cadeia; a própria consulta é auditada (leitura de admin, síncrona) (decisão do owner, 26/11/2026);
   - mexer na retenção ou nos papéis de auditoria exige duas pessoas (2 superadmins com 2FA), e esse próprio ato é auditado.
 
@@ -52,6 +54,13 @@
 - `changes` JSONB: diff antes/depois, só dos campos alterados e já mascarado;
 - `request_id`, `ip` (INET), `user_agent_hash`, `created_at`;
 - `prev_hash`, `hash` (BYTEA).
+
+### 2.1 Eventos de canais, patrocínio e comissões (spec 14 §9)
+- `sponsorship.requested` / `approved` / `rejected` / `revoked` / `expired`.
+- `platform_settings.update`, `billing_plan_tiers.*`.
+- `store.commission_override`, `store.billing_plan_changed`.
+- `store_verification.url_issued` / `approved` / `rejected` / `file_deleted`.
+- **Kinds críticos** (alerta imediato): mudança de `base_commission_bps`, dos escalões, de `custom_commission_bps` e revogação de patrocínio.
 
 ## 3. Garantias
 1. **Na mesma transação** que a alteração de negócio, como o outbox. Em Rust as mutações recebem um `AuditCtx` obrigatório (ator, ip, request_id) vindo do extractor; sem `AuditCtx` não compila. Os workers Go usam `actor_type = 'system'`.
