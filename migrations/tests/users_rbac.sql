@@ -399,13 +399,14 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
        WHERE p.oid = 'identity_user_credentials(text)'::regprocedure AND a.grantee = 0$q$,
     0, 'lookup sem EXECUTE para PUBLIC');
--- Proibida função que liste utilizadores: ptmarket_identity só é dono dos dois lookups (0 ou 1 linha cada).
+-- Proibida função que liste utilizadores: ptmarket_identity só é dono dos lookups (0 ou 1 linha cada).
+-- 14: lookups de sessão e passkey
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM pg_proc
-       WHERE proowner = 'ptmarket_identity'::regrole
-         AND oid NOT IN ('identity_customer_credentials(text)'::regprocedure,
-                         'identity_user_credentials(text)'::regprocedure)$q$,
-    0, 'ptmarket_identity não é dono de mais nenhuma função');
+    $q$SELECT count(*) FROM (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) AS fns
+                             FROM pg_proc p WHERE p.proowner = 'ptmarket_identity'::regrole) s
+       WHERE s.fns = ARRAY['identity_customer_credentials(text)', 'identity_passkey_lookup(bytea)',
+                           'identity_session_lookup(bytea)', 'identity_user_credentials(text)']$q$,
+    1, 'ptmarket_identity não é dono de mais nenhuma função (allowlist exata de 4)');
 
 -- ---------------------------------------------------------------------------
 -- 5. Caixa negra: o UPDATE de password_hash / totp_secret_enc deixou evento com o ator, sem os valores.
