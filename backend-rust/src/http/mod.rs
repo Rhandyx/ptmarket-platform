@@ -12,7 +12,7 @@ use axum::{
     Extension, Router,
     body::Body,
     http::{HeaderName, Request, StatusCode},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use tower::ServiceBuilder;
 use tower_http::{
@@ -101,7 +101,27 @@ pub fn api(
         )
         // Backoffice (cartão 02/19): login de staff e dados do próprio.
         .route("/api/v1/staff/auth/login", post(identity::staff::login))
-        .route("/api/v1/staff/me", get(identity::staff::me));
+        .route("/api/v1/staff/me", get(identity::staff::me))
+        // 2FA TOTP (cartão 02/20): antes do 2FA (`RequireStaffPreMfa`) + CSRF.
+        .route(
+            "/api/v1/staff/mfa/totp/enroll",
+            post(identity::totp::enroll),
+        )
+        .route(
+            "/api/v1/staff/mfa/totp/confirm",
+            post(identity::totp::confirm),
+        )
+        .route("/api/v1/staff/mfa/verify", post(identity::totp::verify));
+    // Consola de plataforma: o gate (`RequireSuperAdmin`) vale para o grupo INTEIRO (`.layer`),
+    // incluindo os caminhos desconhecidos: qualquer caminho sob `/api/v1/superadmin` dá o mesmo 404
+    // + `superadmin_gate`, exista ou não. O "fallback" é uma rota catch-all (e não `.fallback`):
+    // as layers de fora (host, sessão, caixa negra, CSRF) são `route_layer` e só cobrem rotas.
+    let superadmin = Router::new()
+        .route("/whoami", get(identity::rbac::superadmin_whoami))
+        .route("/", any(identity::rbac::superadmin_not_found))
+        .route("/{*rest}", any(identity::rbac::superadmin_not_found))
+        .layer(axum::middleware::from_fn(identity::rbac::superadmin_gate));
+    let read_sync = read_sync.nest("/api/v1/superadmin", superadmin);
     // Rotas de prova dos extractores de RBAC: só existem com a feature `test-support` (testes).
     #[cfg(feature = "test-support")]
     let read_sync = read_sync

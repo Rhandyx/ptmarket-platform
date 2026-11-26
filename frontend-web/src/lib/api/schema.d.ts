@@ -133,6 +133,87 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/staff/mfa/totp/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirma a ativação com um código TOTP: `totp_enabled = true`, 10 códigos de recuperação novos
+         *     Confirma a ativação com um código TOTP: `totp_enabled = true`, 10 códigos de recuperação novos
+         *     (os anteriores são apagados; mostrados UMA vez) e a sessão rodada já com o 2FA feito.
+         */
+        post: operations["confirm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/mfa/totp/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inicia a ativação do TOTP: segredo novo (20 bytes), gravado cifrado com `totp_enabled = false`.
+         *     Só enquanto o TOTP não estiver ativo (senão 409).
+         */
+        post: operations["enroll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/mfa/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Faz o 2FA da sessão com um código TOTP ou um código de recuperação (uso único): a sessão é
+         *     rodada e fica com `mfa_verified_at`.
+         */
+        post: operations["verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/superadmin/whoami": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Quem é o `super_admin` da sessão (leitura síncrona na caixa negra; alerta
+         *     `audit.superadmin_action`).
+         */
+        get: operations["superadmin_whoami"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenant": {
         parameters: {
             query?: never;
@@ -230,6 +311,10 @@ export interface components {
              */
             turnstile_token?: string | null;
         };
+        /** @description Código TOTP (6 dígitos) ou, no `verify`, código de recuperação (10 caracteres). */
+        MfaCodeRequest: {
+            code: string;
+        };
         /**
          * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
          *     Email e password ficam fora (exigem reautenticação).
@@ -313,6 +398,12 @@ export interface components {
         Status: {
             status: string;
         };
+        /** @description Identidade do `super_admin` (prova do gate). */
+        SuperAdminWhoami: {
+            full_name: string;
+            /** Format: uuid */
+            id: string;
+        };
         /**
          * @description `tenants.template_layout`.
          * @enum {string}
@@ -335,6 +426,15 @@ export interface components {
          * @enum {string}
          */
         TenantType: "municipal" | "national_portal" | "niche";
+        /** @description TOTP ativo: códigos de recuperação mostrados UMA vez (guardar fora da app). */
+        TotpConfirmResponse: {
+            recovery_codes: string[];
+        };
+        /** @description Início da ativação do TOTP: mostrar o QR (`otpauth_uri`) ou o segredo para escrever à mão. */
+        TotpEnrollResponse: {
+            otpauth_uri: string;
+            secret_base32: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -724,6 +824,248 @@ export interface operations {
                 content?: never;
             };
             /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    confirm: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MfaCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description TOTP ativo; sessão nova (Set-Cookie) com o 2FA feito; códigos de recuperação mostrados só agora */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpConfirmResponse"];
+                };
+            };
+            /** @description Sem sessão de backoffice, ou código errado/repetido */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description TOTP já ativo ou ativação não iniciada */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas falhas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    enroll: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Segredo novo (mostrado só agora); confirmar com `/confirm` */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpEnrollResponse"];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description O TOTP já está ativo */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    verify: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MfaCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description 2FA feito; sessão nova (Set-Cookie) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice, ou código errado/repetido/já usado */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description O TOTP não está ativo (ativar primeiro) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas falhas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    superadmin_whoami: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description super_admin com 2FA feito neste host */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuperAdminWhoami"];
+                };
+            };
+            /** @description Não encontrado (qualquer falha de acesso à consola) */
             404: {
                 headers: {
                     [name: string]: unknown;

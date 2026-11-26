@@ -232,6 +232,19 @@ dec(KEYS[2])
 return 1
 "#;
 
+/// Põe as falhas da conta no limiar do captcha (nunca baixa um valor maior) com o TTL da janela
+/// de falhas: a próxima tentativa (que soma 1 em `begin`) já exige captcha.
+const FORCE_CAPTCHA_SCRIPT: &str = r#"
+local v = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+local t = tonumber(ARGV[1])
+if v < t then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+else
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 1
+"#;
+
 fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1)
 }
@@ -319,6 +332,23 @@ async fn undo(pool: &deadpool_redis::Pool, k: &Keys, clear_account: bool) {
     if let Err(e) = query::<i64>(pool, cmd).await {
         tracing::warn!(error = ?e, "login: contadores de falhas não corrigidos (Redis)");
     }
+}
+
+/// Exige captcha no próximo login da conta de `k` (ex.: sessão revogada por falhas de 2FA,
+/// cartão 02/20): `fail:acct` sobe ao limiar (`captcha_after`), com TTL `fail_ttl`; atómico. Não
+/// mexe no IP nem bloqueia (expira sozinho; um login certo com captcha limpa-o).
+pub async fn force_captcha(
+    pool: &deadpool_redis::Pool,
+    k: &Keys,
+    l: &Limits,
+) -> Result<(), AppError> {
+    let mut cmd = redis::cmd("EVAL");
+    cmd.arg(FORCE_CAPTCHA_SCRIPT)
+        .arg(1)
+        .arg(&k.fail_acct)
+        .arg(l.captcha_after)
+        .arg(ms(l.fail_ttl));
+    query::<i64>(pool, cmd).await.map(|_| ())
 }
 
 /// Sucesso: apaga as falhas da conta e desconta esta tentativa no IP.

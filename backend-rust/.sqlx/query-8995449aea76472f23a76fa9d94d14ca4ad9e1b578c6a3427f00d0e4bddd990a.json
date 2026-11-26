@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM user_recovery_codes\n         WHERE user_id = $1 AND code_hash = ANY($2) AND used_at IS NULL\n         LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "user_recovery_codes",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "ByteaArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8995449aea76472f23a76fa9d94d14ca4ad9e1b578c6a3427f00d0e4bddd990a"
+}

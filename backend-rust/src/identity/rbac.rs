@@ -11,7 +11,10 @@
 //! - Recusas: sem sessão `user` → 401; papel em falta → 403 + `Denied("rbac")`; 2FA em falta →
 //!   403 com `Denied("mfa_required")`; loja de outro tenant ou sem papel nela → 404 + `Denied("idor")`
 //!   (não revela que existe). Todas ficam na caixa negra (middleware).
-//! - `RequireSuperAdmin` é do cartão 20 (com 2FA): não criar aqui atalho nenhum.
+//! - `RequireSuperAdmin` (cartão 20): host = `PLATFORM_ADMIN_HOST` E `super_admin` E `totp_enabled`
+//!   E sessão com `mfa_verified_at`; qualquer falha → 404 + `Denied("superadmin_gate")` (a consola
+//!   não se anuncia). Aplicado ao grupo `/api/v1/superadmin/*` inteiro por `superadmin_gate`
+//!   (route_layer); os handlers leem `Extension<RequireSuperAdmin>` (sem ela → 500, falha fechado).
 //!
 //! REGRA (spec 07 §1): `tenant_admin` NUNCA recebe `iban`, `invoicing_credentials_enc`,
 //! `eupago_split_key` nem `stripe_account_id` de uma loja. Os handlers que mostram lojas a um
@@ -20,9 +23,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension,
-    extract::{FromRequestParts, Path},
+    Extension, Json,
+    extract::{FromRequestParts, Path, Request, State},
     http::request::Parts,
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -33,9 +37,10 @@ use uuid::Uuid;
 use crate::{
     audit::{Actor, ActorType, AuditCtx, Denied},
     error::AppError,
-    identity::http::{SessionInfo, Sessions},
+    identity::http::{SessionInfo, Sessions, no_store},
+    state::AppState,
     tenancy::{
-        TenantId, begin_tenant_tx,
+        ResolvedHost, TenantId, begin_tenant_tx,
         db::{begin_platform_tx, db_error},
     },
 };
@@ -46,6 +51,8 @@ pub const DENIED_RBAC: Denied = Denied("rbac");
 pub const DENIED_MFA: Denied = Denied("mfa_required");
 /// Recurso de outro tenant/loja (resposta 404).
 pub const DENIED_IDOR: Denied = Denied("idor");
+/// Consola de plataforma fechada (resposta 404).
+pub const DENIED_SUPERADMIN: Denied = Denied("superadmin_gate");
 
 /// Papel de backoffice (`user_roles.role`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -478,6 +485,99 @@ impl<S: Send + Sync> FromRequestParts<S> for RequireStoreOwner {
             None => Err(denied(DENIED_IDOR, AppError::NotFound)),
         }
     }
+}
+
+/// `super_admin` no `PLATFORM_ADMIN_HOST`, com TOTP ativo e a sessão elevada por 2FA. Qualquer
+/// falha (anónimo incluído) → 404 + `Denied("superadmin_gate")`.
+#[derive(Debug, Clone, Copy)]
+pub struct RequireSuperAdmin {
+    pub user_id: Uuid,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for RequireSuperAdmin {
+    type Rejection = RbacRejection;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let gate = || denied(DENIED_SUPERADMIN, AppError::NotFound);
+        if !matches!(
+            parts.extensions.get::<ResolvedHost>(),
+            Some(ResolvedHost::Platform)
+        ) {
+            return Err(gate());
+        }
+        let (roles, info) = staff_parts(parts, Mfa::NotYet).map_err(|_| gate())?;
+        let ok = info.tenant().is_none()
+            && roles.host.is_none()
+            && roles.has_here(Role::SuperAdmin)
+            && roles.totp_enabled
+            && info.mfa_verified_at.is_some();
+        if !ok {
+            return Err(gate());
+        }
+        Ok(Self {
+            user_id: roles.user_id(),
+        })
+    }
+}
+
+/// Layer (`route_layer` do grupo `/api/v1/superadmin/*`, por dentro da caixa negra): corre
+/// `RequireSuperAdmin` e põe-no nas extensões do pedido; recusa → 404 + `superadmin_gate`.
+pub async fn superadmin_gate(req: Request, next: Next) -> Response {
+    let (mut parts, body) = req.into_parts();
+    match RequireSuperAdmin::from_request_parts(&mut parts, &()).await {
+        Ok(sa) => {
+            parts.extensions.insert(sa);
+            next.run(Request::from_parts(parts, body)).await
+        }
+        Err(rej) => rej.into_response(),
+    }
+}
+
+/// Catch-all do grupo `/api/v1/superadmin/*` (caminho desconhecido, já depois do gate): o mesmo 404
+/// e o mesmo `superadmin_gate` de uma recusa (não revela que rotas existem).
+pub async fn superadmin_not_found() -> Response {
+    denied(DENIED_SUPERADMIN, AppError::NotFound).into_response()
+}
+
+/// Identidade do `super_admin` (prova do gate).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SuperAdminWhoami {
+    #[schema(value_type = String, format = "uuid")]
+    pub id: Uuid,
+    pub full_name: String,
+}
+
+/// Quem é o `super_admin` da sessão (leitura síncrona na caixa negra; alerta
+/// `audit.superadmin_action`).
+#[utoipa::path(
+    get,
+    path = "/api/v1/superadmin/whoami",
+    tag = "superadmin",
+    responses(
+        (status = 200, description = "super_admin com 2FA feito neste host", body = SuperAdminWhoami),
+        (status = 404, description = "Não encontrado (qualquer falha de acesso à consola)"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn superadmin_whoami(
+    State(st): State<AppState>,
+    Extension(sa): Extension<RequireSuperAdmin>,
+    ctx: AuditCtx,
+) -> Result<Response, AppError> {
+    let mut tx = begin_platform_tx(&st.db_primary, &ctx).await?;
+    let full_name = sqlx::query_scalar!("SELECT full_name FROM users WHERE id = $1", sa.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.rollback().await?;
+    let Some(full_name) = full_name else {
+        return Err(AppError::NotFound);
+    };
+    let body = SuperAdminWhoami {
+        id: sa.user_id,
+        full_name,
+    };
+    Ok(no_store(Json(body).into_response()))
 }
 
 /// Loja vista por um `tenant_admin`: SEM `iban`, `invoicing_credentials_enc`, `eupago_split_key` e

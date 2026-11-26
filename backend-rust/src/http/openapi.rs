@@ -17,7 +17,11 @@ use crate::{http::health, identity, tenancy};
         identity::customers::get_me,
         identity::customers::patch_me,
         identity::staff::login,
-        identity::staff::me
+        identity::staff::me,
+        identity::totp::enroll,
+        identity::totp::confirm,
+        identity::totp::verify,
+        identity::rbac::superadmin_whoami
     ),
     info(title = "PT Market API", version = "0.1.0")
 )]

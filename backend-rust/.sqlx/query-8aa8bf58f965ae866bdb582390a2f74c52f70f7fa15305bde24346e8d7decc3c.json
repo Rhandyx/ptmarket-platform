@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT totp_secret_enc, totp_enabled FROM users WHERE id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "totp_secret_enc",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "totp_secret_enc"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "totp_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "totp_enabled"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "8aa8bf58f965ae866bdb582390a2f74c52f70f7fa15305bde24346e8d7decc3c"
+}

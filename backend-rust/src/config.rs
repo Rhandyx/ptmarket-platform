@@ -21,6 +21,9 @@ pub const MIN_ACCOUNT_HASH_KEY_BYTES: usize = 32;
 /// variável. Em staging/production a variável é obrigatória (`check_strict`).
 const DEV_ACCOUNT_HASH_KEY: &str =
     "2c1b5f0e7f3e4c9a8d6b1f2e3a4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e";
+/// Rótulo PÚBLICO de onde se deriva (sha256) a `TOTP_ENC_KEY` de development/test sem a variável.
+/// Em staging/production a variável é obrigatória (`check_strict`).
+const DEV_TOTP_ENC_KEY_LABEL: &str = "ptmarket:dev-only:TOTP_ENC_KEY:v1";
 
 /// Erro de configuração legível; nunca contém valores de segredos.
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +101,15 @@ pub struct Config {
     /// Mudá-la desliga os eventos antigos dos novos e reinicia os contadores do login. Obrigatória
     /// em staging/production; em development/test, ausente → chave fixa de dev (com aviso).
     pub account_hash_key: Option<SecretString>,
+    /// `TOTP_ENC_KEY` (32 bytes em base64 padrão; ex.: `openssl rand -base64 32`): chave AES-256-GCM
+    /// dos segredos TOTP em repouso (cartão 02/20). Mudá-la torna ilegíveis os TOTP já ativos.
+    /// Obrigatória em staging/production; em development/test, ausente → chave fixa derivada de um
+    /// rótulo público (com aviso).
+    pub totp_enc_key: Option<SecretString>,
+    /// `TOTP_ENC_KEYS_OLD` (opcional; chaves antigas em base64, separadas por vírgula): SÓ decifram
+    /// segredos gravados antes de uma rotação da `TOTP_ENC_KEY` (e verificam códigos de recuperação
+    /// antigos). Cada uma validada como a `TOTP_ENC_KEY`.
+    pub totp_enc_keys_old: Vec<SecretString>,
 }
 
 fn platform_host(raw: Option<String>) -> Result<Option<String>, ConfigError> {
@@ -167,6 +179,45 @@ fn account_hash_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigE
     Ok(Some(key))
 }
 
+const TOTP_ENC_KEY: &str = "TOTP_ENC_KEY";
+
+fn totp_enc_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
+    let Some(v) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let key = SecretString::from(v);
+    if crate::identity::crypto::decode_key(key.expose_secret()).is_err() {
+        return Err(ConfigError::Invalid(
+            TOTP_ENC_KEY,
+            "esperados 32 bytes em base64 padrão (openssl rand -base64 32)",
+        ));
+    }
+    Ok(Some(key))
+}
+
+const TOTP_ENC_KEYS_OLD: &str = "TOTP_ENC_KEYS_OLD";
+
+fn totp_enc_keys_old(raw: Option<String>) -> Result<Vec<SecretString>, ConfigError> {
+    let Some(v) = raw.filter(|v| !v.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let v = SecretString::from(v);
+    v.expose_secret()
+        .split(',')
+        .map(|k| {
+            let k = k.trim();
+            crate::identity::crypto::decode_key(k)
+                .map(|_| SecretString::from(k.to_owned()))
+                .map_err(|_| {
+                    ConfigError::Invalid(
+                        TOTP_ENC_KEYS_OLD,
+                        "cada chave: 32 bytes em base64 padrão, separadas por vírgula",
+                    )
+                })
+        })
+        .collect()
+}
+
 fn turnstile_secret(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
     let Some(v) = raw.filter(|v| !v.is_empty()) else {
         return Ok(None);
@@ -219,6 +270,14 @@ fn secret(
     Ok(SecretString::from(v))
 }
 
+/// Chave de dev: base64(sha256(rótulo público)). Nunca usada em staging/production.
+fn dev_totp_enc_key() -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    base64::engine::general_purpose::STANDARD
+        .encode(sha2::Sha256::digest(DEV_TOTP_ENC_KEY_LABEL.as_bytes()))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|k| std::env::var(k).ok())
@@ -251,6 +310,21 @@ impl Config {
         }
     }
 
+    /// `TOTP_ENC_KEY` (base64 de 32 bytes). Em staging/production é garantida pelo arranque; em
+    /// development/test, ausente → chave fixa derivada de um rótulo público e um aviso no log.
+    pub fn totp_enc_key(&self) -> SecretString {
+        match &self.totp_enc_key {
+            Some(k) => k.clone(),
+            None => {
+                tracing::warn!(
+                    app_env = ?self.app_env,
+                    "TOTP_ENC_KEY ausente: a usar a chave fixa de desenvolvimento (nunca em produção)"
+                );
+                SecretString::from(dev_totp_enc_key())
+            }
+        }
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let app_env = AppEnv::parse(get("APP_ENV"))?;
         let pg = ["postgres://", "postgresql://"];
@@ -271,6 +345,8 @@ impl Config {
             csrf_key: csrf_key(get("CSRF_KEY"))?,
             turnstile_secret: turnstile_secret(get(TURNSTILE_SECRET))?,
             account_hash_key: account_hash_key(get(ACCOUNT_HASH_KEY))?,
+            totp_enc_key: totp_enc_key(get(TOTP_ENC_KEY))?,
+            totp_enc_keys_old: totp_enc_keys_old(get(TOTP_ENC_KEYS_OLD))?,
         };
         if app_env.is_strict() {
             cfg.check_strict()?;
@@ -307,6 +383,12 @@ impl Config {
         if self.account_hash_key.is_none() {
             return Err(ConfigError::Invalid(
                 ACCOUNT_HASH_KEY,
+                "obrigatória em staging/production",
+            ));
+        }
+        if self.totp_enc_key.is_none() {
+            return Err(ConfigError::Invalid(
+                TOTP_ENC_KEY,
                 "obrigatória em staging/production",
             ));
         }
@@ -463,6 +545,51 @@ mod tests {
     }
 
     #[test]
+    fn totp_enc_key_validated_dev_fallback_and_hidden() {
+        let v = OK.to_vec();
+        let c = Config::from_lookup(env(&v));
+        assert!(c.as_ref().is_ok_and(|c| c.totp_enc_key.is_none()));
+        let dev = c.map(|c| c.totp_enc_key().expose_secret().to_owned());
+        assert!(
+            dev.as_deref()
+                .is_ok_and(|k| crate::identity::crypto::decode_key(k).is_ok())
+        );
+        assert!(dev.is_ok_and(|k| k == dev_totp_enc_key()));
+        // 31 e 33 bytes, não-base64, espaços: recusadas sem mostrar o valor.
+        for bad in [
+            "c2VncmVkby1kZS0zMS1ieXRlcy1hcGVuYXMtLS0tLQ==",
+            "c2VncmVkby1kZS0zMy1ieXRlcy1hLW1haXMtLS0tLS0t 33",
+            "segredo-sem-base64!!",
+            " dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=",
+        ] {
+            let mut v = OK.to_vec();
+            v.push(("TOTP_ENC_KEY", bad));
+            let e = err_of(&v);
+            assert!(
+                e.as_deref()
+                    .is_some_and(|s| s.contains("TOTP_ENC_KEY") && !s.contains("segredo")),
+                "{bad}: {e:?}"
+            );
+        }
+        let good = "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=";
+        // Antigas: opcionais, separadas por vírgula, cada uma validada.
+        let mut v = OK.to_vec();
+        v.push(("TOTP_ENC_KEYS_OLD", "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=, dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s="));
+        assert!(Config::from_lookup(env(&v)).is_ok_and(|c| c.totp_enc_keys_old.len() == 2));
+        let mut v = OK.to_vec();
+        v.push(("TOTP_ENC_KEYS_OLD", "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=,segredo-mau"));
+        assert!(err_of(&v).is_some_and(|s| s.contains("TOTP_ENC_KEYS_OLD") && !s.contains("segredo")));
+        let mut v = OK.to_vec();
+        v.push(("TOTP_ENC_KEY", good));
+        let c = Config::from_lookup(env(&v));
+        assert!(
+            c.as_ref()
+                .is_ok_and(|c| c.totp_enc_key().expose_secret() == good)
+        );
+        assert!(c.is_ok_and(|c| !format!("{c:?}").contains(good)));
+    }
+
+    #[test]
     fn csrf_key_required_and_min_32_bytes() {
         let v: Vec<_> = OK
             .iter()
@@ -567,7 +694,7 @@ mod tests {
         }
     }
 
-    const PROD: [(&str, &str); 11] = [
+    const PROD: [(&str, &str); 12] = [
         ("APP_ENV", "production"),
         ("DATABASE_PRIMARY_URL", "postgres://u:segredo1@h/db"),
         ("DATABASE_REPLICA_URL", "postgres://u:segredo1@h/db"),
@@ -582,6 +709,10 @@ mod tests {
         ("TURNSTILE_SECRET", "0x4AAAsegredo-turnstile"),
         ("BIND_ADDR", "0.0.0.0:8080"),
         ("ACCOUNT_HASH_KEY", "chave-conta-segredo-com-32-bytes-ok"),
+        (
+            "TOTP_ENC_KEY",
+            "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=",
+        ),
     ];
 
     fn err_of(v: &[(&str, &str)]) -> Option<String> {
@@ -633,6 +764,7 @@ mod tests {
             "PLATFORM_ADMIN_HOST",
             "TURNSTILE_SECRET",
             "ACCOUNT_HASH_KEY",
+            "TOTP_ENC_KEY",
         ] {
             let v: Vec<_> = PROD.iter().copied().filter(|(k, _)| *k != key).collect();
             let e = err_of(&v);

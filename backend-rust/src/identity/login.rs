@@ -116,6 +116,21 @@ impl Login {
         ))
     }
 
+    /// O próximo login de staff com este email exige captcha (cartão 02/20: sessão revogada por
+    /// falhas de 2FA). Mesmas chaves do travão do login de staff (`ACCOUNT_HASH_KEY`, `staff:`).
+    pub(crate) async fn force_staff_captcha(
+        &self,
+        redis: &deadpool_redis::Pool,
+        ns: &str,
+        raw_email: &str,
+    ) -> Result<(), AppError> {
+        let email = email::normalize(raw_email)?;
+        let h = account_hash(&self.account, &email);
+        let prefix = Accounts::Users.throttle_prefix();
+        let keys = Keys::new(&format!("{ns}{prefix}"), &h, None);
+        throttle::force_captcha(redis, &keys, &self.limits).await
+    }
+
     /// Só para testes: outra verificação de passwords (ex.: um contador à volta do Argon2).
     #[cfg(feature = "test-support")]
     pub fn with_password_check_for_tests(mut self, check: Arc<dyn PasswordCheck>) -> Self {

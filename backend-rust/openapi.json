@@ -319,6 +319,199 @@
         }
       }
     },
+    "/api/v1/staff/mfa/totp/confirm": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Confirma a ativação com um código TOTP: `totp_enabled = true`, 10 códigos de recuperação novos\nConfirma a ativação com um código TOTP: `totp_enabled = true`, 10 códigos de recuperação novos\n(os anteriores são apagados; mostrados UMA vez) e a sessão rodada já com o 2FA feito.",
+        "operationId": "confirm",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "TOTP ativo; sessão nova (Set-Cookie) com o 2FA feito; códigos de recuperação mostrados só agora",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpConfirmResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice, ou código errado/repetido"
+          },
+          "403": {
+            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "409": {
+            "description": "TOTP já ativo ou ativação não iniciada"
+          },
+          "422": {
+            "description": "Dados inválidos"
+          },
+          "429": {
+            "description": "Demasiadas falhas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/mfa/totp/enroll": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Inicia a ativação do TOTP: segredo novo (20 bytes), gravado cifrado com `totp_enabled = false`.\nSó enquanto o TOTP não estiver ativo (senão 409).",
+        "operationId": "enroll",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Segredo novo (mostrado só agora); confirmar com `/confirm`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrollResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "409": {
+            "description": "O TOTP já está ativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/mfa/verify": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Faz o 2FA da sessão com um código TOTP ou um código de recuperação (uso único): a sessão é\nrodada e fica com `mfa_verified_at`.",
+        "operationId": "verify",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "2FA feito; sessão nova (Set-Cookie)"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice, ou código errado/repetido/já usado"
+          },
+          "403": {
+            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "409": {
+            "description": "O TOTP não está ativo (ativar primeiro)"
+          },
+          "422": {
+            "description": "Dados inválidos"
+          },
+          "429": {
+            "description": "Demasiadas falhas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/superadmin/whoami": {
+      "get": {
+        "tags": [
+          "superadmin"
+        ],
+        "summary": "Quem é o `super_admin` da sessão (leitura síncrona na caixa negra; alerta\n`audit.superadmin_action`).",
+        "operationId": "superadmin_whoami",
+        "responses": {
+          "200": {
+            "description": "super_admin com 2FA feito neste host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuperAdminWhoami"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Não encontrado (qualquer falha de acesso à consola)"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/tenant": {
       "get": {
         "tags": [
@@ -510,6 +703,19 @@
               "null"
             ],
             "description": "Token do widget Cloudflare Turnstile; obrigatório quando uma resposta anterior trouxe\n`captcha_required: true` (até 2048 caracteres)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MfaCodeRequest": {
+        "type": "object",
+        "description": "Código TOTP (6 dígitos) ou, no `verify`, código de recuperação (10 caracteres).",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -724,6 +930,23 @@
           }
         }
       },
+      "SuperAdminWhoami": {
+        "type": "object",
+        "description": "Identidade do `super_admin` (prova do gate).",
+        "required": [
+          "id",
+          "full_name"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "TemplateLayout": {
         "type": "string",
         "description": "`tenants.template_layout`.",
@@ -782,6 +1005,37 @@
           "national_portal",
           "niche"
         ]
+      },
+      "TotpConfirmResponse": {
+        "type": "object",
+        "description": "TOTP ativo: códigos de recuperação mostrados UMA vez (guardar fora da app).",
+        "required": [
+          "recovery_codes"
+        ],
+        "properties": {
+          "recovery_codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TotpEnrollResponse": {
+        "type": "object",
+        "description": "Início da ativação do TOTP: mostrar o QR (`otpauth_uri`) ou o segredo para escrever à mão.",
+        "required": [
+          "otpauth_uri",
+          "secret_base32"
+        ],
+        "properties": {
+          "otpauth_uri": {
+            "type": "string"
+          },
+          "secret_base32": {
+            "type": "string"
+          }
+        }
       }
     }
   }

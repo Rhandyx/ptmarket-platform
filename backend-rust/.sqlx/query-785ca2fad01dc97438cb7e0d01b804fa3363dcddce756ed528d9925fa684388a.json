@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE user_recovery_codes FORCE ROW LEVEL SECURITY",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "785ca2fad01dc97438cb7e0d01b804fa3363dcddce756ed528d9925fa684388a"
+}

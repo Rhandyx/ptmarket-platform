@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT code_hash FROM user_recovery_codes WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code_hash",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "user_recovery_codes",
+            "name": "code_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc7917c5166c3aee0fa20eba8daa75e07fd7e3c1280854fa98038510606c61bc"
+}

@@ -34,6 +34,7 @@ use crate::{
         login::Login,
         rbac::{StaffRoles, load_roles},
         session::{self, CookieKind, CookieRead, SessionId, SessionKind, Subject},
+        totp::Totp,
     },
     tenancy::{ResolvedHost, TenantId, begin_tenant_tx, db::begin_platform_tx},
 };
@@ -61,6 +62,8 @@ struct Inner {
     registration: Option<Registration>,
     /// Captcha, verificação de passwords e limites do login (cartão 02/18).
     login: Option<Login>,
+    /// Chave de cifra dos segredos TOTP e limites do 2FA (cartão 02/20).
+    totp: Option<Totp>,
 }
 
 impl Sessions {
@@ -98,6 +101,7 @@ impl Sessions {
                 internal_token: None,
                 registration: None,
                 login: None,
+                totp: None,
             }),
         }
     }
@@ -138,6 +142,20 @@ impl Sessions {
 
     pub(crate) fn login(&self) -> Option<&Login> {
         self.inner.login.as_ref()
+    }
+
+    /// Dependências do 2FA TOTP (`Totp::from_config` em produção). Sem esta chamada as rotas
+    /// `/api/v1/staff/mfa/*` respondem 503 (falha fechado).
+    pub fn with_totp(self, totp: Totp) -> Self {
+        let mut inner = Arc::unwrap_or_clone(self.inner);
+        inner.totp = Some(totp);
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn totp(&self) -> Option<&Totp> {
+        self.inner.totp.as_ref()
     }
 
     /// BD primária (lookup de sessões e papéis; nunca a réplica).

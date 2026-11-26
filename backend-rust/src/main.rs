@@ -4,7 +4,7 @@ use ptmarket_api::{
     config::Config,
     http,
     http::client_ip::TrustedProxies,
-    identity::{Login, Registration, Sessions},
+    identity::{Login, Registration, Sessions, Totp},
     state::AppState,
 };
 
@@ -35,7 +35,9 @@ async fn run() -> anyhow::Result<()> {
     let csrf_key = cfg.require_csrf_key()?;
     let state = AppState::from_config(&cfg)?;
     let mut sessions = Sessions::new(state.db_primary.clone(), state.redis.clone(), csrf_key)
-        .with_internal_token(cfg.internal_proxy_token.clone());
+        .with_internal_token(cfg.internal_proxy_token.clone())
+        // 2FA TOTP (cartão 02/20): TOTP_ENC_KEY obrigatória em staging/production (`Config`).
+        .with_totp(Totp::from_config(&cfg)?);
     // Sem TURNSTILE_SECRET o registo e o login de clientes respondem 503 (falha fechado; nunca sem captcha).
     // Em staging/production `Config` já recusa o arranque sem ela (cartão 02/24b).
     if cfg.turnstile_secret.is_some() {

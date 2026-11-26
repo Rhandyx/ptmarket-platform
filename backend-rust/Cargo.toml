@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "openapi"
 path = "src/bin/openapi.rs"
 
+[[bin]]
+name = "ptmarket-admin"
+path = "src/bin/ptmarket-admin.rs"
+
 [dependencies]
 axum = "=0.8.9"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
@@ -47,6 +51,12 @@ hmac = "=0.13.0"
 rand = "=0.9.5"
 base64 = "=0.22.1"
 unicode-normalization = "=0.1.26"
+# TOTP_ENC_KEY: segredos TOTP cifrados em repouso (AES-256-GCM; cartão 02/20).
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# CLI ptmarket-admin: password lida do terminal sem eco (cartão 02/20).
+rpassword = "=7.5.5"
+# Subchaves da TOTP_ENC_KEY (HKDF-SHA256; cartão 02/20, auditoria L3).
+hkdf = "=0.13.0"
 
 [features]
 # Construtores só para testes (ex.: TenantId::for_tests); ligado apenas pela dev-dependency abaixo,
