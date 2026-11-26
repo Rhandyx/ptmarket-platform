@@ -61,7 +61,8 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
      `SELECT audit_admin.audit_seal();`. Nome inexistente, sha256 diferente ou já aplicada nesta BD → erro e a
      migration é desfeita. O sqlx fixa o checksum da migration e o superuser fixa o texto: os dois têm de bater.
   **Cadeia linear:** cada entrada indica a anterior (`INSERT … (name, requires, sql)`; `requires` NULL só na
-  primeira): `0011_db_user` → `0012_hardening` → `0013_ddl_owner_exec` → `0014_mask_limits`. O bootstrap recusa
+  primeira): `0011_db_user` → `0012_hardening` → `0013_ddl_owner_exec` → `0014_mask_limits` →
+  `0015_critical_timeline`. O bootstrap recusa
   `requires` que não seja uma alteração aprovada ou uma cadeia com ramos; `audit_upgrade` recusa uma alteração cuja
   anterior não esteja em `sealed_changes_applied` nesta BD ("<nome> exige <anterior> aplicada antes").
   `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem
@@ -149,6 +150,21 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
     antes de a função correr (`chr(0)` → 54000, NUL no protocolo → 22021, `\u0000` em jsonb → 22P05). Não há
     verificação no código (seria inatingível); `migrations/tests/audit_mask_limits.sql` prova a recusa nativa
     nos quatro campos e que nada fica gravado.
+- **Eventos críticos e timeline (0015, alteração aprovada `0015_critical_timeline`, cartão 02/09a):**
+  - `audit.critical_kind(action, outcome, actor_type)` (INVOKER, IMMUTABLE, nasce na migration e é selada; EXECUTE
+    só do writer): `iban_change` (prefixos `stores.iban`, `payout_accounts.`, `merchants.iban`, qualquer outcome),
+    `payment_failure` (`payments.`/`refunds.` com `error`, ou `payments.failed`), `invoice_failure` (`invoices.`
+    com `error`, ou `invoices.failed`), `superadmin_login` (`auth.login` com ator `admin`), `verify_failure`
+    (`audit.verify_failed`); NULL = não crítico. Mudar a lista = nova alteração aprovada.
+  - `audit_alerts.kind` (CHECK com a mesma lista; o guard recusa mudá-lo). `_chain_insert` grava um alerta quando o
+    ator é `admin`, há `impersonator_id` ou o kind não é NULL: `event_type` `audit.critical` (com kind) ou
+    `audit.superadmin_action` (kind NULL). Payload = linha já mascarada + hashes em hex; com `iban_change` sai sem
+    `changes` nem `reason` (o IBAN nunca, nem mascarado; o evento na cadeia fica com o IBAN mascarado).
+  - Índices da timeline em `audit.audit_events`: `(store_id, created_at)`, `(actor_id, created_at)` e
+    `((changes->>'order_id'), created_at) WHERE changes ? 'order_id'` (correlação de pagamento/fatura/envio com a
+    encomenda); tenant e `(target_type, target_id, created_at)` já existiam. A consulta da encomenda usa
+    `(target_type = 'order' AND target_id = $1) OR (changes ? 'order_id' AND changes->>'order_id' = $1)` (o
+    `changes ? 'order_id'` tem de estar na consulta para o índice parcial servir).
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

@@ -1357,6 +1357,199 @@ END
 $body$;
 $chg_0014$);
 
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0015_critical_timeline (cartão 02/09a). Disparada por migrations/0015_audit_critical_timeline.sql.
+--   Exige 0014. audit.critical_kind(text, text, text) nasce na migration ANTES do audit_upgrade (INVOKER, selada).
+--   audit_alerts.kind (NULL = não crítico; lista fechada = a de critical_kind); o guard passa a proteger kind.
+--   _chain_insert (o da 0014, com limites, caminho tolerante e máscara por valor) passa a inserir em
+--     audit_alerts quando actor_type = 'admin' OU impersonator_id OU critical_kind(...) não nulo:
+--     event_type 'audit.critical' com kind, ou 'audit.superadmin_action' com kind NULL. Payload = linha já
+--     mascarada + hashes em hex; kind 'iban_change' sem changes nem reason.
+--   Índices da timeline em audit.audit_events: (store_id, created_at), (actor_id, created_at) e
+--     ((changes->>'order_id'), created_at) WHERE changes ? 'order_id'.
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0015_critical_timeline', '0014_mask_limits', $chg_0015$
+ALTER TABLE audit.audit_alerts ADD COLUMN kind text
+    CONSTRAINT audit_alerts_kind_check CHECK (kind IN ('iban_change', 'payment_failure', 'invoice_failure',
+                                                       'superadmin_login', 'verify_failure'));
+
+CREATE OR REPLACE FUNCTION audit.audit_alerts_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+BEGIN
+    IF OLD.published_at IS NOT NULL
+       OR NEW.published_at IS NULL
+       OR (NEW.id, NEW.created_at, NEW.event_type, NEW.kind, NEW.payload)
+          IS DISTINCT FROM (OLD.id, OLD.created_at, OLD.event_type, OLD.kind, OLD.payload) THEN
+        RAISE EXCEPTION 'audit.audit_alerts: só published_at muda, uma vez, de NULL para um valor';
+    END IF;
+    RETURN NEW;
+END
+$body$;
+
+CREATE INDEX audit_events_store_created_idx ON audit.audit_events (store_id, created_at);
+CREATE INDEX audit_events_actor_created_idx ON audit.audit_events (actor_id, created_at);
+CREATE INDEX audit_events_order_created_idx ON audit.audit_events ((changes ->> 'order_id'), created_at)
+    WHERE changes ? 'order_id';
+
+CREATE OR REPLACE FUNCTION audit._chain_insert(p_row audit.audit_events, p_dedupe boolean)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row     audit.audit_events := p_row;
+    v_content bytea;
+    v_found   bigint;
+    v_same    bigint;
+    v_size    bigint;
+    v_deep    boolean;
+    v_over    boolean;
+    v_ctx     text;
+    v_text    text;
+    v_kind    text;
+    v_payload jsonb;
+BEGIN
+    -- Quem está ligado (LOGIN), não o papel assumido: ignora o que vier em p_row.
+    v_row.db_user := session_user;
+
+    -- Limites, medidos ANTES da máscara. NUL nunca chega aqui: o PostgreSQL recusa chr(0) em text e \u0000 em jsonb.
+    v_size := COALESCE(octet_length(v_row.changes::text), 0);
+    v_deep := v_row.changes IS NOT NULL AND jsonb_path_exists(v_row.changes,
+                  'strict $.**{16} ? (@.type() == "object" || @.type() == "array")'::jsonpath);
+    v_over := v_size > 65536 OR v_deep
+              OR COALESCE(char_length(v_row.reason), 0) > 1024
+              OR COALESCE(char_length(v_row.target_id), 0) > 256
+              OR COALESCE(char_length(v_row.actor_label), 0) > 128;
+    IF v_over THEN
+        -- A auditoria nunca faz falhar uma escrita de negócio nem uma migration: 'db', L1 (dentro de um trigger)
+        -- e L2 (event trigger de DDL) seguem e são cortados abaixo. Eventos da aplicação → PTA02, nada gravado.
+        GET DIAGNOSTICS v_ctx = PG_CONTEXT;
+        IF NOT (v_row.actor_type = 'db' OR pg_trigger_depth() > 0
+                OR v_ctx ~ 'PL/pgSQL function audit\.audit_ddl_(end|drop)\(\) line [0-9]+ at PERFORM') THEN
+            IF v_size > 65536 THEN
+                RAISE EXCEPTION '_chain_insert: changes acima de 64 KiB' USING ERRCODE = 'PTA02';
+            END IF;
+            IF v_deep THEN
+                RAISE EXCEPTION '_chain_insert: changes com profundidade acima de 16' USING ERRCODE = 'PTA02';
+            END IF;
+            IF char_length(v_row.reason) > 1024 THEN
+                RAISE EXCEPTION '_chain_insert: reason acima de 1024 caracteres' USING ERRCODE = 'PTA02';
+            END IF;
+            IF char_length(v_row.target_id) > 256 THEN
+                RAISE EXCEPTION '_chain_insert: target_id acima de 256 caracteres' USING ERRCODE = 'PTA02';
+            END IF;
+            RAISE EXCEPTION '_chain_insert: actor_label acima de 128 caracteres' USING ERRCODE = 'PTA02';
+        END IF;
+    END IF;
+
+    -- Máscara em todos os caminhos (app, worker, db); idempotente. reason e actor_label: máscara por valor.
+    v_row.changes     := audit.audit_redact(v_row.target_type::text, v_row.changes);
+    v_row.reason      := audit._redact_text(v_row.reason::text);
+    v_row.actor_label := audit._redact_text(v_row.actor_label::text);
+
+    -- Só no caminho tolerante (L1/L2/db): cortar e marcar, nunca falhar.
+    IF v_over THEN
+        IF char_length(v_row.target_id) > 256 THEN
+            v_row.target_id := left(v_row.target_id, 180) || '…sha256:'
+                               || encode(sha256(convert_to(v_row.target_id, 'UTF8')), 'hex');
+        END IF;
+        IF char_length(v_row.reason) > 1024 THEN
+            v_row.reason := left(v_row.reason, 1012) || '…[truncated]';
+        END IF;
+        IF char_length(v_row.actor_label) > 128 THEN
+            v_row.actor_label := left(v_row.actor_label, 116) || '…[truncated]';
+        END IF;
+        IF octet_length(v_row.changes::text) > 65536 THEN
+            v_row.changes := audit._truncate_leaves(v_row.changes);
+            v_text := v_row.changes::text;
+            IF octet_length(v_text) > 65536 THEN
+                v_row.changes := jsonb_build_object('truncated', true, 'bytes', octet_length(v_text),
+                                     'sha256', encode(sha256(convert_to(v_text, 'UTF8')), 'hex'));
+            END IF;
+        END IF;
+    END IF;
+
+    v_row.chain_key       := COALESCE(v_row.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid);
+    v_row.retention_class := audit.audit_retention_class(v_row.action::text, v_row.outcome::text);
+
+    INSERT INTO audit.audit_chain_heads (chain_key, retention_class, last_seq, last_hash)
+    VALUES (v_row.chain_key, v_row.retention_class, 0, decode(repeat('00', 32), 'hex'))
+    ON CONFLICT DO NOTHING;
+
+    SELECT h.last_seq + 1, h.last_hash INTO STRICT v_row.chain_seq, v_row.prev_hash
+    FROM audit.audit_chain_heads h
+    WHERE h.chain_key = v_row.chain_key
+      AND h.retention_class = v_row.retention_class
+    FOR UPDATE;
+
+    -- Reentrega (mesmo conteúdo) → NULL; id reutilizado com outro conteúdo → PTA03 (nunca em silêncio).
+    IF p_dedupe THEN
+        v_content := audit._event_content_hash(v_row);
+        SELECT count(*), count(*) FILTER (WHERE audit._event_content_hash(e) = v_content)
+          INTO v_found, v_same
+          FROM audit.audit_events e
+         WHERE e.id = v_row.id
+           AND e.created_at >= v_row.occurred_at - interval '1 day';
+        IF v_same > 0 THEN
+            RETURN NULL;
+        END IF;
+        IF v_found > 0 THEN
+            RAISE EXCEPTION '_chain_insert: id já gravado com conteúdo diferente'
+                USING ERRCODE = 'PTA03';
+        END IF;
+    END IF;
+
+    v_row.created_at  := clock_timestamp();
+    v_row.occurred_at := COALESCE(v_row.occurred_at, v_row.created_at);
+    v_row.id          := COALESCE(v_row.id, uuidv7());
+    v_row.hash        := audit._event_hash(v_row);
+
+    INSERT INTO audit.audit_events (
+        id, tenant_id, chain_key, store_id, actor_type, actor_id, actor_label, impersonator_id,
+        action, target_type, target_id, outcome, reason, changes, request_id, ip, user_agent_hash,
+        retention_class, occurred_at, created_at, chain_seq, prev_hash, hash, db_user
+    ) VALUES (
+        v_row.id, v_row.tenant_id, v_row.chain_key, v_row.store_id, v_row.actor_type, v_row.actor_id,
+        v_row.actor_label, v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id,
+        v_row.outcome, v_row.reason, v_row.changes, v_row.request_id, v_row.ip, v_row.user_agent_hash,
+        v_row.retention_class, v_row.occurred_at, v_row.created_at, v_row.chain_seq, v_row.prev_hash,
+        v_row.hash, v_row.db_user
+    );
+
+    UPDATE audit.audit_chain_heads
+       SET last_seq = v_row.chain_seq, last_hash = v_row.hash
+     WHERE chain_key = v_row.chain_key
+       AND retention_class = v_row.retention_class;
+
+    -- Alerta (export WORM + Telegram/Discord no cartão 09): admin, impersonação ou evento crítico.
+    -- Payload = linha já mascarada; iban_change sem changes nem reason (o IBAN nunca, nem mascarado).
+    v_kind := audit.critical_kind(v_row.action::text, v_row.outcome::text, v_row.actor_type::text);
+    IF v_row.actor_type = 'admin' OR v_row.impersonator_id IS NOT NULL OR v_kind IS NOT NULL THEN
+        v_payload := to_jsonb(v_row) || jsonb_build_object(
+            'prev_hash', encode(v_row.prev_hash, 'hex'),
+            'hash', encode(v_row.hash, 'hex'),
+            'user_agent_hash', encode(v_row.user_agent_hash, 'hex'));
+        IF v_kind = 'iban_change' THEN
+            v_payload := v_payload - ARRAY['changes', 'reason']::text[];
+        END IF;
+        INSERT INTO audit.audit_alerts (id, created_at, event_type, kind, payload)
+        VALUES (
+            v_row.id, v_row.created_at,
+            CASE WHEN v_kind IS NULL THEN 'audit.superadmin_action' ELSE 'audit.critical' END,
+            v_kind, v_payload
+        );
+    END IF;
+
+    RETURN v_row.id;
+END
+$body$;
+$chg_0015$);
+
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
 DECLARE
