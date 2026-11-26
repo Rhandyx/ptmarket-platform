@@ -833,7 +833,10 @@ fn run_cli(env: &[(&str, &str)], email: &str, bad_codes: usize) -> anyhow::Resul
     }
     let mut child = cmd.spawn()?;
     let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("stdout"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stdout"))?;
     stdin.write_all(format!("{PW}\n{PW}\n").as_bytes())?;
     stdin.flush()?;
     let mut reader = BufReader::new(stdout);
@@ -905,23 +908,59 @@ async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) ->
     // 1 código errado e depois o certo: criado com TOTP ativo; 10 códigos mostrados.
     let run = run_cli(&env, "Raiz@X.pt", 1)?;
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("Código errado (2 tentativa(s) restante(s))"), "{}", run.out);
-    let b32 = run.secret_b32.clone().ok_or_else(|| anyhow::anyhow!("sem segredo"))?;
+    assert!(
+        run.out
+            .contains("Código errado (2 tentativa(s) restante(s))"),
+        "{}",
+        run.out
+    );
+    let b32 = run
+        .secret_b32
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("sem segredo"))?;
     let secret = base32_decode(&b32).ok_or_else(|| anyhow::anyhow!("base32"))?;
-    let after = run.out.split("Códigos de recuperação").nth(1).unwrap_or_default();
-    let codes: Vec<&str> = after.lines().skip(1).map(str::trim).filter(|l| l.len() == 10).collect();
+    let after = run
+        .out
+        .split("Códigos de recuperação")
+        .nth(1)
+        .unwrap_or_default();
+    let codes: Vec<&str> = after
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| l.len() == 10)
+        .collect();
     assert_eq!(codes.len(), 10, "{}", run.out);
     assert!(!run.out.contains(PW), "password na saída");
     assert!(run.out.contains("HIBP) está DESLIGADA"), "{}", run.out);
-    assert_eq!(run.out.matches(b32.as_str()).count(), 2, "segredo só no enroll (uri + base32)");
+    assert_eq!(
+        run.out.matches(b32.as_str()).count(),
+        2,
+        "segredo só no enroll (uri + base32)"
+    );
     // 2.ª execução com o mesmo email (outra grafia) → falha; papel da API → recusado.
     let again = run_cli(&env, "raiz@x.pt", 0)?;
-    assert!(!again.ok && again.out.contains("email já existe"), "{}", again.out);
+    assert!(
+        !again.ok && again.out.contains("email já existe"),
+        "{}",
+        again.out
+    );
     let mut app_env = env;
-    app_env[6] = ("ADMIN_DATABASE_URL", "postgres://ptmarket_app@127.0.0.1:1/x");
+    app_env[6] = (
+        "ADMIN_DATABASE_URL",
+        "postgres://ptmarket_app@127.0.0.1:1/x",
+    );
     assert!(!run_cli(&app_env, "outro@x.pt", 0)?.ok);
     let mut c = Command::new(env!("CARGO_BIN_EXE_ptmarket-admin"));
-    c.args(["create-superadmin", "--email", "a@x.pt", "--name", "A", "--password", "x"]);
+    c.args([
+        "create-superadmin",
+        "--email",
+        "a@x.pt",
+        "--name",
+        "A",
+        "--password",
+        "x",
+    ]);
     assert!(!c.output()?.status.success());
 
     // A API continua sem escrever em user_roles.
@@ -944,13 +983,32 @@ async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) ->
 
     // Super_admin do CLI: TOTP ativo mas sessão sem 2FA → 404; verify → 200.
     let p2 = login(&app, PLATFORM, "raiz@x.pt").await?;
-    assert_eq!(get(&app, PLATFORM, WHOAMI, &p2).await?.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get(&app, PLATFORM, WHOAMI, &p2).await?.status,
+        StatusCode::NOT_FOUND
+    );
     let p3 = login(&app, PLATFORM, "raiz@x.pt").await?;
     // O código usado no enroll do CLI ficou marcado: no /verify é `replayed`.
-    let s0 = run.enroll_step.ok_or_else(|| anyhow::anyhow!("sem passo do enroll"))?;
-    let r = post(&app, PLATFORM, VERIFY, &p3, &code_body(&fmt6(code(&secret, s0)))).await?;
+    let s0 = run
+        .enroll_step
+        .ok_or_else(|| anyhow::anyhow!("sem passo do enroll"))?;
+    let r = post(
+        &app,
+        PLATFORM,
+        VERIFY,
+        &p3,
+        &code_body(&fmt6(code(&secret, s0))),
+    )
+    .await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
-    let r = post(&app, PLATFORM, VERIFY, &p3, &code_body(&fmt6(code(&secret, s0 + 1)))).await?;
+    let r = post(
+        &app,
+        PLATFORM,
+        VERIFY,
+        &p3,
+        &code_body(&fmt6(code(&secret, s0 + 1))),
+    )
+    .await?;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
     let p1 = r.cookie()?;
     let r = get(&app, PLATFORM, WHOAMI, &p1).await?;

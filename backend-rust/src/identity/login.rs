@@ -37,6 +37,7 @@ use crate::{
     identity::{
         captcha::{CaptchaVerifier, TurnstileVerifier},
         csrf::RequestHost,
+        elevate::{forget, own_previous, revoke_foreign_session},
         customers::MAX_CAPTCHA_TOKEN_CHARS,
         email,
         http::{CurrentSession, no_store},
@@ -703,7 +704,7 @@ impl Attempt<'_> {
         if let Some(old) = old {
             forget(self.cur, old).await;
         }
-        revoke_foreign_session(self, subject).await;
+        revoke_foreign_session(&self.st.db_primary, self.cur, self.tenant, self.ctx, subject).await;
         throttle::succeeded(self.cur.sessions().redis(), &passed.keys).await;
         tracing::debug!(session = %sid.as_uuid(), "login: sessão criada");
         Ok(value)
@@ -743,82 +744,6 @@ impl Attempt<'_> {
         )
         .await?;
         Ok((sid, value))
-    }
-}
-
-/// Sessão anterior deste browser, se for do mesmo sujeito (revogada na transação do login).
-fn own_previous(cur: &CurrentSession, subject: Subject) -> Option<SessionId> {
-    let actor = cur.actor()?;
-    let same = match subject {
-        Subject::Customer(id) => {
-            actor.actor_type == ActorType::Customer && actor.actor_id == Some(id)
-        }
-        Subject::User(id) => {
-            matches!(
-                actor.actor_type,
-                ActorType::Merchant | ActorType::Municipal | ActorType::Admin
-            ) && actor.actor_id == Some(id)
-        }
-    };
-    same.then(|| cur.info().map(|i| i.id)).flatten()
-}
-
-/// O browser tinha a sessão de OUTRO sujeito: revogada com o ator dela (o do pedido) e
-/// `auth.logout` (`superseded_by_login`) na mesma transação. O cookie já foi substituído; uma
-/// falha aqui só fica no log (a sessão antiga deixa de ter cookie).
-async fn revoke_foreign_session(a: &Attempt<'_>, subject: Subject) {
-    let (Some(info), Some(_)) = (a.cur.info(), a.cur.actor()) else {
-        return;
-    };
-    if own_previous(a.cur, subject).is_some() {
-        return;
-    }
-    let res = async {
-        let db = &a.st.db_primary;
-        match a.tenant {
-            Some(t) => {
-                let mut tx = begin_tenant_tx(db, t, a.ctx).await?;
-                revoke_superseded(&mut tx, info.id).await?;
-                tx.commit().await
-            }
-            None => {
-                let mut tx = begin_platform_tx(db, a.ctx).await?;
-                revoke_superseded(&mut tx, info.id).await?;
-                tx.commit().await
-            }
-        }
-    }
-    .await;
-    match res {
-        Ok(()) => forget(a.cur, info.id).await,
-        Err(e) => {
-            tracing::warn!(error = ?e, "login: sessão anterior de outro sujeito não revogada")
-        }
-    }
-}
-
-async fn revoke_superseded<T: AuditedTx>(tx: &mut T, id: SessionId) -> Result<(), AppError> {
-    session::revoke(tx, id).await?;
-    record(
-        tx,
-        AuditEvent {
-            action: ACTION_LOGOUT,
-            target_type: Some("session"),
-            target_id: Some(id.as_uuid().to_string()),
-            outcome: Outcome::Success,
-            reason: Some(REASON_SUPERSEDED.to_owned()),
-            changes: None,
-            store_id: None,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-async fn forget(cur: &CurrentSession, id: SessionId) {
-    let s = cur.sessions();
-    if let Err(e) = session::forget(s.redis(), s.ns(), id).await {
-        tracing::warn!(error = ?e, "login: chave de inatividade da sessão anterior não apagada");
     }
 }
 

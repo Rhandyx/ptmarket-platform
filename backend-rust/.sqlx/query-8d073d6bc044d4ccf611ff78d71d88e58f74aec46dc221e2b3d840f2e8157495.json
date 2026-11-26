@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payload->>'kind' AS \"kind!\" FROM outbox_events\n           WHERE event_type = 'staff.security_notice' ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8d073d6bc044d4ccf611ff78d71d88e58f74aec46dc221e2b3d840f2e8157495"
+}

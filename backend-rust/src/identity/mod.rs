@@ -7,10 +7,12 @@ pub mod captcha;
 pub mod crypto;
 pub mod csrf;
 pub mod customers;
+pub mod elevate;
 pub mod email;
 pub mod http;
 pub mod login;
 pub mod nif;
+pub mod passkey;
 pub mod password;
 pub mod rbac;
 pub mod recovery;
@@ -24,6 +26,7 @@ pub use captcha::{CaptchaVerifier, TurnstileVerifier};
 pub use customers::Registration;
 pub use http::{RequireCustomer, SessionInfo, Sessions};
 pub use login::{Login, PasswordCheck};
+pub use passkey::Passkeys;
 pub use password::{Password, Verified};
 pub use rbac::{
     RequireStaff, RequireStaffPreMfa, RequireStoreOwner, RequireStoreRole, RequireSuperAdmin,

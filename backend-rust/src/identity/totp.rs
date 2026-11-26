@@ -32,29 +32,26 @@ use hmac::{Hmac, KeyInit, Mac};
 use rand::{TryRngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
-use sqlx::{PgConnection, PgPool};
 use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{
-    audit::{AuditCtx, AuditEvent, Outcome, record},
+    audit::{AuditCtx, AuditEvent, Outcome},
     config::Config,
     error::{AppError, FieldError},
     identity::{
         crypto::EncKey,
+        elevate::{NoImpersonation, OwnTx},
         http::{CurrentSession, SessionInfo, Sessions, no_store},
         rbac::RequireStaffPreMfa,
         recovery::{self, RecoveryKey},
-        session::{self, CookieKind, CookieValue, SessionId, SessionKind, Subject},
+        session::{self, CookieKind, CookieValue, SessionKind, Subject},
         throttle::{self, Gate, Keys, Limits},
     },
     state::AppState,
-    tenancy::{
-        TenantId, TenantTx, begin_tenant_tx,
-        db::{PlatformTx, begin_platform_tx, db_error},
-    },
+    tenancy::{TenantId, db::db_error},
 };
 
 /// Passo TOTP (segundos).
@@ -316,84 +313,6 @@ fn classify(raw: &str) -> GivenCode {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Transação do próprio (tenant ou plataforma)
-// ---------------------------------------------------------------------------------------------
-
-enum OwnTx {
-    Tenant(TenantTx),
-    Platform(PlatformTx),
-}
-
-impl OwnTx {
-    async fn begin(
-        db: &PgPool,
-        tenant: Option<TenantId>,
-        ctx: &AuditCtx,
-    ) -> Result<Self, AppError> {
-        Ok(match tenant {
-            Some(t) => Self::Tenant(begin_tenant_tx(db, t, ctx).await?),
-            None => Self::Platform(begin_platform_tx(db, ctx).await?),
-        })
-    }
-
-    fn conn(&mut self) -> &mut PgConnection {
-        match self {
-            Self::Tenant(t) => t,
-            Self::Platform(p) => p,
-        }
-    }
-
-    async fn record(&mut self, ev: AuditEvent) -> Result<(), AppError> {
-        match self {
-            Self::Tenant(t) => record(t, ev).await.map(|_| ()),
-            Self::Platform(p) => record(p, ev).await.map(|_| ()),
-        }
-    }
-
-    /// `session::rotate` + `mfa_verified_at = now()` na sessão nova.
-    async fn elevate(
-        &mut self,
-        old: SessionId,
-        user: Uuid,
-        tenant: Option<TenantId>,
-        ctx: &AuditCtx,
-    ) -> Result<(SessionId, CookieValue), AppError> {
-        let subject = Subject::User(user);
-        let (sid, value) = match self {
-            Self::Tenant(t) => session::rotate(t, Some(old), subject, tenant, ctx).await?,
-            Self::Platform(p) => session::rotate(p, Some(old), subject, tenant, ctx).await?,
-        };
-        let r = sqlx::query!(
-            "UPDATE sessions SET mfa_verified_at = now() WHERE id = $1 AND revoked_at IS NULL",
-            sid.as_uuid()
-        )
-        .execute(self.conn())
-        .await
-        .map_err(db_error)?;
-        if r.rows_affected() != 1 {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "sessão nova não elevada"
-            )));
-        }
-        Ok((sid, value))
-    }
-
-    async fn revoke(&mut self, id: SessionId) -> Result<(), AppError> {
-        match self {
-            Self::Tenant(t) => session::revoke(t, id).await.map(|_| ()),
-            Self::Platform(p) => session::revoke(p, id).await.map(|_| ()),
-        }
-    }
-
-    async fn commit(self) -> Result<(), AppError> {
-        match self {
-            Self::Tenant(t) => t.commit().await,
-            Self::Platform(p) => p.commit().await,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
 // Redis: travão e anti-repetição
 // ---------------------------------------------------------------------------------------------
 
@@ -473,7 +392,8 @@ fn deps(cur: &CurrentSession) -> Result<Totp, AppError> {
     })
 }
 
-/// Sessão do pedido (o extractor já exigiu uma sessão `user`); sessões de impersonação não fazem 2FA.
+/// Sessão do pedido (o extractor já exigiu uma sessão `user`); sessões de impersonação não fazem 2FA
+/// (`NoImpersonation` já as recusou com `Denied("impersonation")`; isto é só a segunda barreira).
 fn own_session(cur: &CurrentSession, ctx: &AuditCtx) -> Result<SessionInfo, AppError> {
     if ctx.impersonator_id().is_some() {
         return Err(AppError::Forbidden);
@@ -554,7 +474,14 @@ impl<'a> Call<'a> {
         let Some(step) = found else {
             return Ok(Some(REASON_BAD_CODE));
         };
-        if !mark_step(self.cur.sessions().redis(), self.cur.sessions().ns(), self.user, step).await? {
+        if !mark_step(
+            self.cur.sessions().redis(),
+            self.cur.sessions().ns(),
+            self.user,
+            step,
+        )
+        .await?
+        {
             return Ok(Some(REASON_REPLAYED));
         }
         Ok(None)
@@ -667,7 +594,7 @@ impl<'a> Call<'a> {
         .map_err(db_error)?;
         let codes = recovery::replace(tx.conn(), &self.totp.recovery, user).await?;
         let (_, value) = tx
-            .elevate(self.info.id, user, self.tenant(), self.ctx)
+            .open_elevated(Some(self.info.id), user, self.tenant(), self.ctx)
             .await?;
         tx.record(user_event("mfa.totp_enabled", user, Outcome::Success, None))
             .await?;
@@ -708,7 +635,7 @@ impl<'a> Call<'a> {
             GivenCode::Invalid => return Ok(Attempt::Failed(REASON_BAD_CODE)),
         };
         let (_, value) = tx
-            .elevate(self.info.id, user, self.tenant(), self.ctx)
+            .open_elevated(Some(self.info.id), user, self.tenant(), self.ctx)
             .await?;
         let mut ev = user_event("mfa.verify", user, Outcome::Success, None);
         ev.changes = Some(serde_json::json!({ "method": method }));
@@ -728,7 +655,7 @@ impl<'a> Call<'a> {
     responses(
         (status = 200, description = "Segredo novo (mostrado só agora); confirmar com `/confirm`", body = TotpEnrollResponse),
         (status = 401, description = "Sem sessão de backoffice"),
-        (status = 403, description = "Sem papel neste host, ou token CSRF/Origin inválidos"),
+        (status = 403, description = "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 409, description = "O TOTP já está ativo"),
         (status = 503, description = "Serviço temporariamente indisponível")
@@ -737,6 +664,7 @@ impl<'a> Call<'a> {
 pub async fn enroll(
     State(st): State<AppState>,
     RequireStaffPreMfa(staff): RequireStaffPreMfa,
+    _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
 ) -> Result<Response, AppError> {
@@ -798,7 +726,7 @@ pub async fn enroll(
     responses(
         (status = 200, description = "TOTP ativo; sessão nova (Set-Cookie) com o 2FA feito; códigos de recuperação mostrados só agora", body = TotpConfirmResponse),
         (status = 401, description = "Sem sessão de backoffice, ou código errado/repetido"),
-        (status = 403, description = "Sem papel neste host, ou token CSRF/Origin inválidos"),
+        (status = 403, description = "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 409, description = "TOTP já ativo ou ativação não iniciada"),
         (status = 422, description = "Dados inválidos"),
@@ -809,6 +737,7 @@ pub async fn enroll(
 pub async fn confirm(
     State(st): State<AppState>,
     RequireStaffPreMfa(staff): RequireStaffPreMfa,
+    _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
     body: Result<Json<MfaCodeRequest>, JsonRejection>,
@@ -833,7 +762,7 @@ pub async fn confirm(
     responses(
         (status = 204, description = "2FA feito; sessão nova (Set-Cookie)"),
         (status = 401, description = "Sem sessão de backoffice, ou código errado/repetido/já usado"),
-        (status = 403, description = "Sem papel neste host, ou token CSRF/Origin inválidos"),
+        (status = 403, description = "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 409, description = "O TOTP não está ativo (ativar primeiro)"),
         (status = 422, description = "Dados inválidos"),
@@ -844,6 +773,7 @@ pub async fn confirm(
 pub async fn verify(
     State(st): State<AppState>,
     RequireStaffPreMfa(staff): RequireStaffPreMfa,
+    _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
     body: Result<Json<MfaCodeRequest>, JsonRejection>,

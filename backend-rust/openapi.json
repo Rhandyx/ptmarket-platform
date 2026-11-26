@@ -286,6 +286,81 @@
         }
       }
     },
+    "/api/v1/staff/auth/passkey/finish": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Conclui o login por passkey neste host. Falha → 401 sempre igual + `auth.passkey_login`\n`denied`. Sucesso → 204 + cookie de uma sessão nova já com o 2FA feito.",
+        "operationId": "login_finish",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginFinishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Sessão iniciada e com o 2FA feito (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma)"
+          },
+          "401": {
+            "description": "Cerimónia ou credencial inválida, ou sem acesso a este site (corpo sempre igual)"
+          },
+          "403": {
+            "description": "Origin ausente ou de outro site (com sessão: também o token CSRF)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "422": {
+            "description": "Dados inválidos"
+          },
+          "429": {
+            "description": "Demasiadas tentativas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/auth/passkey/start": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Inicia um login por passkey neste host: credencial detetável, SEM lista de credenciais (não\nenumera contas).",
+        "operationId": "login_start",
+        "responses": {
+          "200": {
+            "description": "Opções de autenticação e id da cerimónia (válida 5 min, uso único)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CeremonyOptions"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin ausente ou de outro site"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "429": {
+            "description": "Demasiadas tentativas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/staff/me": {
       "get": {
         "tags": [
@@ -362,7 +437,7 @@
             "description": "Sem sessão de backoffice, ou código errado/repetido"
           },
           "403": {
-            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+            "description": "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"
           },
           "404": {
             "description": "Host desconhecido ou tenant inativo"
@@ -415,7 +490,7 @@
             "description": "Sem sessão de backoffice"
           },
           "403": {
-            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+            "description": "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"
           },
           "404": {
             "description": "Host desconhecido ou tenant inativo"
@@ -465,7 +540,7 @@
             "description": "Sem sessão de backoffice, ou código errado/repetido/já usado"
           },
           "403": {
-            "description": "Sem papel neste host, ou token CSRF/Origin inválidos"
+            "description": "Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`)"
           },
           "404": {
             "description": "Host desconhecido ou tenant inativo"
@@ -478,6 +553,195 @@
           },
           "429": {
             "description": "Demasiadas falhas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/passkeys": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "As passkeys do próprio (nunca as de outro utilizador).",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Passkeys do utilizador da sessão",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PasskeyItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem papel neste host, 2FA em falta ou sessão de impersonação (`impersonation`)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/passkeys/register/finish": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Conclui o registo: verifica a resposta do autenticador contra a cerimónia (do próprio, neste\nhost) e guarda a credencial pública.",
+        "operationId": "register_finish",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterFinishRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Passkey registada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasskeyCreated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão, cerimónia desconhecida/expirada/já usada, ou credencial recusada"
+          },
+          "403": {
+            "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "409": {
+            "description": "Credencial já registada"
+          },
+          "422": {
+            "description": "Dados inválidos, ou passkey não detetável (`credProps.rk = false`: `not_discoverable`)"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/passkeys/register/start": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Inicia o registo de uma passkey no host do pedido (user verification obrigatória; resident key\npreferida; as passkeys já registadas ficam excluídas).",
+        "operationId": "register_start",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Opções de criação e id da cerimónia (válida 5 min, uso único)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CeremonyOptions"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/passkeys/{id}": {
+      "delete": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey de\numa conta sem password não se apaga (409).",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id da passkey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Passkey apagada"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
+          },
+          "404": {
+            "description": "Passkey inexistente ou de outro utilizador"
+          },
+          "409": {
+            "description": "Última credencial de uma conta sem password"
           },
           "503": {
             "description": "Serviço temporariamente indisponível"
@@ -602,6 +866,23 @@
   },
   "components": {
     "schemas": {
+      "CeremonyOptions": {
+        "type": "object",
+        "description": "Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`.",
+        "required": [
+          "ceremony_id",
+          "options"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string"
+          },
+          "options": {
+            "type": "object",
+            "description": "`{\"publicKey\": …}` (binários em base64url)."
+          }
+        }
+      },
       "ConsentsInput": {
         "type": "object",
         "description": "Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado).",
@@ -680,6 +961,24 @@
           }
         }
       },
+      "LoginFinishRequest": {
+        "type": "object",
+        "description": "Fim do login: id da cerimónia e a resposta do autenticador.",
+        "required": [
+          "ceremony_id",
+          "credential"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "object",
+            "description": "`PublicKeyCredential` de `navigator.credentials.get` (binários em base64url)."
+          }
+        },
+        "additionalProperties": false
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Pedido de login. Sem `Debug`: leva a password.",
@@ -719,6 +1018,52 @@
           }
         },
         "additionalProperties": false
+      },
+      "PasskeyCreated": {
+        "type": "object",
+        "description": "Passkey criada.",
+        "required": [
+          "id",
+          "label"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "PasskeyItem": {
+        "type": "object",
+        "description": "Passkey do próprio (sem a credencial).",
+        "required": [
+          "id",
+          "label",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` = nunca usada."
+          }
+        }
       },
       "ProfilePatch": {
         "type": "object",
@@ -767,6 +1112,28 @@
             "description": "Sempre `ok`."
           }
         }
+      },
+      "RegisterFinishRequest": {
+        "type": "object",
+        "description": "Fim do registo: id da cerimónia, etiqueta (1–64) e a resposta do autenticador.",
+        "required": [
+          "ceremony_id",
+          "label",
+          "credential"
+        ],
+        "properties": {
+          "ceremony_id": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "object",
+            "description": "`PublicKeyCredential` de `navigator.credentials.create` (binários em base64url)."
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "RegisterRequest": {
         "type": "object",

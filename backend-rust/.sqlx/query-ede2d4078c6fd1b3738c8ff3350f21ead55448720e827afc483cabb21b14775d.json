@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\" FROM user_passkeys\n               WHERE user_id = $1\n                 AND credential->>'rp_id' = (SELECT credential->>'rp_id' FROM user_passkeys\n                                            WHERE id = $2 AND user_id = $1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ede2d4078c6fd1b3738c8ff3350f21ead55448720e827afc483cabb21b14775d"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sessions\n         SET created_at = created_at - make_interval(secs => $2),\n             expires_at = expires_at - make_interval(secs => $2),\n             mfa_verified_at = mfa_verified_at - make_interval(secs => $2)\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a361f6356a8a32195a3600b9580b1c943c62b644017d22867fea28e07aaa5e36"
+}

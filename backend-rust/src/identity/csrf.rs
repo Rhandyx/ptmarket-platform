@@ -127,7 +127,7 @@ pub async fn capture_host(State(s): State<Sessions>, mut req: Request, next: Nex
 }
 
 /// Hosts de desenvolvimento (aceitam `http`).
-fn is_dev_host(host: &str) -> bool {
+pub(crate) fn is_dev_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
 }
 
@@ -186,10 +186,12 @@ fn deny() -> Response {
 /// Rotas de autenticação anónimas que criam estado: exigem `Origin` válida mesmo sem sessão (login
 /// CSRF / registo forçado a partir de outro site). O logout anónimo não muda nada (204 idempotente)
 /// e fica de fora.
-pub const ANONYMOUS_ORIGIN_PATHS: [&str; 3] = [
+pub const ANONYMOUS_ORIGIN_PATHS: [&str; 5] = [
     "/api/v1/auth/register",
     "/api/v1/auth/login",
     "/api/v1/staff/auth/login",
+    "/api/v1/staff/auth/passkey/start",
+    "/api/v1/staff/auth/passkey/finish",
 ];
 
 /// Layer (`from_fn_with_state`) POR DENTRO da caixa negra: a recusa (403 + `Denied("csrf")`) fica

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE outbox_events NO FORCE ROW LEVEL SECURITY",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cd66a658d3314289e80f96233bd2a4b790cb6c9f41e634dfe6f5a2fc5e2a266d"
+}

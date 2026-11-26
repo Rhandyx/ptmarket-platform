@@ -27,11 +27,13 @@ use uuid::Uuid;
 
 use crate::{
     audit::{Actor, ActorType, AuditCtx, AuditEvent, Outcome, record},
+    config::AppEnv,
     error::AppError,
     identity::{
         csrf::{CsrfKey, capture_host, csrf_guard},
         customers::Registration,
         login::Login,
+        passkey::Passkeys,
         rbac::{StaffRoles, load_roles},
         session::{self, CookieKind, CookieRead, SessionId, SessionKind, Subject},
         totp::Totp,
@@ -64,6 +66,8 @@ struct Inner {
     login: Option<Login>,
     /// Chave de cifra dos segredos TOTP e limites do 2FA (cartão 02/20).
     totp: Option<Totp>,
+    /// Relying Parties WebAuthn por host (cartão 02/21). Por omissão só `https://` (estrito).
+    passkeys: Passkeys,
 }
 
 impl Sessions {
@@ -102,6 +106,7 @@ impl Sessions {
                 registration: None,
                 login: None,
                 totp: None,
+                passkeys: Passkeys::new(AppEnv::Production),
             }),
         }
     }
@@ -156,6 +161,20 @@ impl Sessions {
 
     pub(crate) fn totp(&self) -> Option<&Totp> {
         self.inner.totp.as_ref()
+    }
+
+    /// Passkeys (`Passkeys::from_config` em produção: `http://` só em development/test). Sem esta
+    /// chamada vale o modo estrito (só `https://<host>`).
+    pub fn with_passkeys(self, passkeys: Passkeys) -> Self {
+        let mut inner = Arc::unwrap_or_clone(self.inner);
+        inner.passkeys = passkeys;
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn passkeys(&self) -> &Passkeys {
+        &self.inner.passkeys
     }
 
     /// BD primária (lookup de sessões e papéis; nunca a réplica).
@@ -235,6 +254,7 @@ impl Sessions {
                 id: row.id,
                 mfa_verified_at: row.mfa_verified_at,
                 tenant,
+                age: row.age,
             },
             staff,
         ))
@@ -255,11 +275,26 @@ pub struct SessionInfo {
     pub mfa_verified_at: Option<SystemTime>,
     /// Tenant da sessão (= o do `Host`); `None` = plataforma.
     tenant: Option<TenantId>,
+    /// Idade da sessão (desde o login) no momento do lookup.
+    age: Duration,
 }
+
+/// Janela da reautenticação recente (ações sensíveis da conta: passkeys; depois email/password).
+pub const REAUTH_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 impl SessionInfo {
     pub fn tenant(&self) -> Option<TenantId> {
         self.tenant
+    }
+
+    /// Login (criação da sessão) ou 2FA há no máximo `REAUTH_WINDOW`.
+    pub fn recently_authenticated(&self) -> bool {
+        let mfa_recent = self.mfa_verified_at.is_some_and(|t| {
+            SystemTime::now()
+                .duration_since(t)
+                .map_or(true, |d| d <= REAUTH_WINDOW)
+        });
+        self.age <= REAUTH_WINDOW || mfa_recent
     }
 }
 

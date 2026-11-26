@@ -12,7 +12,7 @@ use axum::{
     Extension, Router,
     body::Body,
     http::{HeaderName, Request, StatusCode},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use tower::ServiceBuilder;
 use tower_http::{
@@ -111,7 +111,30 @@ pub fn api(
             "/api/v1/staff/mfa/totp/confirm",
             post(identity::totp::confirm),
         )
-        .route("/api/v1/staff/mfa/verify", post(identity::totp::verify));
+        .route("/api/v1/staff/mfa/verify", post(identity::totp::verify))
+        // Passkeys (cartão 02/21): gestão com sessão (`RequireStaff` + CSRF) e login anónimo
+        // (`Origin` obrigatória: `ANONYMOUS_ORIGIN_PATHS`).
+        .route(
+            "/api/v1/staff/passkeys/register/start",
+            post(identity::passkey::register_start),
+        )
+        .route(
+            "/api/v1/staff/passkeys/register/finish",
+            post(identity::passkey::register_finish),
+        )
+        .route("/api/v1/staff/passkeys", get(identity::passkey::list))
+        .route(
+            "/api/v1/staff/passkeys/{id}",
+            delete(identity::passkey::remove),
+        )
+        .route(
+            "/api/v1/staff/auth/passkey/start",
+            post(identity::passkey::login_start),
+        )
+        .route(
+            "/api/v1/staff/auth/passkey/finish",
+            post(identity::passkey::login_finish),
+        );
     // Consola de plataforma: o gate (`RequireSuperAdmin`) vale para o grupo INTEIRO (`.layer`),
     // incluindo os caminhos desconhecidos: qualquer caminho sob `/api/v1/superadmin` dá o mesmo 404
     // + `superadmin_gate`, exista ou não. O "fallback" é uma rota catch-all (e não `.fallback`):

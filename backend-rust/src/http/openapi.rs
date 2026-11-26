@@ -21,6 +21,12 @@ use crate::{http::health, identity, tenancy};
         identity::totp::enroll,
         identity::totp::confirm,
         identity::totp::verify,
+        identity::passkey::register_start,
+        identity::passkey::register_finish,
+        identity::passkey::list,
+        identity::passkey::remove,
+        identity::passkey::login_start,
+        identity::passkey::login_finish,
         identity::rbac::superadmin_whoami
     ),
     info(title = "PT Market API", version = "0.1.0")

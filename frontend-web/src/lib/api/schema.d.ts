@@ -116,6 +116,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/staff/auth/passkey/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Conclui o login por passkey neste host. Falha → 401 sempre igual + `auth.passkey_login`
+         *     `denied`. Sucesso → 204 + cookie de uma sessão nova já com o 2FA feito.
+         */
+        post: operations["login_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/auth/passkey/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inicia um login por passkey neste host: credencial detetável, SEM lista de credenciais (não
+         *     enumera contas).
+         */
+        post: operations["login_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/staff/me": {
         parameters: {
             query?: never;
@@ -194,6 +234,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/staff/passkeys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** As passkeys do próprio (nunca as de outro utilizador). */
+        get: operations["list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/passkeys/register/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Conclui o registo: verifica a resposta do autenticador contra a cerimónia (do próprio, neste
+         *     host) e guarda a credencial pública.
+         */
+        post: operations["register_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/passkeys/register/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inicia o registo de uma passkey no host do pedido (user verification obrigatória; resident key
+         *     preferida; as passkeys já registadas ficam excluídas).
+         */
+        post: operations["register_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/passkeys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey de
+         *     uma conta sem password não se apaga (409).
+         */
+        delete: operations["remove"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/superadmin/whoami": {
         parameters: {
             query?: never;
@@ -267,6 +384,12 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`. */
+        CeremonyOptions: {
+            ceremony_id: string;
+            /** @description `{"publicKey": …}` (binários em base64url). */
+            options: Record<string, never>;
+        };
         /** @description Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado). */
         ConsentsInput: {
             marketing?: boolean;
@@ -296,6 +419,12 @@ export interface components {
             nif: string | null;
             phone: string | null;
         };
+        /** @description Fim do login: id da cerimónia e a resposta do autenticador. */
+        LoginFinishRequest: {
+            ceremony_id: string;
+            /** @description `PublicKeyCredential` de `navigator.credentials.get` (binários em base64url). */
+            credential: Record<string, never>;
+        };
         /** @description Pedido de login. Sem `Debug`: leva a password. */
         LoginRequest: {
             /** @description Até 255 caracteres; comparado normalizado (trim, NFC, minúsculas). */
@@ -315,6 +444,22 @@ export interface components {
         MfaCodeRequest: {
             code: string;
         };
+        /** @description Passkey criada. */
+        PasskeyCreated: {
+            /** Format: uuid */
+            id: string;
+            label: string;
+        };
+        /** @description Passkey do próprio (sem a credencial). */
+        PasskeyItem: {
+            /** @description RFC 3339, UTC. */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            label: string;
+            /** @description RFC 3339, UTC; `null` = nunca usada. */
+            last_used_at?: string | null;
+        };
         /**
          * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
          *     Email e password ficam fora (exigem reautenticação).
@@ -333,6 +478,13 @@ export interface components {
         RegisterAccepted: {
             /** @description Sempre `ok`. */
             status: string;
+        };
+        /** @description Fim do registo: id da cerimónia, etiqueta (1–64) e a resposta do autenticador. */
+        RegisterFinishRequest: {
+            ceremony_id: string;
+            /** @description `PublicKeyCredential` de `navigator.credentials.create` (binários em base64url). */
+            credential: Record<string, never>;
+            label: string;
         };
         /** @description Pedido de registo. Sem `Debug`: leva a password. */
         RegisterRequest: {
@@ -791,6 +943,118 @@ export interface operations {
             };
         };
     };
+    login_finish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginFinishRequest"];
+            };
+        };
+        responses: {
+            /** @description Sessão iniciada e com o 2FA feito (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Cerimónia ou credencial inválida, ou sem acesso a este site (corpo sempre igual) */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Origin ausente ou de outro site (com sessão: também o token CSRF) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas tentativas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    login_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Opções de autenticação e id da cerimónia (válida 5 min, uso único) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CeremonyOptions"];
+                };
+            };
+            /** @description Origin ausente ou de outro site */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas tentativas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     me: {
         parameters: {
             query?: never;
@@ -871,7 +1135,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            /** @description Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -943,7 +1207,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            /** @description Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1003,7 +1267,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Sem papel neste host, ou token CSRF/Origin inválidos */
+            /** @description Sem papel neste host, token CSRF/Origin inválidos ou sessão de impersonação (`impersonation`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1033,6 +1297,233 @@ export interface operations {
             };
             /** @description Demasiadas falhas; repetir depois de `Retry-After` segundos */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Passkeys do utilizador da sessão */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasskeyItem"][];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, 2FA em falta ou sessão de impersonação (`impersonation`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    register_finish: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterFinishRequest"];
+            };
+        };
+        responses: {
+            /** @description Passkey registada */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PasskeyCreated"];
+                };
+            };
+            /** @description Sem sessão, cerimónia desconhecida/expirada/já usada, ou credencial recusada */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Credencial já registada */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos, ou passkey não detetável (`credProps.rk = false`: `not_discoverable`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    register_start: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Opções de criação e id da cerimónia (válida 5 min, uso único) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CeremonyOptions"];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path: {
+                /** @description Id da passkey */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Passkey apagada */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Passkey inexistente ou de outro utilizador */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Última credencial de uma conta sem password */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
