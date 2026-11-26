@@ -2,7 +2,7 @@
 
 use utoipa::OpenApi;
 
-use crate::{http::health, identity, tenancy};
+use crate::{admin, http::health, identity, tenancy};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -27,7 +27,8 @@ use crate::{http::health, identity, tenancy};
         identity::passkey::remove,
         identity::passkey::login_start,
         identity::passkey::login_finish,
-        identity::rbac::superadmin_whoami
+        identity::rbac::superadmin_whoami,
+        admin::audit_timeline::list_events
     ),
     info(title = "PT Market API", version = "0.1.0")
 )]

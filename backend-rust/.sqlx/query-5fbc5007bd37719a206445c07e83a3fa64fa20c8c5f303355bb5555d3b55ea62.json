@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,\n                set_config('app.portal_national', $9, true) AS portal_national",
+  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,\n                set_config('app.portal_national', $9, true) AS portal_national,\n                set_config('app.session_id', $10, true) AS session_id",
   "describe": {
     "columns": [
       {
@@ -56,10 +56,17 @@
         "name": "portal_national",
         "type_info": "Text",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "session_id",
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text",
         "Text",
         "Text",
@@ -80,8 +87,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "e2c4c86f0451d309ae423bef23c2ab2cd59d758385b34357b328df623b0805a7"
+  "hash": "5fbc5007bd37719a206445c07e83a3fa64fa20c8c5f303355bb5555d3b55ea62"
 }

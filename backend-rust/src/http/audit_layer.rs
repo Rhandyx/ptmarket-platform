@@ -324,7 +324,11 @@ async fn inspect(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
     let ip = client_ip(peer, &parts.headers, &st.inner.trusted);
-    let ctx = build_ctx(actor, rid, ip, &parts.headers);
+    let mut ctx = build_ctx(actor, rid, ip, &parts.headers);
+    // Sessão validada pela layer `authenticate` → `app.session_id` em todas as transações do pedido.
+    if let Some(s) = parts.extensions.get::<crate::identity::http::SessionInfo>() {
+        ctx = ctx.with_session_id(s.id.as_uuid());
+    }
     let path_params = match RawPathParams::from_request_parts(parts, &()).await {
         Ok(p) => p
             .iter()

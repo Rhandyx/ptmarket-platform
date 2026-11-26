@@ -24,6 +24,7 @@ use tower_http::{
 use tracing::Span;
 
 use crate::{
+    admin,
     audit::AuditClass,
     http::{
         audit_layer::{AuditLayerState, MakeRequestUuidV7, audited, take_client_request_id},
@@ -141,6 +142,8 @@ pub fn api(
     // as layers de fora (host, sessão, caixa negra, CSRF) são `route_layer` e só cobrem rotas.
     let superadmin = Router::new()
         .route("/whoami", get(identity::rbac::superadmin_whoami))
+        // Timeline da caixa negra (cartão 02/23).
+        .route("/audit/events", get(admin::audit_timeline::list_events))
         .route("/", any(identity::rbac::superadmin_not_found))
         .route("/{*rest}", any(identity::rbac::superadmin_not_found))
         .layer(axum::middleware::from_fn(identity::rbac::superadmin_gate));

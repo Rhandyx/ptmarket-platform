@@ -585,9 +585,8 @@ pub async fn register_finish(
     let site = site(tenant, platform, host)?;
     let user = staff.user_id;
     let ceremony: Option<RegCeremony> = take(&cur, Kind::Reg, &req.ceremony_id).await?;
-    let same = |c: &RegCeremony| {
-        c.user == user && c.session == info.id.as_uuid() && c.host == site.host
-    };
+    let same =
+        |c: &RegCeremony| c.user == user && c.session == info.id.as_uuid() && c.host == site.host;
     let Some(c) = ceremony.filter(same) else {
         return Ok(refused(DENIED_CEREMONY, AppError::Unauthorized));
     };
@@ -1207,7 +1206,9 @@ mod tests {
         assert!(!discoverable(
             &json!({"clientExtensionResults": {"credProps": {"rk": false}}})
         ));
-        assert!(!discoverable(&json!({"extensions": {"credProps": {"rk": false}}})));
+        assert!(!discoverable(
+            &json!({"extensions": {"credProps": {"rk": false}}})
+        ));
     }
 
     #[test]

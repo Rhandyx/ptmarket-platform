@@ -60,6 +60,9 @@ pub struct AuditCtx {
     request_id: Uuid,
     ip: Option<IpAddr>,
     user_agent_hash: Option<[u8; 32]>,
+    /// A sessão à entrada do pedido. O GUC `app.session_id` serve só portas de BD (fail-closed, ex.:
+    /// a timeline global, cartão 02/23), nunca para atribuir ações.
+    session_id: Option<Uuid>,
     recorded: Arc<AtomicBool>,
 }
 
@@ -90,6 +93,7 @@ impl AuditCtx {
             request_id,
             ip,
             user_agent_hash,
+            session_id: None,
             recorded: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -106,6 +110,7 @@ impl AuditCtx {
             request_id: Uuid::now_v7(),
             ip: None,
             user_agent_hash: None,
+            session_id: None,
             recorded: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -127,6 +132,25 @@ impl AuditCtx {
             ip,
             None,
         )
+    }
+
+    /// Liga o contexto à sessão do pedido (só o middleware da caixa negra, com a sessão já validada
+    /// pela layer `authenticate`). Vai para `app.session_id` em todas as transações deste contexto.
+    pub(crate) fn with_session_id(mut self, id: Uuid) -> Self {
+        self.session_id = Some(id);
+        self
+    }
+
+    /// Só para testes de integração (`tests/`); não existe em `cargo build --release`.
+    #[cfg(feature = "test-support")]
+    pub fn with_session_for_tests(self, id: Uuid) -> Self {
+        self.with_session_id(id)
+    }
+
+    /// A sessão à entrada do pedido; o GUC `app.session_id` serve só portas de BD (fail-closed),
+    /// nunca para atribuir ações.
+    pub fn session_id(&self) -> Option<Uuid> {
+        self.session_id
     }
 
     pub fn actor_type(&self) -> ActorType {

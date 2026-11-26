@@ -191,7 +191,7 @@ pub(super) enum PortalMode {
     On,
 }
 
-/// Fixa tenant, ator e modo portal só para esta transação: uma query, `set_config(..., true)`
+/// Fixa tenant, ator, sessão (`app.session_id`) e modo portal só para esta transação: uma query, `set_config(..., true)`
 /// (= `SET LOCAL`), valores sempre por parâmetro. `''` = sem valor (as funções da BD fazem
 /// `NULLIF(..., '')`).
 pub(super) async fn set_context(
@@ -211,6 +211,7 @@ pub(super) async fn set_context(
     let request_id = ctx.request_id().to_string();
     let ip = text(ctx.ip());
     let ua_hash = ctx.user_agent_hash_hex();
+    let session_id = text(ctx.session_id());
     let portal = match portal {
         PortalMode::Off => "",
         PortalMode::On => "on",
@@ -224,7 +225,8 @@ pub(super) async fn set_context(
                 set_config('app.request_id', $6, true) AS request_id,
                 set_config('app.ip', $7, true) AS ip,
                 set_config('app.user_agent_hash', $8, true) AS user_agent_hash,
-                set_config('app.portal_national', $9, true) AS portal_national",
+                set_config('app.portal_national', $9, true) AS portal_national,
+                set_config('app.session_id', $10, true) AS session_id",
         tenant_id,
         actor_type,
         actor_id,
@@ -233,7 +235,8 @@ pub(super) async fn set_context(
         request_id,
         ip,
         ua_hash,
-        portal
+        portal,
+        session_id
     )
     .fetch_one(conn)
     .await

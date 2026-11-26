@@ -311,6 +311,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/superadmin/audit/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Timeline global da caixa negra (leitura síncrona; a própria consulta fica na cadeia). */
+        get: operations["list_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/superadmin/whoami": {
         parameters: {
             query?: never;
@@ -578,6 +595,38 @@ export interface components {
          * @enum {string}
          */
         TenantType: "municipal" | "national_portal" | "niche";
+        /** @description Evento da caixa negra (`changes` já mascarado na gravação). */
+        TimelineEvent: {
+            action: string;
+            /** Format: uuid */
+            actor_id?: string | null;
+            actor_label?: string | null;
+            actor_type: string;
+            /** @description A verificação da cadeia na vizinhança deste evento não encontrou quebra. */
+            chain_ok: boolean;
+            /** Format: int64 */
+            chain_seq: number;
+            changes?: Record<string, never> | null;
+            /** @description RFC 3339 em UTC com microssegundos. */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            impersonator_id?: string | null;
+            outcome: string;
+            reason?: string | null;
+            /** Format: uuid */
+            store_id?: string | null;
+            target_id?: string | null;
+            target_type?: string | null;
+            /** Format: uuid */
+            tenant_id?: string | null;
+        };
+        /** @description Página da timeline (mais recentes primeiro). `next_cursor` = `null` quando não há mais. */
+        TimelinePage: {
+            events: components["schemas"]["TimelineEvent"][];
+            next_cursor?: string | null;
+        };
         /** @description TOTP ativo: códigos de recuperação mostrados UMA vez (guardar fora da app). */
         TotpConfirmResponse: {
             recovery_codes: string[];
@@ -1530,6 +1579,68 @@ export interface operations {
                 content?: never;
             };
             /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_events: {
+        parameters: {
+            query: {
+                /** @description Início (RFC 3339 com fuso), inclusivo */
+                from: string;
+                /** @description Fim (RFC 3339 com fuso), exclusivo. Janela máx. 24 h sem filtro de tenant/loja/ator/encomenda; 31 dias com um deles */
+                to: string;
+                /** @description Tenant */
+                tenant_id?: string;
+                /** @description Loja */
+                store_id?: string;
+                /** @description Utilizador (ator) */
+                actor_id?: string;
+                /** @description Encomenda (alvo `order` ou `changes.order_id`) */
+                order_id?: string;
+                /** @description Prefixo da ação ([a-z0-9._], até 100) */
+                action_prefix?: string;
+                /** @description success, denied ou error */
+                outcome?: string;
+                /** @description `next_cursor` da página anterior */
+                cursor?: string;
+                /** @description 1..100 (por omissão 50) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Eventos, mais recentes primeiro */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelinePage"];
+                };
+            };
+            /** @description Filtros inválidos (janela, limite, prefixo, outcome, cursor ou datas) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Não encontrado (qualquer falha de acesso à consola) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A gravação da leitura na caixa negra falhou (nenhum dado devolvido) */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -37,8 +37,8 @@ use crate::{
     identity::{
         captcha::{CaptchaVerifier, TurnstileVerifier},
         csrf::RequestHost,
-        elevate::{forget, own_previous, revoke_foreign_session},
         customers::MAX_CAPTCHA_TOKEN_CHARS,
+        elevate::{forget, own_previous, revoke_foreign_session},
         email,
         http::{CurrentSession, no_store},
         password::{self, PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS, Password, Verified},
@@ -704,7 +704,14 @@ impl Attempt<'_> {
         if let Some(old) = old {
             forget(self.cur, old).await;
         }
-        revoke_foreign_session(&self.st.db_primary, self.cur, self.tenant, self.ctx, subject).await;
+        revoke_foreign_session(
+            &self.st.db_primary,
+            self.cur,
+            self.tenant,
+            self.ctx,
+            subject,
+        )
+        .await;
         throttle::succeeded(self.cur.sessions().redis(), &passed.keys).await;
         tracing::debug!(session = %sid.as_uuid(), "login: sessão criada");
         Ok(value)

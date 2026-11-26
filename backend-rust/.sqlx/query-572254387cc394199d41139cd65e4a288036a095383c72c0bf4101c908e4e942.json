@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT to_char((now() + make_interval(hours => $1)) AT TIME ZONE 'UTC',\n                          'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS \"s!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "572254387cc394199d41139cd65e4a288036a095383c72c0bf4101c908e4e942"
+}

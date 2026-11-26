@@ -749,6 +749,133 @@
         }
       }
     },
+    "/api/v1/superadmin/audit/events": {
+      "get": {
+        "tags": [
+          "superadmin"
+        ],
+        "summary": "Timeline global da caixa negra (leitura síncrona; a própria consulta fica na cadeia).",
+        "operationId": "list_events",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Início (RFC 3339 com fuso), inclusivo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Fim (RFC 3339 com fuso), exclusivo. Janela máx. 24 h sem filtro de tenant/loja/ator/encomenda; 31 dias com um deles",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "store_id",
+            "in": "query",
+            "description": "Loja",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "Utilizador (ator)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "order_id",
+            "in": "query",
+            "description": "Encomenda (alvo `order` ou `changes.order_id`)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "action_prefix",
+            "in": "query",
+            "description": "Prefixo da ação ([a-z0-9._], até 100)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "description": "success, denied ou error",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` da página anterior",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1..100 (por omissão 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Eventos, mais recentes primeiro",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Filtros inválidos (janela, limite, prefixo, outcome, cursor ou datas)"
+          },
+          "404": {
+            "description": "Não encontrado (qualquer falha de acesso à consola)"
+          },
+          "503": {
+            "description": "A gravação da leitura na caixa negra falhou (nenhum dado devolvido)"
+          }
+        }
+      }
+    },
     "/api/v1/superadmin/whoami": {
       "get": {
         "tags": [
@@ -1372,6 +1499,125 @@
           "national_portal",
           "niche"
         ]
+      },
+      "TimelineEvent": {
+        "type": "object",
+        "description": "Evento da caixa negra (`changes` já mascarado na gravação).",
+        "required": [
+          "id",
+          "created_at",
+          "actor_type",
+          "action",
+          "outcome",
+          "chain_seq",
+          "chain_ok"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actor_type": {
+            "type": "string"
+          },
+          "chain_ok": {
+            "type": "boolean",
+            "description": "A verificação da cadeia na vizinhança deste evento não encontrou quebra."
+          },
+          "chain_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "changes": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339 em UTC com microssegundos."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "impersonator_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "store_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "TimelinePage": {
+        "type": "object",
+        "description": "Página da timeline (mais recentes primeiro). `next_cursor` = `null` quando não há mais.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "TotpConfirmResponse": {
         "type": "object",
