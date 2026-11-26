@@ -181,7 +181,8 @@ async fn seed_tenant(
 async fn seed_store(
     app: &PgPool,
     owner: &PgPool,
-    t: &Tenant, slug: &str,
+    t: &Tenant,
+    slug: &str,
     publish: bool,
 ) -> anyhow::Result<()> {
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None);
@@ -210,7 +211,8 @@ async fn seed_store(
     let denied = sqlx::query!("UPDATE stores SET custom_commission_bps = 1")
         .execute(&mut *tx)
         .await
-        .expect_err("a app não pode escrever custom_commission_bps");
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a app não pode escrever custom_commission_bps"))?;
     assert_eq!(
         denied.as_database_error().and_then(|e| e.code()).as_deref(),
         Some("42501")
@@ -509,9 +511,10 @@ async fn portal_reads_published_stores_of_all_tenants_without_secrets_and_is_rea
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a", "municipal", "PT", true).await?;
-    let b = seed_tenant(&owner, "camara-b", "municipal", "PT", true).await?;
-    let es = seed_tenant(&owner, "ayto-es", "municipal", "ES", true).await?;
+    // Lojas no canal nacional (cartão 03/13): dois tenants national_portal PT e um ES.
+    let a = seed_tenant(&owner, "nacional-a", "national_portal", "PT", true).await?;
+    let b = seed_tenant(&owner, "nacional-b", "national_portal", "PT", true).await?;
+    let es = seed_tenant(&owner, "nacional-es", "national_portal", "ES", true).await?;
     let p = seed_tenant(&owner, "portal", "national_portal", "PT", true).await?;
     let app = app_pool(&opts, &conn).await?;
     seed_store(&app, &owner, &a, "a-publicada", true).await?;

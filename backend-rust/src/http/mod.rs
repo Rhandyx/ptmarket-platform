@@ -160,7 +160,7 @@ pub fn api(
             get(identity::rbac::test_store_owner),
         )
         .route(
-            "/api/v1/_test/tenant-admin",
+            "/api/v1/_test/tenants/{tenant_id}/admin",
             get(identity::rbac::test_tenant_admin),
         );
     let read_async = with_csrf(read_async, sessions.clone());

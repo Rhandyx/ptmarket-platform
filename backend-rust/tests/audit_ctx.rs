@@ -93,11 +93,13 @@ async fn owner_pool(opts: &PoolOptions<Postgres>, conn: &PgConnectOptions) -> sq
         .await
 }
 
+/// Tenant do canal nacional (as lojas dos testes nascem lá: cartão 03/13).
 async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<TenantId> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.test.invalid");
     sqlx::query!(
-        "INSERT INTO tenants (id, slug, custom_domain, name) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type)
+         VALUES ($1, $2, $3, $4, 'national_portal')",
         id,
         slug,
         domain,
@@ -193,7 +195,7 @@ async fn l1_event_carries_ctx_and_actor_dies_with_tx(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
     // Uma só ligação: depois da transação, a query seguinte reutiliza-a.
     let app = app_pool(&opts, &conn, 1).await?;
     let pid_before = backend_pid(&mut *app.acquire().await?).await?;
@@ -241,8 +243,8 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let b = seed_tenant(&owner, "camara-b").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
+    let b = seed_tenant(&owner, "nacional-b").await?;
     let app = app_pool(&opts, &conn, 2).await?;
 
     // Evento semântico com segredos: sai mascarado.
@@ -349,7 +351,7 @@ async fn chain_race_in_repeatable_read_retries_and_stays_contiguous(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
     let app = app_pool_repeatable_read(&opts, &conn, 2).await?;
 
     // Cadeia já iniciada (cabeça existe).
@@ -417,7 +419,7 @@ async fn record_rejects_oversized_event_without_truncating(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
     let app = app_pool(&opts, &conn, 1).await?;
     let ctx = merchant(None);
     let mut tx = begin_tenant_tx(&app, a, &ctx).await?;

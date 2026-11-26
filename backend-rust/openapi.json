@@ -242,7 +242,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Inicia sessão de backoffice no host do pedido. Falha → 401 sempre igual (exista ou não a conta,\ntenha ou não papel aqui).",
+        "summary": "Inicia sessão de backoffice (só no host de plataforma). Falha → 401 sempre igual (exista ou não\na conta, tenha ou não papéis, seja ou não um Host de canal).",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -256,7 +256,7 @@
         },
         "responses": {
           "200": {
-            "description": "Sessão iniciada (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma); `mfa_required` diz se falta o 2FA",
+            "description": "Sessão iniciada (cookie `__Host-ptm_admin`, só no host de plataforma); `mfa_required` diz se falta o 2FA",
             "content": {
               "application/json": {
                 "schema": {
@@ -266,7 +266,7 @@
             }
           },
           "401": {
-            "description": "Credenciais inválidas ou sem acesso a este site (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"
+            "description": "Credenciais inválidas, sem papéis ou fora do host de plataforma (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"
           },
           "403": {
             "description": "Origin ausente ou de outro site (com sessão: também o token CSRF)"
@@ -370,7 +370,7 @@
         "operationId": "me",
         "responses": {
           "200": {
-            "description": "Utilizador, papéis neste host e estado do 2FA",
+            "description": "Utilizador, papéis e estado do 2FA",
             "content": {
               "application/json": {
                 "schema": {
@@ -380,10 +380,10 @@
             }
           },
           "401": {
-            "description": "Sem sessão de backoffice"
+            "description": "Sem sessão de backoffice (num Host de canal, sempre)"
           },
           "403": {
-            "description": "Sem papel neste host"
+            "description": "Sem papéis"
           },
           "404": {
             "description": "Host desconhecido ou tenant inativo"
@@ -1312,19 +1312,27 @@
         "enum": [
           "super_admin",
           "tenant_admin",
+          "sponsor_admin",
           "merchant_owner",
           "merchant_staff"
         ]
       },
       "RoleGrant": {
         "type": "object",
-        "description": "Um papel com o seu âmbito (`tenant_id`/`store_id` NULL conforme o CHECK da 0018).",
+        "description": "Um papel com o seu âmbito (`tenant_id`/`store_id`/`sponsor_entity_id` NULL conforme o CHECK\n`user_roles_scope` da 0028).",
         "required": [
           "role"
         ],
         "properties": {
           "role": {
             "$ref": "#/components/schemas/Role"
+          },
+          "sponsor_entity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           },
           "store_id": {
             "type": [
@@ -1379,7 +1387,7 @@
         "properties": {
           "mfa_required": {
             "type": "boolean",
-            "description": "`true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin ou TOTP ligado)."
+            "description": "`true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin, sponsor_admin ou\nTOTP ligado)."
           }
         }
       },
@@ -1409,7 +1417,7 @@
             "items": {
               "$ref": "#/components/schemas/RoleGrant"
             },
-            "description": "Só os papéis no âmbito deste host."
+            "description": "Todos os papéis do utilizador, com o âmbito (loja, tenant ou entidade)."
           }
         }
       },

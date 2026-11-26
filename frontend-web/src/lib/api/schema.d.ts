@@ -106,8 +106,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Inicia sessão de backoffice no host do pedido. Falha → 401 sempre igual (exista ou não a conta,
-         *     tenha ou não papel aqui).
+         * Inicia sessão de backoffice (só no host de plataforma). Falha → 401 sempre igual (exista ou não
+         *     a conta, tenha ou não papéis, seja ou não um Host de canal).
          */
         post: operations["login"];
         delete?: never;
@@ -529,10 +529,15 @@ export interface components {
          * @description Papel de backoffice (`user_roles.role`).
          * @enum {string}
          */
-        Role: "super_admin" | "tenant_admin" | "merchant_owner" | "merchant_staff";
-        /** @description Um papel com o seu âmbito (`tenant_id`/`store_id` NULL conforme o CHECK da 0018). */
+        Role: "super_admin" | "tenant_admin" | "sponsor_admin" | "merchant_owner" | "merchant_staff";
+        /**
+         * @description Um papel com o seu âmbito (`tenant_id`/`store_id`/`sponsor_entity_id` NULL conforme o CHECK
+         *     `user_roles_scope` da 0028).
+         */
         RoleGrant: {
             role: components["schemas"]["Role"];
+            /** Format: uuid */
+            sponsor_entity_id?: string | null;
             /** Format: uuid */
             store_id?: string | null;
             /** Format: uuid */
@@ -551,7 +556,10 @@ export interface components {
         };
         /** @description Resposta do login de staff. */
         StaffLoginResponse: {
-            /** @description `true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin ou TOTP ligado). */
+            /**
+             * @description `true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin, sponsor_admin ou
+             *     TOTP ligado).
+             */
             mfa_required: boolean;
         };
         /** @description Utilizador de backoffice da sessão: nunca hashes nem segredos. */
@@ -561,7 +569,7 @@ export interface components {
             id: string;
             /** @description A sessão já passou o 2FA. */
             mfa_verified: boolean;
-            /** @description Só os papéis no âmbito deste host. */
+            /** @description Todos os papéis do utilizador, com o âmbito (loja, tenant ou entidade). */
             roles: components["schemas"]["RoleGrant"][];
         };
         Status: {
@@ -939,7 +947,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Sessão iniciada (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma); `mfa_required` diz se falta o 2FA */
+            /** @description Sessão iniciada (cookie `__Host-ptm_admin`, só no host de plataforma); `mfa_required` diz se falta o 2FA */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -948,7 +956,7 @@ export interface operations {
                     "application/json": components["schemas"]["StaffLoginResponse"];
                 };
             };
-            /** @description Credenciais inválidas ou sem acesso a este site (corpo sempre igual). Com `"captcha_required": true` no corpo: repetir com `turnstile_token` */
+            /** @description Credenciais inválidas, sem papéis ou fora do host de plataforma (corpo sempre igual). Com `"captcha_required": true` no corpo: repetir com `turnstile_token` */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1113,7 +1121,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Utilizador, papéis neste host e estado do 2FA */
+            /** @description Utilizador, papéis e estado do 2FA */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1122,14 +1130,14 @@ export interface operations {
                     "application/json": components["schemas"]["StaffMe"];
                 };
             };
-            /** @description Sem sessão de backoffice */
+            /** @description Sem sessão de backoffice (num Host de canal, sempre) */
             401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Sem papel neste host */
+            /** @description Sem papéis */
             403: {
                 headers: {
                     [name: string]: unknown;

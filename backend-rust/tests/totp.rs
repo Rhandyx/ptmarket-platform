@@ -30,7 +30,7 @@ use ptmarket_api::{
         AccountKey, CaptchaVerifier, Login, Password, Sessions, Totp,
         crypto::EncKey,
         password,
-        session::{COOKIE_PLATFORM, COOKIE_TENANT},
+        session::COOKIE_PLATFORM,
         throttle::Limits,
         totp::{MFA_REVOKE_AFTER, base32_decode, code, mfa_limits, step_at},
     },
@@ -47,6 +47,10 @@ use sqlx::{
 };
 use tower::ServiceExt;
 use uuid::Uuid;
+
+mod common;
+
+use common::{PlatformReader, app_login_pool, count as n_events, is};
 
 type TestResult = anyhow::Result<()>;
 
@@ -448,14 +452,6 @@ async fn admin_alerts(worker: &PgPool) -> anyhow::Result<Vec<Value>> {
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-fn n_events(evs: &[Value], f: impl Fn(&Value) -> bool) -> usize {
-    evs.iter().filter(|e| f(e)).count()
-}
-
-fn is(e: &Value, k: &str, v: &str) -> bool {
-    e[k].as_str() == Some(v)
-}
-
 // ---------------------------------------------------------------------------------------------
 // Testes
 // ---------------------------------------------------------------------------------------------
@@ -466,21 +462,24 @@ fn is(e: &Value, k: &str, v: &str) -> bool {
 /// `/superadmin/whoami` → 404; sem segredos nos eventos; travão → 429.
 #[sqlx::test(migrations = "../migrations")]
 async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResult {
-    let pool = role_pool(&opts, &conn, "app").await?;
+    let pool = app_login_pool(&opts, &conn).await?;
     let owner = owner_pool(&opts, &conn).await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
     let a = seed_tenant(&owner, "camara-a").await?;
     let admin = seed_user(&owner, "camara@x.pt", &[("tenant_admin", Some(a.id), None)]).await?;
     let other = seed_user(&owner, "outra@x.pt", &[("tenant_admin", Some(a.id), None)]).await?;
     let ns = format!("test:totp:{}:", Uuid::now_v7());
     let app = router(&pool, &ns)?;
-    let h = a.domain.as_str();
+    // Painel único (cartão 03/13): o tenant_admin trabalha no host de plataforma; o tenant vem da
+    // rota. O Host do canal só serve para provar que a consola também lá não se anuncia.
+    let h = PLATFORM;
+    let channel = a.domain.as_str();
+    let tadmin_uri = format!("/api/v1/_test/tenants/{}/admin", a.id);
 
     // Sem 2FA: as rotas normais recusam, as de 2FA não.
     let c0 = login(&app, h, "camara@x.pt").await?;
     assert_eq!(
-        get(&app, h, "/api/v1/_test/tenant-admin", &c0)
-            .await?
-            .status,
+        get(&app, h, &tadmin_uri, &c0).await?.status,
         StatusCode::FORBIDDEN
     );
     let r = post(&app, h, ENROLL, &c0, "{}").await?;
@@ -536,13 +535,13 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
             .all(|c| c.len() == 10 && !c.contains(['0', 'O', '1', 'I', 'L']))
     );
     let c1 = r.cookie()?;
-    assert!(c1.starts_with(&format!("{COOKIE_TENANT}=")) && c1 != c0);
+    assert!(c1.starts_with(&format!("{COOKIE_PLATFORM}=")) && c1 != c0);
     // A sessão antiga foi revogada; a nova passa nos extractores normais.
     assert_eq!(
         get(&app, h, "/api/v1/staff/me", &c0).await?.status,
         StatusCode::UNAUTHORIZED
     );
-    let r = get(&app, h, "/api/v1/_test/tenant-admin", &c1).await?;
+    let r = get(&app, h, &tadmin_uri, &c1).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let (_, enabled, hashes) = user_secrets(&owner, admin).await?;
     assert!(enabled);
@@ -574,12 +573,7 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
     let r = post(&app, h, VERIFY, &c2, &code_body(&next)).await?;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
     let c3 = r.cookie()?;
-    assert_eq!(
-        get(&app, h, "/api/v1/_test/tenant-admin", &c3)
-            .await?
-            .status,
-        StatusCode::OK
-    );
+    assert_eq!(get(&app, h, &tadmin_uri, &c3).await?.status, StatusCode::OK);
     let c4 = login(&app, h, "camara@x.pt").await?;
     assert_eq!(
         post(&app, h, VERIFY, &c4, &code_body(&next)).await?.status,
@@ -609,7 +603,7 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
     assert_eq!(st, [StatusCode::NO_CONTENT, StatusCode::UNAUTHORIZED]);
 
     // Caixa negra: eventos certos, sem segredo, código nem códigos de recuperação.
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = reader.events(&pool, Some(admin)).await?;
     let mine = |e: &Value| e["actor_id"].as_str() == Some(admin.to_string().as_str());
     assert_eq!(
         n_events(&evs, |e| mine(e)
@@ -675,12 +669,12 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
     );
 
     // Consola: todos os caminhos `/api/v1/superadmin/*` do contrato e um inventado dão o MESMO
-    // 404, sem sessão (plataforma e tenant) e com tenant_admin com 2FA; cada um com `denied`.
+    // 404, sem sessão (plataforma e canal) e com tenant_admin com 2FA; cada um com `denied`.
     let paths = superadmin_paths()?;
     let mut replies = Vec::new();
     for p in &paths {
         replies.push(get(&app, PLATFORM, p, "").await?);
-        replies.push(get(&app, h, p, "").await?);
+        replies.push(get(&app, channel, p, "").await?);
         replies.push(get(&app, h, p, &c3).await?);
     }
     let first = (replies[0].status, replies[0].body.clone());
@@ -689,7 +683,7 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
         replies.iter().all(|r| (r.status, r.body.clone()) == first),
         "404 diferente"
     );
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = reader.events(&pool, Some(admin)).await?;
     assert_eq!(
         n_events(&evs, |e| mine(e)
             && is(e, "outcome", "denied")
@@ -737,7 +731,7 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
         StatusCode::UNAUTHORIZED,
         "sessão pré-MFA revogada"
     );
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = reader.events(&pool, Some(other)).await?;
     let theirs = |e: &Value| e["actor_id"].as_str() == Some(other.to_string().as_str());
     assert_eq!(
         n_events(&evs, |e| theirs(e)

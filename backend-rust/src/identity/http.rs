@@ -6,9 +6,10 @@
 //!
 //! `authenticate`: cookie do host (`__Host-ptm_session` em tenant, `__Host-ptm_admin` na
 //! plataforma) → sha256 → `identity_session_lookup` → a sessão só vale se `tenant_id` = tenant do
-//! `Host` (ou NULL no host de plataforma) e se estiver ativa no Redis → põe `Actor` + `SessionInfo`
-//! nas extensões. Cookie inválido, expirado, revogado, inativo ou de outro tenant = anónimo, e o
-//! cookie é limpo na resposta.
+//! `Host` (ou NULL no host de plataforma), se for de cliente ou do host de plataforma (sessões
+//! `user` só lá: cartão 03/13) e se estiver ativa no Redis (inatividade pelo papel) → põe `Actor` +
+//! `SessionInfo` nas extensões. Cookie inválido, expirado, revogado, inativo ou de outro tenant =
+//! anónimo, e o cookie é limpo na resposta.
 
 use std::{sync::Arc, time::Duration, time::SystemTime};
 
@@ -177,11 +178,6 @@ impl Sessions {
         &self.inner.passkeys
     }
 
-    /// BD primária (lookup de sessões e papéis; nunca a réplica).
-    pub(crate) fn db(&self) -> &sqlx::PgPool {
-        &self.inner.db
-    }
-
     pub(crate) fn redis(&self) -> &deadpool_redis::Pool {
         &self.inner.redis
     }
@@ -216,17 +212,7 @@ impl Sessions {
         if row.tenant != tenant.map(|t| t.as_uuid()) {
             return Ok(Resolution::Invalid);
         }
-        if !session::touch(
-            &self.inner.redis,
-            &self.inner.ns,
-            &row,
-            self.idle(row.kind()),
-        )
-        .await?
-        {
-            return Ok(Resolution::Invalid);
-        }
-        let (actor, staff) = match row.subject {
+        let (actor, staff, kind) = match row.subject {
             Subject::Customer(id) => (
                 Actor {
                     actor_type: ActorType::Customer,
@@ -234,9 +220,13 @@ impl Sessions {
                     impersonator_id: row.impersonator_id,
                 },
                 None,
+                row.kind(),
             ),
-            // Papéis lidos uma vez por pedido (cache em `StaffRoles`); o tipo de ator depende deles
-            // e do host (cartão 02/19).
+            // Painel único (cartão 03/13): uma sessão `user` só vale no `PLATFORM_ADMIN_HOST`; num
+            // Host de canal é anónima (os extractores de staff respondem 401).
+            Subject::User(_) if tenant.is_some() => return Ok(Resolution::Invalid),
+            // Papéis lidos uma vez por pedido (cache em `StaffRoles`); o tipo de ator e a
+            // inatividade dependem deles, não do Host.
             Subject::User(id) => {
                 let roles = load_roles(&self.inner.db, id, request_id).await?;
                 let staff = StaffRoles::new(id, tenant, roles);
@@ -245,9 +235,13 @@ impl Sessions {
                     actor_id: Some(id),
                     impersonator_id: row.impersonator_id,
                 };
-                (actor, Some(staff))
+                let kind = staff.session_kind();
+                (actor, Some(staff), kind)
             }
         };
+        if !session::touch(&self.inner.redis, &self.inner.ns, &row, self.idle(kind)).await? {
+            return Ok(Resolution::Invalid);
+        }
         Ok(Resolution::Valid(
             actor,
             SessionInfo {

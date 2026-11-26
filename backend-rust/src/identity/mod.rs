@@ -30,7 +30,7 @@ pub use passkey::Passkeys;
 pub use password::{Password, Verified};
 pub use rbac::{
     RequireStaff, RequireStaffPreMfa, RequireStoreOwner, RequireStoreRole, RequireSuperAdmin,
-    RequireTenantAdmin, Role, RoleGrant, StaffRoles, StoreAccess, StoreViewForTenantAdmin,
+    RequireTenantAdmin, Role, RoleGrant, StaffRoles,
 };
 pub use session::{CookieKind, CookieValue, SessionId, Subject};
 pub use throttle::{AccountKey, account_hash};

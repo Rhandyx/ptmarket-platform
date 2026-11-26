@@ -1,9 +1,12 @@
-//! Login de staff e extractores de RBAC (cartão 02/19), contra Postgres e Redis reais, pela API
-//! real (`http::api`) com sessões, captcha falso e as rotas de prova `/api/v1/_test/*`
-//! (feature `test-support`).
+//! Login de staff e extractores de RBAC (cartões 02/19 e 03/13: painel único), contra Postgres e
+//! Redis reais, pela API real (`http::api`) com sessões, captcha falso e as rotas de prova
+//! `/api/v1/_test/*` (feature `test-support`).
 //!
 //! Contas e papéis nascem pelo dono (a app não escreve `users`/`user_roles`): `NO FORCE ROW LEVEL
-//! SECURITY` só dentro da transação do seed. Leituras de `audit.*` sem `query!` (schema selado).
+//! SECURITY` só dentro da transação do seed. As lojas nascem num tenant `national_portal`. Os
+//! eventos da plataforma (`tenant_id` NULL) leem-se pela porta do super_admin (`common`).
+
+mod common;
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -30,7 +33,7 @@ use ptmarket_api::{
     },
     state::AppState,
     storage::NullStorage,
-    tenancy::{HostResolver, TenantId, begin_tenant_tx},
+    tenancy::{HostResolver, TenantId, begin_tenant_tx, db::begin_platform_tx},
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -42,8 +45,6 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 type TestResult = anyhow::Result<()>;
-/// action, outcome, reason, actor_type, actor_id.
-type EvRow = (String, String, Option<String>, String, Option<Uuid>);
 
 const CSRF_KEY: &str = "chave-csrf-de-teste-com-mais-de-32-bytes";
 const INTERNAL_TOKEN: &str = "token-interno-de-teste-com-mais-de-32-bytes";
@@ -76,25 +77,14 @@ impl BreachChecker for NoBreach {
 // Infra
 // ---------------------------------------------------------------------------------------------
 
-async fn app_pool(opts: &PoolOptions<Postgres>, conn: &PgConnectOptions) -> sqlx::Result<PgPool> {
-    opts.clone()
-        .max_connections(6)
-        .after_connect(|c, _meta| {
-            Box::pin(async move {
-                sqlx::query!("SET ROLE ptmarket_app").execute(c).await?;
-                Ok(())
-            })
-        })
-        .connect_with(conn.clone())
-        .await
-}
-
 async fn owner_pool(opts: &PoolOptions<Postgres>, conn: &PgConnectOptions) -> sqlx::Result<PgPool> {
     opts.clone()
         .max_connections(1)
         .connect_with(conn.clone())
         .await
 }
+
+use common::{PlatformReader, app_login_pool, count, is};
 
 fn redis() -> anyhow::Result<deadpool_redis::Pool> {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned());
@@ -243,16 +233,18 @@ impl Tenant {
     }
 }
 
-async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<Tenant> {
+/// Tenant `national_portal` (onde nascem as lojas) ou `municipal` (só um Host de canal).
+async fn seed_tenant(owner: &PgPool, slug: &str, tenant_type: &str) -> sqlx::Result<Tenant> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.ptmarket.invalid");
     sqlx::query!(
-        "INSERT INTO tenants (id, slug, custom_domain, name, country_code)
-         VALUES ($1, $2, $3, $4, 'PT')",
+        "INSERT INTO tenants (id, slug, custom_domain, name, country_code, tenant_type)
+         VALUES ($1, $2, $3, $4, 'PT', $5)",
         id,
         slug,
         domain,
-        format!("Câmara {slug}")
+        format!("Canal {slug}"),
+        tenant_type
     )
     .execute(owner)
     .await?;
@@ -276,12 +268,32 @@ async fn seed_store(app: &PgPool, t: &Tenant, slug: &str) -> anyhow::Result<Uuid
     Ok(id)
 }
 
-/// Conta de backoffice com os papéis `(role, tenant, store)`, criada pelo dono.
+/// Entidade patrocinadora (associação: sem área própria), pelo dono.
+async fn seed_entity(owner: &PgPool, slug: &str) -> sqlx::Result<Uuid> {
+    let id = Uuid::now_v7();
+    sqlx::query!(
+        "INSERT INTO sponsor_entities (id, kind, name, slug) VALUES ($1, 'association', $2, $2)",
+        id,
+        slug
+    )
+    .execute(owner)
+    .await?;
+    Ok(id)
+}
+
+/// Papel: (role, tenant, loja, entidade).
+type Grant<'a> = (&'a str, Option<Uuid>, Option<Uuid>, Option<Uuid>);
+
+fn merchant<'a>(role: &'a str, t: &Tenant, store: Uuid) -> Grant<'a> {
+    (role, Some(t.id), Some(store), None)
+}
+
+/// Conta de backoffice com os papéis, criada pelo dono.
 async fn seed_user(
     owner: &PgPool,
     email: &str,
     active: bool,
-    roles: &[(&str, Option<Uuid>, Option<Uuid>)],
+    roles: &[Grant<'_>],
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     let phc = password::hash(&Password::parse(PW)?).await?;
@@ -302,15 +314,16 @@ async fn seed_user(
     )
     .execute(&mut *tx)
     .await?;
-    for (role, tenant, store) in roles {
+    for (role, tenant, store, entity) in roles {
         sqlx::query!(
-            "INSERT INTO user_roles (id, user_id, role, tenant_id, store_id)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO user_roles (id, user_id, role, tenant_id, store_id, sponsor_entity_id)
+             VALUES ($1, $2, $3, $4, $5, $6)",
             Uuid::now_v7(),
             id,
             *role,
             *tenant,
-            *store
+            *store,
+            *entity
         )
         .execute(&mut *tx)
         .await?;
@@ -325,20 +338,10 @@ async fn seed_user(
     Ok(id)
 }
 
-/// id da conta pelo email (lookup do login).
-async fn owner_id(app: &PgPool, _t: &Tenant, email: &str) -> anyhow::Result<Uuid> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT u.id::uuid FROM public.identity_user_credentials($1::text) AS u")
-            .bind(email)
-            .fetch_optional(app)
-            .await?;
-    row.map(|r| r.0).ok_or_else(|| anyhow::anyhow!("sem conta"))
-}
-
-/// Marca o 2FA nas sessões ativas do utilizador (como o cartão 20 fará), com o próprio como ator.
-async fn elevate(app: &PgPool, t: &Tenant, user: Uuid) -> TestResult {
+/// Marca o 2FA nas sessões ativas do utilizador (sessões de plataforma), com o próprio como ator.
+async fn elevate(app: &PgPool, user: Uuid) -> TestResult {
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(user), None, None);
-    let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
+    let mut tx = begin_platform_tx(app, &ctx).await?;
     let r = sqlx::query!(
         "UPDATE sessions SET mfa_verified_at = now()
          WHERE subject_type = 'user' AND subject_id = $1 AND revoked_at IS NULL",
@@ -370,224 +373,246 @@ async fn enable_totp(owner: &PgPool, user: Uuid) -> TestResult {
     Ok(())
 }
 
-/// Eventos da caixa negra do tenant `t`.
-async fn events(app: &PgPool, t: &Tenant) -> anyhow::Result<Vec<EvRow>> {
+/// Eventos do tenant `t` (recusas num Host de canal), como JSON.
+async fn tenant_events(app: &PgPool, t: &Tenant) -> anyhow::Result<Vec<Value>> {
     let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
     let mut tx = begin_tenant_tx(app, t.tid(), &reader).await?;
-    let rows: Vec<EvRow> = sqlx::query_as(
-        "SELECT action::text, outcome::text, reason::text, actor_type::text, actor_id::uuid
-         FROM audit.audit_events ORDER BY chain_seq",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows: Vec<(Value,)> =
+        sqlx::query_as("SELECT to_jsonb(e) FROM audit.audit_events e ORDER BY chain_seq")
+            .fetch_all(&mut *tx)
+            .await?;
     tx.rollback().await?;
-    Ok(rows)
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-fn count(evs: &[EvRow], f: impl Fn(&EvRow) -> bool) -> usize {
-    evs.iter().filter(|e| f(e)).count()
+/// Login com a password certa e com uma errada no mesmo host: (certa, errada). Router próprio
+/// (travão do Redis limpo), para as falhas por IP de outras contas não pedirem já captcha.
+async fn right_and_wrong(pool: &PgPool, host: &str, email: &str) -> anyhow::Result<(Reply, Reply)> {
+    let ns = format!("test:rbac:{}:", Uuid::now_v7());
+    let app = router(pool, &ns)?;
+    let right = staff_login(&app, host, email, PW).await?;
+    let wrong = staff_login(&app, host, email, "outra-frase-qualquer").await?;
+    cleanup(&ns).await?;
+    Ok((right, wrong))
+}
+
+/// A recusa com a password certa é igual à da password errada (401, mesmo corpo, sem cookie).
+fn same_as_wrong_password(right: &Reply, wrong: &Reply, who: &str) {
+    assert_eq!(
+        right.status,
+        StatusCode::UNAUTHORIZED,
+        "{who}: {}",
+        right.body
+    );
+    assert_eq!(
+        (right.status, &right.body),
+        (wrong.status, &wrong.body),
+        "{who}"
+    );
+    assert!(right.set_cookie.is_none(), "{who}");
+}
+
+fn uid(e: &Value) -> Option<Uuid> {
+    e["actor_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Testes
 // ---------------------------------------------------------------------------------------------
 
-/// Merchant: L1 sim; L2 (mesmo tenant) e L3 (outro tenant) → 404 + `idor` com o ator;
-/// `merchant_staff` no `RequireStoreOwner` → 403; `/staff/me`; `last_login_at` → `users.update`;
-/// host sem papel → o 401 de uma password errada.
+/// Merchant no host de plataforma: L1 sim (tenant do papel); L2 do MESMO tenant nacional e um UUID
+/// inexistente → 404 + `idor`; `merchant_staff` no `RequireStoreOwner` → 403; dono sem 2FA → 403;
+/// `/staff/me` com o âmbito; `last_login_at` → `users.update`; whoami → 404 + `superadmin_gate`;
+/// Host de canal: login = o 401 da password errada + `no_role_here`, cookie de staff → 401.
 #[sqlx::test(migrations = "../migrations")]
 async fn merchant_scope_idor_owner_and_me(
     opts: PgPoolOptions,
     conn: PgConnectOptions,
 ) -> TestResult {
-    let pool = app_pool(&opts, &conn).await?;
+    let pool = app_login_pool(&opts, &conn).await?;
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let b = seed_tenant(&owner, "camara-b").await?;
-    let l1 = seed_store(&pool, &a, "loja-1").await?;
-    let l2 = seed_store(&pool, &a, "loja-2").await?;
-    let l3 = seed_store(&pool, &b, "loja-3").await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
+    let n = seed_tenant(&owner, "nacional", "national_portal").await?;
+    let c = seed_tenant(&owner, "camara-a", "municipal").await?;
+    let l1 = seed_store(&pool, &n, "loja-1").await?;
+    let l2 = seed_store(&pool, &n, "loja-2").await?;
     let staff = seed_user(
         &owner,
         "staff@x.pt",
         true,
-        &[("merchant_staff", Some(a.id), Some(l1))],
+        &[merchant("merchant_staff", &n, l1)],
     )
     .await?;
-    seed_user(
+    let dona_id = seed_user(
         &owner,
         "dona@x.pt",
         true,
-        &[("merchant_owner", Some(a.id), Some(l1))],
+        &[merchant("merchant_owner", &n, l1)],
     )
     .await?;
     let ns = format!("test:rbac:{}:", Uuid::now_v7());
     let app = router(&pool, &ns)?;
 
-    let r = staff_login(&app, &a.domain, "Staff@X.pt", PW).await?;
+    let r = staff_login(&app, PLATFORM, "Staff@X.pt", PW).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(r.json(), json!({"mfa_required": false}));
+    let sc = r.set_cookie.clone().unwrap_or_default();
+    assert!(
+        sc.starts_with(&format!("{COOKIE_PLATFORM}=")) && sc.contains("SameSite=Strict"),
+        "{sc}"
+    );
     let cookie = r.cookie()?;
-    assert!(cookie.starts_with(&format!("{COOKIE_TENANT}=")), "{cookie}");
 
-    assert_eq!(
-        get(
-            &app,
-            &a.domain,
-            &format!("/api/v1/_test/stores/{l1}"),
-            &cookie
-        )
-        .await?
-        .status,
-        StatusCode::OK
-    );
-    assert_eq!(
-        get(
-            &app,
-            &a.domain,
-            &format!("/api/v1/_test/stores/{l2}"),
-            &cookie
-        )
-        .await?
-        .status,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get(
-            &app,
-            &a.domain,
-            &format!("/api/v1/_test/stores/{l3}"),
-            &cookie
-        )
-        .await?
-        .status,
-        StatusCode::NOT_FOUND
-    );
-    let owner_only = get(
-        &app,
-        &a.domain,
-        &format!("/api/v1/_test/stores/{l1}/owner"),
-        &cookie,
-    )
-    .await?;
+    let store = |l: Uuid| format!("/api/v1/_test/stores/{l}");
+    let r = get(&app, PLATFORM, &store(l1), &cookie).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["tenant_id"], json!(n.id), "tenant do papel");
+    for other in [l2, Uuid::now_v7()] {
+        let r = get(&app, PLATFORM, &store(other), &cookie).await?;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    }
+    let owner_only = get(&app, PLATFORM, &format!("{}/owner", store(l1)), &cookie).await?;
     assert_eq!(owner_only.status, StatusCode::FORBIDDEN);
 
     // RequireStoreOwner exige SEMPRE 2FA (dinheiro/IBAN); `{store_id}` que não é UUID → 404 idor.
-    let dona_id = owner_id(&pool, &a, "dona@x.pt").await?;
-    let dona = staff_login(&app, &a.domain, "dona@x.pt", PW)
+    let dona = staff_login(&app, PLATFORM, "dona@x.pt", PW)
         .await?
         .cookie()?;
-    let owner_uri = format!("/api/v1/_test/stores/{l1}/owner");
+    let owner_uri = format!("{}/owner", store(l1));
     assert_eq!(
-        get(&app, &a.domain, &owner_uri, &dona).await?.status,
+        get(&app, PLATFORM, &owner_uri, &dona).await?.status,
         StatusCode::FORBIDDEN
     );
-    elevate(&pool, &a, dona_id).await?;
-    assert_eq!(
-        get(&app, &a.domain, &owner_uri, &dona).await?.status,
-        StatusCode::OK
-    );
-    let bad = get(&app, &a.domain, "/api/v1/_test/stores/nao-e-uuid", &dona).await?;
+    elevate(&pool, dona_id).await?;
+    let r = get(&app, PLATFORM, &owner_uri, &dona).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["tenant_id"], json!(n.id));
+    let bad = get(&app, PLATFORM, "/api/v1/_test/stores/nao-e-uuid", &dona).await?;
     assert_eq!(bad.status, StatusCode::NOT_FOUND);
-    let evs = events(&pool, &a).await?;
-    let d = |e: &EvRow| e.4 == Some(dona_id) && e.1 == "denied";
+    let evs = reader.events(&pool, Some(dona_id)).await?;
+    let d = |e: &Value| is(e, "outcome", "denied");
     assert_eq!(
-        count(&evs, |e| d(e) && e.2.as_deref() == Some("mfa_required")),
+        count(&evs, |e| d(e) && is(e, "reason", "mfa_required")),
         1,
         "{evs:?}"
     );
     assert_eq!(
-        count(&evs, |e| d(e) && e.2.as_deref() == Some("idor")),
+        count(&evs, |e| d(e) && is(e, "reason", "idor")),
         1,
         "{evs:?}"
     );
 
-    // /staff/me: síncrono, sem hashes nem segredos.
-    let me = get(&app, &a.domain, STAFF_ME, &cookie).await?;
+    // /staff/me: síncrono, sem hashes nem segredos, com o âmbito do papel.
+    let me = get(&app, PLATFORM, STAFF_ME, &cookie).await?;
     assert_eq!(me.status, StatusCode::OK, "{}", me.body);
     assert_eq!(
         me.json(),
         json!({
             "id": staff,
             "full_name": "Pessoa de Teste",
-            "roles": [{"role": "merchant_staff", "tenant_id": a.id, "store_id": l1}],
+            "roles": [{"role": "merchant_staff", "tenant_id": n.id, "store_id": l1,
+                       "sponsor_entity_id": null}],
             "mfa_verified": false
         })
     );
     assert!(!me.body.contains("argon2") && !me.body.contains("hash") && !me.body.contains("totp"));
 
-    let evs = events(&pool, &a).await?;
-    let mine = |e: &EvRow| e.4 == Some(staff) && e.3 == "merchant";
+    // Merchant na consola → 404 + `superadmin_gate`.
+    let w = get(&app, PLATFORM, "/api/v1/superadmin/whoami", &cookie).await?;
+    assert_eq!(w.status, StatusCode::NOT_FOUND);
+
+    let evs = reader.events(&pool, Some(staff)).await?;
+    let mine = |e: &Value| uid(e) == Some(staff) && is(e, "actor_type", "merchant");
     assert_eq!(
-        count(&evs, |e| mine(e)
-            && e.1 == "denied"
-            && e.2.as_deref() == Some("idor")),
+        count(&evs, |e| mine(e) && d(e) && is(e, "reason", "idor")),
         2,
         "{evs:?}"
     );
     assert_eq!(
-        count(&evs, |e| mine(e) && e.2.as_deref() == Some("rbac")),
-        1,
-        "{evs:?}"
-    );
-    assert_eq!(
-        count(&evs, |e| mine(e) && e.0 == "users.update"),
+        count(&evs, |e| mine(e) && is(e, "reason", "rbac")),
         1,
         "{evs:?}"
     );
     assert_eq!(
         count(&evs, |e| mine(e)
-            && e.0 == "auth.staff_login"
-            && e.1 == "success"),
+            && d(e)
+            && is(e, "reason", "superadmin_gate")),
         1,
         "{evs:?}"
     );
-    // GET /staff/me é ReadSync: já está na caixa negra quando a resposta sai.
+    assert_eq!(
+        count(&evs, |e| mine(e) && is(e, "action", "users.update")),
+        1,
+        "{evs:?}"
+    );
+    assert_eq!(
+        count(&evs, |e| mine(e)
+            && is(e, "action", "auth.staff_login")
+            && is(e, "outcome", "success")),
+        1,
+        "{evs:?}"
+    );
     assert!(
-        count(&evs, |e| mine(e) && e.1 == "success" && e.0 == "http.get") >= 1,
+        count(&evs, |e| mine(e)
+            && is(e, "outcome", "success")
+            && is(e, "action", "http.get"))
+            >= 1,
         "{evs:?}"
     );
 
-    // Host onde não tem papel: o mesmo 401 de uma password errada + `no_role_here`.
-    let no_role = staff_login(&app, &b.domain, "staff@x.pt", PW).await?;
-    let wrong = staff_login(&app, &b.domain, "staff@x.pt", "outra-frase-qualquer").await?;
-    assert_eq!(no_role.status, StatusCode::UNAUTHORIZED);
-    assert_eq!((no_role.status, &no_role.body), (wrong.status, &wrong.body));
-    assert!(no_role.set_cookie.is_none());
-    let evs = events(&pool, &b).await?;
+    // Host de canal: o mesmo 401 de uma password errada + `no_role_here` (no tenant do canal).
+    let (right, wrong) = right_and_wrong(&pool, &c.domain, "staff@x.pt").await?;
+    same_as_wrong_password(&right, &wrong, "merchant");
+    let evs = tenant_events(&pool, &c).await?;
     assert_eq!(
-        count(&evs, |e| e.0 == "auth.staff_login"
-            && e.2.as_deref() == Some("no_role_here")),
+        count(&evs, |e| is(e, "action", "auth.staff_login")
+            && is(e, "reason", "no_role_here")),
         1,
         "{evs:?}"
+    );
+    // O cookie de staff (com qualquer nome) não vale num Host de canal → 401.
+    let token = cookie.split_once('=').map(|x| x.1).unwrap_or_default();
+    for name in [COOKIE_PLATFORM, COOKIE_TENANT] {
+        let r = get(&app, &c.domain, STAFF_ME, &format!("{name}={token}")).await?;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{name}: {}", r.body);
+    }
+    // E continua a valer na plataforma.
+    assert_eq!(
+        get(&app, PLATFORM, STAFF_ME, &cookie).await?.status,
+        StatusCode::OK
     );
     cleanup(&ns).await
 }
 
-/// `tenant_admin` sem 2FA → 403 `mfa_required`; `super_admin` num host de tenant não é Admin e na
-/// plataforma recebe `__Host-ptm_admin` Strict; inativo não entra; cliente em rota de staff → 401;
-/// sem `Origin` → 403; 2FA exigido no ramo Merchant (TOTP; tenant_admin dono de loja).
+/// `tenant_admin`, `sponsor_admin` e `super_admin` no painel único: 2FA obrigatório (403 antes),
+/// `tenant_admin` só pelo `{tenant_id}` da rota e nunca em lojas (404); `super_admin` e
+/// `sponsor_admin` recusados num Host de canal como uma password errada; sem papéis não entra;
+/// inativo não entra; cliente em rota de staff → 401; sem `Origin` → 403.
 #[sqlx::test(migrations = "../migrations")]
-async fn tenant_admin_super_admin_inactive_and_customer(
+async fn admins_sponsor_super_admin_inactive_and_customer(
     opts: PgPoolOptions,
     conn: PgConnectOptions,
 ) -> TestResult {
-    let pool = app_pool(&opts, &conn).await?;
+    let pool = app_login_pool(&opts, &conn).await?;
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let l1 = seed_store(&pool, &a, "loja-1").await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
+    let n = seed_tenant(&owner, "nacional", "national_portal").await?;
+    let a = seed_tenant(&owner, "camara-a", "municipal").await?;
+    let b = seed_tenant(&owner, "camara-b", "municipal").await?;
+    let l1 = seed_store(&pool, &n, "loja-1").await?;
+    let entity = seed_entity(&owner, "associacao-x").await?;
     let admin = seed_user(
         &owner,
         "camara@x.pt",
         true,
-        &[("tenant_admin", Some(a.id), None)],
+        &[("tenant_admin", Some(a.id), None, None)],
     )
     .await?;
     let totp = seed_user(
         &owner,
         "totp@x.pt",
         true,
-        &[("merchant_staff", Some(a.id), Some(l1))],
+        &[merchant("merchant_staff", &n, l1)],
     )
     .await?;
     enable_totp(&owner, totp).await?;
@@ -596,9 +621,16 @@ async fn tenant_admin_super_admin_inactive_and_customer(
         "misto@x.pt",
         true,
         &[
-            ("tenant_admin", Some(a.id), None),
-            ("merchant_owner", Some(a.id), Some(l1)),
+            ("tenant_admin", Some(a.id), None, None),
+            merchant("merchant_owner", &n, l1),
         ],
+    )
+    .await?;
+    let sponsor = seed_user(
+        &owner,
+        "patrocinio@x.pt",
+        true,
+        &[("sponsor_admin", None, None, Some(entity))],
     )
     .await?;
     let sup = seed_user(
@@ -606,70 +638,101 @@ async fn tenant_admin_super_admin_inactive_and_customer(
         "super@x.pt",
         true,
         &[
-            ("super_admin", None, None),
-            ("merchant_owner", Some(a.id), Some(l1)),
+            ("super_admin", None, None, None),
+            merchant("merchant_owner", &n, l1),
         ],
     )
     .await?;
+    seed_user(&owner, "sempapel@x.pt", true, &[]).await?;
     seed_user(
         &owner,
         "inativo@x.pt",
         false,
-        &[("merchant_staff", Some(a.id), Some(l1))],
+        &[merchant("merchant_staff", &n, l1)],
     )
     .await?;
     let ns = format!("test:rbac:{}:", Uuid::now_v7());
     let app = router(&pool, &ns)?;
+    let store_uri = format!("/api/v1/_test/stores/{l1}");
+    let tenant_uri = |t: Uuid| format!("/api/v1/_test/tenants/{t}/admin");
 
-    // tenant_admin: entra, mas sem 2FA não passa no RequireTenantAdmin.
-    let r = staff_login(&app, &a.domain, "camara@x.pt", PW).await?;
+    // tenant_admin: entra na plataforma, mas sem 2FA não passa no RequireTenantAdmin.
+    let r = staff_login(&app, PLATFORM, "camara@x.pt", PW).await?;
     assert_eq!(r.json(), json!({"mfa_required": true}), "{}", r.body);
     let c = r.cookie()?;
-    let r = get(&app, &a.domain, "/api/v1/_test/tenant-admin", &c).await?;
+    let r = get(&app, PLATFORM, &tenant_uri(a.id), &c).await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
+    elevate(&pool, admin).await?;
+    let r = get(&app, PLATFORM, &tenant_uri(a.id), &c).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["tenant_id"], json!(a.id));
+    // Outro tenant (pela rota) → 404 idor; rota de loja → 404 idor (tenant_admin não vê lojas).
+    let r = get(&app, PLATFORM, &tenant_uri(b.id), &c).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = get(&app, PLATFORM, &store_uri, &c).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = get(&app, PLATFORM, &format!("{store_uri}/owner"), &c).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let evs = reader.events(&pool, Some(admin)).await?;
+    let mine = |e: &Value| uid(e) == Some(admin) && is(e, "actor_type", "municipal");
+    assert_eq!(
+        count(&evs, |e| mine(e) && is(e, "reason", "mfa_required")),
+        1,
+        "{evs:?}"
+    );
+    assert_eq!(
+        count(&evs, |e| mine(e) && is(e, "reason", "idor")),
+        3,
+        "{evs:?}"
+    );
 
     // 2FA obrigatório no servidor também no ramo Merchant: lojista com TOTP e tenant_admin que é
     // dono de uma loja, ambos sem 2FA → 403.
-    let store_uri = format!("/api/v1/_test/stores/{l1}");
     for email in ["totp@x.pt", "misto@x.pt"] {
-        let r = staff_login(&app, &a.domain, email, PW).await?;
+        let r = staff_login(&app, PLATFORM, email, PW).await?;
         assert_eq!(
             r.json(),
             json!({"mfa_required": true}),
             "{email}: {}",
             r.body
         );
-        let g = get(&app, &a.domain, &store_uri, &r.cookie()?).await?;
+        let g = get(&app, PLATFORM, &store_uri, &r.cookie()?).await?;
         assert_eq!(g.status, StatusCode::FORBIDDEN, "{email}");
     }
 
-    // super_admin no host do tenant: ator Merchant (papel de loja), nunca Admin.
-    let r = staff_login(&app, &a.domain, "super@x.pt", PW).await?;
+    // sponsor_admin: canal → 401 da password errada; plataforma → `mfa_required`, /staff/me com a
+    // entidade, rotas pós-MFA → 403; ator Municipal.
+    let (right, wrong) = right_and_wrong(&pool, &a.domain, "patrocinio@x.pt").await?;
+    same_as_wrong_password(&right, &wrong, "sponsor_admin");
+    let r = staff_login(&app, PLATFORM, "patrocinio@x.pt", PW).await?;
     assert_eq!(r.json(), json!({"mfa_required": true}), "{}", r.body);
-    let evs = events(&pool, &a).await?;
+    let cs = r.cookie()?;
+    let me = get(&app, PLATFORM, STAFF_ME, &cs).await?;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
     assert_eq!(
-        count(&evs, |e| e.4 == Some(admin)
-            && e.3 == "municipal"
-            && e.2.as_deref() == Some("mfa_required")),
-        1,
+        me.json()["roles"],
+        json!([{"role": "sponsor_admin", "tenant_id": null, "store_id": null,
+                "sponsor_entity_id": entity}])
+    );
+    for uri in [store_uri.clone(), tenant_uri(a.id)] {
+        let r = get(&app, PLATFORM, &uri, &cs).await?;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{uri}");
+    }
+    let evs = reader.events(&pool, Some(sponsor)).await?;
+    assert_eq!(
+        count(&evs, |e| is(e, "actor_type", "municipal")
+            && is(e, "reason", "mfa_required")),
+        2,
         "{evs:?}"
     );
-    assert_eq!(
-        count(&evs, |e| e.4 == Some(sup)
-            && e.0 == "auth.staff_login"
-            && e.3 == "merchant"),
-        1,
-        "{evs:?}"
-    );
-    assert_eq!(
-        count(&evs, |e| e.4 == Some(sup) && e.3 == "admin"),
-        0,
-        "{evs:?}"
-    );
+    assert_eq!(count(&evs, |e| is(e, "actor_type", "admin")), 0, "{evs:?}");
 
-    // Plataforma: cookie próprio, SameSite=Strict; /staff/me só com o papel global.
+    // super_admin: canal → 401 da password errada; plataforma → cookie Strict, todos os papéis.
+    let (right, wrong) = right_and_wrong(&pool, &a.domain, "super@x.pt").await?;
+    same_as_wrong_password(&right, &wrong, "super_admin");
     let r = staff_login(&app, PLATFORM, "super@x.pt", PW).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json(), json!({"mfa_required": true}), "{}", r.body);
     let sc = r.set_cookie.clone().unwrap_or_default();
     assert!(
         sc.starts_with(&format!("{COOKIE_PLATFORM}=")) && sc.contains("SameSite=Strict"),
@@ -678,22 +741,40 @@ async fn tenant_admin_super_admin_inactive_and_customer(
     let me = get(&app, PLATFORM, STAFF_ME, &r.cookie()?).await?;
     assert_eq!(
         me.json()["roles"],
-        json!([{"role": "super_admin", "tenant_id": null, "store_id": null}]),
+        json!([
+            {"role": "merchant_owner", "tenant_id": n.id, "store_id": l1, "sponsor_entity_id": null},
+            {"role": "super_admin", "tenant_id": null, "store_id": null, "sponsor_entity_id": null}
+        ]),
         "{}",
         me.body
     );
-    // Na plataforma só entra super_admin.
+    let evs = reader.events(&pool, Some(sup)).await?;
     assert_eq!(
-        staff_login(&app, PLATFORM, "camara@x.pt", PW).await?.status,
-        StatusCode::UNAUTHORIZED
+        count(&evs, |e| is(e, "action", "auth.staff_login")
+            && is(e, "outcome", "success")
+            && is(e, "actor_type", "admin")),
+        1,
+        "{evs:?}"
+    );
+    // As 3 recusas num canal ficaram no tenant do canal, com `no_role_here`.
+    let evs = tenant_events(&pool, &a).await?;
+    assert_eq!(
+        count(&evs, |e| is(e, "action", "auth.staff_login")
+            && is(e, "reason", "no_role_here")),
+        2,
+        "{evs:?}"
     );
 
+    // Sem papéis: o 401 genérico, também na plataforma.
+    let (right, wrong) = right_and_wrong(&pool, PLATFORM, "sempapel@x.pt").await?;
+    same_as_wrong_password(&right, &wrong, "sem papéis");
+
     // Inativo: o 401 genérico.
-    let r = staff_login(&app, &a.domain, "inativo@x.pt", PW).await?;
+    let r = staff_login(&app, PLATFORM, "inativo@x.pt", PW).await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert!(r.set_cookie.is_none());
 
-    // Cliente: sessão `customer` numa rota de staff → 401.
+    // Cliente: sessão `customer` (num canal) numa rota de staff → 401.
     let origin = format!("https://{}", a.domain);
     let hdrs = [
         (header::HOST, a.domain.as_str()),
@@ -733,14 +814,7 @@ async fn tenant_admin_super_admin_inactive_and_customer(
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        get(
-            &app,
-            &a.domain,
-            &format!("/api/v1/_test/stores/{l1}"),
-            &customer
-        )
-        .await?
-        .status,
+        get(&app, &a.domain, &store_uri, &customer).await?.status,
         StatusCode::UNAUTHORIZED
     );
 
@@ -750,7 +824,7 @@ async fn tenant_admin_super_admin_inactive_and_customer(
         Method::POST,
         STAFF_LOGIN,
         &[
-            (header::HOST, a.domain.as_str()),
+            (header::HOST, PLATFORM),
             (header::CONTENT_TYPE, "application/json"),
         ],
         &json!({"email": "camara@x.pt", "password": PW}).to_string(),
@@ -758,4 +832,82 @@ async fn tenant_admin_super_admin_inactive_and_customer(
     .await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
     cleanup(&ns).await
+}
+
+/// Inatividade (TTL da chave no Redis) e duração absoluta (`expires_at`) da sessão de staff.
+async fn session_ttls(
+    app: &Router,
+    pool: &PgPool,
+    ns: &str,
+    email: &str,
+) -> anyhow::Result<(i64, i64)> {
+    let c = staff_login(app, PLATFORM, email, PW).await?.cookie()?;
+    assert_eq!(
+        get(app, PLATFORM, STAFF_ME, &c).await?.status,
+        StatusCode::OK
+    );
+    let mut conn = redis()?.get().await?;
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{ns}sess:idle:*"))
+        .query_async(&mut conn)
+        .await?;
+    anyhow::ensure!(keys.len() == 1, "{keys:?}");
+    let idle_ms: i64 = redis::cmd("PTTL")
+        .arg(&keys[0])
+        .query_async(&mut conn)
+        .await?;
+    let sid = keys[0].rsplit(':').next().unwrap_or_default();
+    let sid = Uuid::parse_str(sid)?;
+    let user: Uuid =
+        serde_json::from_value(get(app, PLATFORM, STAFF_ME, &c).await?.json()["id"].clone())?;
+    let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(user), None, None);
+    let mut tx = begin_platform_tx(pool, &ctx).await?;
+    let (secs,): (f64,) = sqlx::query_as(
+        "SELECT extract(epoch FROM expires_at - created_at)::float8 FROM sessions WHERE id = $1",
+    )
+    .bind(sid)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    Ok((idle_ms, secs as i64))
+}
+
+/// Duração pelo papel: merchant → inatividade de staff (30 min); super_admin → de plataforma
+/// (15 min). A absoluta fica nas 8 h que o CHECK da 0019 permite a uma sessão sem tenant.
+#[sqlx::test(migrations = "../migrations")]
+async fn session_lifetime_follows_the_role(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let pool = app_login_pool(&opts, &conn).await?;
+    let owner = owner_pool(&opts, &conn).await?;
+    let n = seed_tenant(&owner, "nacional", "national_portal").await?;
+    let l1 = seed_store(&pool, &n, "loja-1").await?;
+    seed_user(
+        &owner,
+        "dona@x.pt",
+        true,
+        &[merchant("merchant_owner", &n, l1)],
+    )
+    .await?;
+    seed_user(
+        &owner,
+        "super@x.pt",
+        true,
+        &[("super_admin", None, None, None)],
+    )
+    .await?;
+    for (email, idle_min) in [("dona@x.pt", 30), ("super@x.pt", 15)] {
+        let ns = format!("test:rbac:{}:", Uuid::now_v7());
+        let app = router(&pool, &ns)?;
+        let (idle_ms, abs_secs) = session_ttls(&app, &pool, &ns, email).await?;
+        let max = idle_min * 60_000;
+        assert!(
+            idle_ms > max - 60_000 && idle_ms <= max,
+            "{email}: {idle_ms} ms"
+        );
+        assert_eq!(abs_secs, 8 * 3600, "{email}");
+        cleanup(&ns).await?;
+    }
+    Ok(())
 }

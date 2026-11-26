@@ -286,7 +286,6 @@ async fn post(
 
 struct Tenant {
     id: Uuid,
-    domain: String,
 }
 
 async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<Tenant> {
@@ -302,7 +301,7 @@ async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<Tenant> {
     )
     .execute(owner)
     .await?;
-    Ok(Tenant { id, domain })
+    Ok(Tenant { id })
 }
 
 async fn seed_user(
@@ -629,14 +628,15 @@ async fn timeline_filters_cursor_and_denials(
     // Não super_admin / sem 2FA / anónimo → 404 uniforme (gate).
     let p_raw = login(&app, PLATFORM, "semtotp@x.pt").await?;
     let p_sa = login(&app, PLATFORM, "raiz@x.pt").await?; // TOTP ativo, sessão sem 2FA
-    let t_admin = login(&app, &a.domain, "camara@x.pt").await?;
+    // Painel único (cartão 03/13): o tenant_admin também só entra na plataforma.
+    let t_admin = login(&app, PLATFORM, "camara@x.pt").await?;
     let q = format!("tenant_id={}", a.id);
     for cookie in [&p_raw, &p_sa, ""] {
         let r = timeline(&app, cookie, &from, &to, &q).await?;
         assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
     }
     let uri = format!("{EVENTS}?from={from}&to={to}&{q}");
-    let r = get(&app, &a.domain, &uri, &t_admin).await?;
+    let r = get(&app, PLATFORM, &uri, &t_admin).await?;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 
     // 42501 da porta (ligação com SET ROLE: session_user ≠ ptmarket_app) → 404 + denied.

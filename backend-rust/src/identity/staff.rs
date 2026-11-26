@@ -1,13 +1,16 @@
-//! Login de utilizadores de backoffice (cartão 02/19): `POST /api/v1/staff/auth/login` e
+//! Login de utilizadores de backoffice (cartões 02/19 e 03/13): `POST /api/v1/staff/auth/login` e
 //! `GET /api/v1/staff/me`.
 //!
 //! O login reutiliza o de clientes (`login::check`): mesma resposta uniforme, mesmo travão (com o
 //! prefixo próprio `staff:`), mesmo captcha e Argon2 falso; eventos `auth.staff_login`.
 //! - `Origin` obrigatória mesmo sem sessão (login CSRF): o `csrf_guard` recusa sem ela (403 +
 //!   `Denied("csrf")`; rota em `ANONYMOUS_ORIGIN_PATHS`).
-//! - Host de tenant: só entra quem tem papel nesse tenant; `PLATFORM_ADMIN_HOST`: só
-//!   `super_admin` (cookie `__Host-ptm_admin`, `SameSite=Strict`). Sem papel aqui → o mesmo 401 de
-//!   uma password errada + `denied` (`no_role_here`), contado no travão como falha.
+//! - Painel único: só no `PLATFORM_ADMIN_HOST`, onde entra quem tiver PELO MENOS um papel (lojistas,
+//!   `sponsor_admin`, `tenant_admin`, `super_admin`); cookie sempre `__Host-ptm_admin`,
+//!   `SameSite=Strict`. Num Host de canal, ou sem papéis → o mesmo 401 de uma password errada +
+//!   `denied` (`no_role_here`), contado no travão como falha (não revela se a conta existe).
+//! - Duração: a inatividade segue o papel (`StaffRoles::session_kind`); a absoluta fica no máximo
+//!   que o CHECK `sessions_max_lifetime` (0019) permite a uma sessão sem tenant (8 h).
 //! - Sucesso → sessão `user` com `mfa_verified_at` NULL e `last_login_at` (gatilho:
 //!   `users.update`); 200 `{"mfa_required": bool}` (o 2FA é do cartão 20).
 
@@ -38,26 +41,27 @@ use crate::{
     },
 };
 
-/// Credenciais certas, mas sem papel no host do pedido.
+/// Credenciais certas, mas sem papel ou num Host de canal.
 pub const REASON_NO_ROLE_HERE: &str = "no_role_here";
 
 /// Resposta do login de staff.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct StaffLoginResponse {
-    /// `true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin ou TOTP ligado).
+    /// `true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin, sponsor_admin ou
+    /// TOTP ligado).
     pub mfa_required: bool,
 }
 
-/// Inicia sessão de backoffice no host do pedido. Falha → 401 sempre igual (exista ou não a conta,
-/// tenha ou não papel aqui).
+/// Inicia sessão de backoffice (só no host de plataforma). Falha → 401 sempre igual (exista ou não
+/// a conta, tenha ou não papéis, seja ou não um Host de canal).
 #[utoipa::path(
     post,
     path = "/api/v1/staff/auth/login",
     tag = "staff",
     request_body = LoginRequest,
     responses(
-        (status = 200, description = "Sessão iniciada (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma); `mfa_required` diz se falta o 2FA", body = StaffLoginResponse),
-        (status = 401, description = "Credenciais inválidas ou sem acesso a este site (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"),
+        (status = 200, description = "Sessão iniciada (cookie `__Host-ptm_admin`, só no host de plataforma); `mfa_required` diz se falta o 2FA", body = StaffLoginResponse),
+        (status = 401, description = "Credenciais inválidas, sem papéis ou fora do host de plataforma (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"),
         (status = 403, description = "Origin ausente ou de outro site (com sessão: também o token CSRF)"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 422, description = "Dados inválidos"),
@@ -121,16 +125,14 @@ async fn staff_login(a: &Attempt<'_>, req: &LoginRequest) -> Result<Response, Ap
             tracing::error!(error = ?e, "login de staff: papéis ilegíveis; 503");
             AppError::ServiceUnavailable
         })?;
+    // Num Host de canal nenhum papel vale (`may_log_in_here` falso): o mesmo 401 + `no_role_here`.
     let staff = StaffRoles::new(passed.id, a.tenant, access);
-    if !staff.may_log_in_here() {
+    if a.tenant.is_some() || !staff.may_log_in_here() {
         return a.refuse_passed(&passed, REASON_NO_ROLE_HERE).await;
     }
     let subject = Subject::User(passed.id);
     let value = a.open_session(staff.actor_type(), subject, &passed).await?;
-    let kind = match a.tenant {
-        Some(_) => CookieKind::Tenant,
-        None => CookieKind::Platform,
-    };
+    let kind = CookieKind::Platform;
     let body = StaffLoginResponse {
         mfa_required: staff.needs_mfa() || passed.totp_enabled,
     };
@@ -148,7 +150,7 @@ pub struct StaffMe {
     #[schema(value_type = String, format = "uuid")]
     pub id: Uuid,
     pub full_name: String,
-    /// Só os papéis no âmbito deste host.
+    /// Todos os papéis do utilizador, com o âmbito (loja, tenant ou entidade).
     pub roles: Vec<RoleGrant>,
     /// A sessão já passou o 2FA.
     pub mfa_verified: bool,
@@ -160,9 +162,9 @@ pub struct StaffMe {
     path = "/api/v1/staff/me",
     tag = "staff",
     responses(
-        (status = 200, description = "Utilizador, papéis neste host e estado do 2FA", body = StaffMe),
-        (status = 401, description = "Sem sessão de backoffice"),
-        (status = 403, description = "Sem papel neste host"),
+        (status = 200, description = "Utilizador, papéis e estado do 2FA", body = StaffMe),
+        (status = 401, description = "Sem sessão de backoffice (num Host de canal, sempre)"),
+        (status = 403, description = "Sem papéis"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 503, description = "Serviço temporariamente indisponível")
     )

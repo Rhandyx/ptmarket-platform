@@ -47,6 +47,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use webauthn_authenticator_rs::{prelude::*, softpasskey::SoftPasskey};
 
+mod common;
+
+use common::{PlatformReader, app_login_pool, count, is};
+
 type TestResult = anyhow::Result<()>;
 
 const CSRF_KEY: &str = "chave-csrf-de-teste-com-mais-de-32-bytes";
@@ -387,16 +391,18 @@ struct Tenant {
     domain: String,
 }
 
-async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<Tenant> {
+/// Tenant `national_portal` (onde nascem as lojas) ou `municipal` (só um Host de canal).
+async fn seed_tenant(owner: &PgPool, slug: &str, tenant_type: &str) -> sqlx::Result<Tenant> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.ptmarket.invalid");
     sqlx::query!(
-        "INSERT INTO tenants (id, slug, custom_domain, name, country_code)
-         VALUES ($1, $2, $3, $4, 'PT')",
+        "INSERT INTO tenants (id, slug, custom_domain, name, country_code, tenant_type)
+         VALUES ($1, $2, $3, $4, 'PT', $5)",
         id,
         slug,
         domain,
-        format!("Câmara {slug}")
+        format!("Canal {slug}"),
+        tenant_type
     )
     .execute(owner)
     .await?;
@@ -585,43 +591,48 @@ async fn tenant_events(app: &PgPool, t: &Tenant) -> anyhow::Result<Vec<Value>> {
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-fn is(e: &Value, k: &str, v: &str) -> bool {
-    e[k].as_str() == Some(v)
+/// Eventos da plataforma (`tenant_id` NULL), de todos os atores.
+async fn platform_events(reader: &PlatformReader, app: &PgPool) -> anyhow::Result<Vec<Value>> {
+    let evs = reader.events(app, None).await?;
+    Ok(evs
+        .into_iter()
+        .filter(|e| e["tenant_id"].is_null())
+        .collect())
 }
 
 fn denied(evs: &[Value], action: &str, reason: &str) -> usize {
-    evs.iter()
-        .filter(|e| {
-            is(e, "action", action) && is(e, "outcome", "denied") && is(e, "reason", reason)
-        })
-        .count()
+    count(evs, |e| {
+        is(e, "action", action) && is(e, "outcome", "denied") && is(e, "reason", reason)
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
 // Testes
 // ---------------------------------------------------------------------------------------------
 
-/// Lojista: registo sem sessão → 401; registo → lista → login por passkey (sessão elevada, evento
-/// com o ator); challenge reutilizado, expirado, de outra cerimónia ou de outro host → 401 +
-/// `denied`; origin de outro host → 401; passkey do host A no host B → 401; contador regressivo →
-/// `cloned_authenticator`; anti-IDOR na lista e no DELETE; última credencial sem password → 409.
+/// Lojista no host de plataforma (painel único, cartão 03/13): registo sem sessão → 401; registo →
+/// lista → login por passkey (sessão elevada, evento com o ator); challenge reutilizado, expirado,
+/// de outra cerimónia ou concluído num Host de canal → 401 + `denied`; origin de outro host → 401;
+/// passkey da plataforma num Host de canal → 401; contador regressivo → `cloned_authenticator`;
+/// anti-IDOR na lista e no DELETE; última credencial sem password → 409.
 #[sqlx::test(migrations = "../migrations")]
 async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResult {
-    let pool = app_pool(&opts, &conn).await?;
+    let pool = app_login_pool(&opts, &conn).await?;
     let owner = owner_pool(&opts, &conn).await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
     let ns = format!("t21a:{}:", Uuid::now_v7());
     let app = router(&pool, &ns)?;
-    let a = seed_tenant(&owner, "pk-a").await?;
-    let b = seed_tenant(&owner, "pk-b").await?;
+    let a = seed_tenant(&owner, "pk-nacional", "national_portal").await?;
+    let b = seed_tenant(&owner, "pk-b", "municipal").await?;
     let la = seed_store(&pool, &a, "loja-a").await?;
-    let lb = seed_store(&pool, &b, "loja-b").await?;
+    let lb = seed_store(&pool, &a, "loja-b").await?;
     let u = seed_user(
         &owner,
         "u@x.pt",
         false,
         &[
             ("merchant_staff", Some(a.id), Some(la)),
-            ("merchant_staff", Some(b.id), Some(lb)),
+            ("merchant_staff", Some(a.id), Some(lb)),
         ],
     )
     .await?;
@@ -632,7 +643,8 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
         &[("merchant_staff", Some(a.id), Some(la))],
     )
     .await?;
-    let (ha, hb) = (a.domain.as_str(), b.domain.as_str());
+    // A: o host de plataforma (onde o staff trabalha); B: um Host de canal.
+    let (ha, hb) = (PLATFORM, b.domain.as_str());
 
     // Registo sem sessão → 401.
     let r = anon_post(&app, ha, REG_START, "").await?;
@@ -696,7 +708,7 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     assert_eq!(me.json()["mfa_verified"], json!(true));
     let (n, used) = counter(&owner, id_u, None).await?;
     assert!(n >= 1 && used, "contador {n}, usado {used}");
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     let ok = evs.iter().filter(|e| {
         is(e, "action", "auth.passkey_login")
             && is(e, "outcome", "success")
@@ -722,7 +734,7 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     let xsigned = sign(&mut auth_u, origin(ha)?, xopts, &cred_u, u)?;
     let r = auth_finish(&app, hb, &xid, &xsigned).await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     assert_eq!(
         denied(&evs, "auth.passkey_login", "ceremony"),
         3,
@@ -742,10 +754,10 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     let hsigned = sign(&mut auth_u, origin(ha)?, hopts, &cred_u, v)?;
     let r = auth_finish(&app, ha, &hid, &hsigned).await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     assert_eq!(denied(&evs, "auth.passkey_login", "verification"), 2);
 
-    // Passkey registada no host A não entra no host B (o utilizador tem papel nos dois).
+    // Passkey registada na plataforma não entra num Host de canal.
     let r = passkey_login(&app, hb, &mut auth_u, &cred_u, u).await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
     let evs_b = tenant_events(&pool, &b).await?;
@@ -757,7 +769,7 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
     assert!(r.set_cookie.is_none());
     assert_eq!(counter(&owner, id_u, None).await?.0, 1_000);
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     assert_eq!(
         denied(&evs, "auth.passkey_login", "cloned_authenticator"),
         1
@@ -771,7 +783,7 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     let del_u = format!("{LIST}/{id_u}");
     let r = mutate(&app, Method::DELETE, ha, &del_u, &cv, "").await?;
     assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     let idor = evs.iter().filter(|e| {
         is(e, "outcome", "denied")
             && is(e, "reason", "idor")
@@ -798,7 +810,7 @@ async fn staff_passkey_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions) ->
     let r = mutate(&app, Method::DELETE, ha, &del_u, &cu, "").await?;
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
     assert_eq!(get(&app, ha, LIST, &cu).await?.json(), json!([]));
-    let evs = tenant_events(&pool, &a).await?;
+    let evs = platform_events(&reader, &pool).await?;
     let n = |act: &str| {
         evs.iter()
             .filter(|e| is(e, "action", act) && is(e, "outcome", "success"))
