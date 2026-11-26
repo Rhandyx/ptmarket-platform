@@ -91,6 +91,25 @@ impl HibpRange {
     }
 }
 
+impl HibpRange {
+    /// Versão estrita (CLI de operação, cartão 02/20c): `Ok(true)` vazada, `Ok(false)` não vazada,
+    /// `Err(ServiceUnavailable)` se o serviço falhar (o chamador aborta; nunca "passa" sem
+    /// verificação).
+    pub async fn check_strict(&self, p: &Password) -> Result<bool, AppError> {
+        let hex = sha1_upper_hex(p.expose_bytes());
+        let (Some(prefix), Some(suffix)) = (hex.get(..PREFIX_LEN), hex.get(PREFIX_LEN..)) else {
+            return Err(AppError::Internal(anyhow::anyhow!("SHA-1 inesperado")));
+        };
+        match self.fetch_range(prefix).await {
+            Ok(body) => Ok(range_contains(&body, suffix)),
+            Err(reason) => {
+                tracing::warn!(%reason, "verificação HIBP indisponível (modo estrito)");
+                Err(AppError::ServiceUnavailable)
+            }
+        }
+    }
+}
+
 /// SHA-1 em hex maiúsculo (40 caracteres), apagado da memória ao largar.
 fn sha1_upper_hex(bytes: &[u8]) -> Zeroizing<String> {
     let digest = Sha1::digest(bytes);

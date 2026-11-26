@@ -113,6 +113,19 @@ fn candidate_hashes(key: &RecoveryKey, user: Uuid, normalized: &str) -> Vec<Vec<
         .collect()
 }
 
+/// `n` códigos novos, distintos entre si (CSPRNG do SO). O mesmo gerador na API e no CLI.
+pub fn new_codes(n: usize) -> Result<Vec<String>, AppError> {
+    let mut codes = Vec::with_capacity(n);
+    while codes.len() < n {
+        let c = new_code()?;
+        // Repetido no mesmo lote (probabilidade desprezável): gera outro.
+        if !codes.contains(&c) {
+            codes.push(c);
+        }
+    }
+    Ok(codes)
+}
+
 /// Apaga os códigos anteriores de `user` e grava 10 novos (na transação do chamador, com o próprio
 /// como ator: RLS `own_*`). Devolve-os em claro (só para a resposta).
 pub(crate) async fn replace(
@@ -124,14 +137,7 @@ pub(crate) async fn replace(
         .execute(&mut *conn)
         .await
         .map_err(db_error)?;
-    let mut codes = Vec::with_capacity(CODES);
-    while codes.len() < CODES {
-        let c = new_code()?;
-        // Repetido no mesmo lote (probabilidade desprezável): gera outro.
-        if !codes.contains(&c) {
-            codes.push(c);
-        }
-    }
+    let codes = new_codes(CODES)?;
     for c in &codes {
         sqlx::query!(
             "INSERT INTO user_recovery_codes (id, user_id, code_hash) VALUES ($1, $2, $3)",
@@ -225,7 +231,10 @@ mod tests {
             Err(e) => unreachable!("{e}"),
         };
         assert!(candidate_hashes(&rotated, u, "ABCDEFGHJK").contains(&h.to_vec()));
-        assert_eq!(hash_code(&rotated, u, "ABCDEFGHJK")?, hash_code(&r2, u, "ABCDEFGHJK")?);
+        assert_eq!(
+            hash_code(&rotated, u, "ABCDEFGHJK")?,
+            hash_code(&r2, u, "ABCDEFGHJK")?
+        );
         Ok(())
     }
 }

@@ -577,8 +577,13 @@ mod tests {
         v.push(("TOTP_ENC_KEYS_OLD", "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=, dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s="));
         assert!(Config::from_lookup(env(&v)).is_ok_and(|c| c.totp_enc_keys_old.len() == 2));
         let mut v = OK.to_vec();
-        v.push(("TOTP_ENC_KEYS_OLD", "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=,segredo-mau"));
-        assert!(err_of(&v).is_some_and(|s| s.contains("TOTP_ENC_KEYS_OLD") && !s.contains("segredo")));
+        v.push((
+            "TOTP_ENC_KEYS_OLD",
+            "dG90cC1lbmMta2V5LXNlZ3JlZG8tMzItYnl0ZXMtb2s=,segredo-mau",
+        ));
+        assert!(
+            err_of(&v).is_some_and(|s| s.contains("TOTP_ENC_KEYS_OLD") && !s.contains("segredo"))
+        );
         let mut v = OK.to_vec();
         v.push(("TOTP_ENC_KEY", good));
         let c = Config::from_lookup(env(&v));

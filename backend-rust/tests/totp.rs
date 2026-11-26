@@ -456,26 +456,6 @@ fn is(e: &Value, k: &str, v: &str) -> bool {
     e[k].as_str() == Some(v)
 }
 
-/// Ativa o TOTP pela API (enroll + confirm) e devolve (segredo, códigos, cookie elevado).
-async fn activate(
-    app: &Router,
-    host: &str,
-    cookie: &str,
-) -> anyhow::Result<(Vec<u8>, Vec<String>, String)> {
-    let r = post(app, host, ENROLL, cookie, "{}").await?;
-    anyhow::ensure!(r.status == StatusCode::OK, "enroll: {}", r.body);
-    let b32 = r.json()["secret_base32"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    let secret = base32_decode(&b32).ok_or_else(|| anyhow::anyhow!("base32"))?;
-    let c = fmt6(code(&secret, now_step()));
-    let r = post(app, host, CONFIRM, cookie, &code_body(&c)).await?;
-    anyhow::ensure!(r.status == StatusCode::OK, "confirm: {}", r.body);
-    let codes: Vec<String> = serde_json::from_value(r.json()["recovery_codes"].clone())?;
-    Ok((secret, codes, r.cookie()?))
-}
-
 // ---------------------------------------------------------------------------------------------
 // Testes
 // ---------------------------------------------------------------------------------------------
@@ -774,11 +754,25 @@ async fn tenant_admin_totp_lifecycle(opts: PgPoolOptions, conn: PgConnectOptions
         (header::ORIGIN, origin.as_str()),
     ];
     let creds = json!({"email": "outra@x.pt", "password": PW});
-    let r = send(&fast, Method::POST, "/api/v1/staff/auth/login", &hdrs, &creds.to_string()).await?;
+    let r = send(
+        &fast,
+        Method::POST,
+        "/api/v1/staff/auth/login",
+        &hdrs,
+        &creds.to_string(),
+    )
+    .await?;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
     assert_eq!(r.json()["captcha_required"], json!(true), "{}", r.body);
     let creds = json!({"email": "outra@x.pt", "password": PW, "turnstile_token": "captcha-ok"});
-    let r = send(&fast, Method::POST, "/api/v1/staff/auth/login", &hdrs, &creds.to_string()).await?;
+    let r = send(
+        &fast,
+        Method::POST,
+        "/api/v1/staff/auth/login",
+        &hdrs,
+        &creds.to_string(),
+    )
+    .await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let o1 = r.cookie()?;
     assert_eq!(
@@ -809,55 +803,126 @@ fn superadmin_paths() -> anyhow::Result<Vec<String>> {
     Ok(paths)
 }
 
-/// CLI cria o super_admin (2.ª vez falha; a app não escreve `user_roles`); gate da consola:
-/// sem TOTP, sem 2FA na sessão ou noutro host → 404 + `superadmin_gate`; com tudo → 200, 1 evento
-/// síncrono `admin` e 1 alerta `audit.superadmin_action`.
+/// Resultado de uma execução do CLI: sucesso, segredo base32 lido do enroll e toda a saída.
+struct CliRun {
+    ok: bool,
+    secret_b32: Option<String>,
+    /// Passo TOTP do código certo enviado no enroll.
+    enroll_step: Option<u64>,
+    out: String,
+}
+
+/// Corre `ptmarket-admin create-superadmin` com o stdin em pipe: a password duas vezes, depois lê o
+/// segredo do enroll na saída e responde com o código TOTP certo (ou `bad_codes` errados antes).
+fn run_cli(env: &[(&str, &str)], email: &str, bad_codes: usize) -> anyhow::Result<CliRun> {
+    use std::io::{BufRead, BufReader, Read};
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ptmarket-admin"));
+    cmd.args([
+        "create-superadmin",
+        "--email",
+        email,
+        "--name",
+        "Raiz da Plataforma",
+    ])
+    .env_clear()
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("stdout"))?;
+    stdin.write_all(format!("{PW}\n{PW}\n").as_bytes())?;
+    stdin.flush()?;
+    let mut reader = BufReader::new(stdout);
+    let mut out = String::new();
+    let mut secret_b32 = None;
+    let mut enroll_step = None;
+    let mut line = String::new();
+    while reader.read_line(&mut line)? > 0 {
+        out.push_str(&line);
+        if let Some(b32) = line.trim().strip_prefix("segredo: ") {
+            let secret = base32_decode(b32).ok_or_else(|| anyhow::anyhow!("base32"))?;
+            for _ in 0..bad_codes {
+                stdin.write_all(format!("{}\n", wrong_code(&secret)).as_bytes())?;
+            }
+            let step = now_step();
+            stdin.write_all(format!("{}\n", fmt6(code(&secret, step))).as_bytes())?;
+            enroll_step = Some(step);
+            stdin.flush()?;
+            secret_b32 = Some(b32.to_owned());
+            line.clear();
+            break;
+        }
+        line.clear();
+    }
+    drop(stdin);
+    reader.read_to_string(&mut out)?;
+    let output = child.wait_with_output()?;
+    out.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(CliRun {
+        ok: output.status.success(),
+        secret_b32,
+        enroll_step,
+        out,
+    })
+}
+
+/// CLI (cartão 20c): cria o super_admin JÁ com TOTP (enroll no terminal) e 10 códigos; login na
+/// plataforma + verify com o segredo do enroll → `/superadmin/whoami` 200; 2.ª vez → "email já
+/// existe"; a app não escreve `user_roles`. Gate: sem TOTP, sem 2FA na sessão, caminho
+/// desconhecido ou noutro host → 404 + `superadmin_gate`; 1 evento síncrono `admin` + 1 alerta.
 #[sqlx::test(migrations = "../migrations")]
 async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResult {
     let pool = role_pool(&opts, &conn, "app").await?;
     let worker = role_pool(&opts, &conn, "worker").await?;
     let owner = owner_pool(&opts, &conn).await?;
     let a = seed_tenant(&owner, "camara-a").await?;
+    // super_admin sem TOTP (seed do dono): o gate recusa.
+    let raw = seed_user(&owner, "semtotp@x.pt", &[("super_admin", None, None)]).await?;
 
-    // CLI com a ligação do dono desta BD de teste; password pelo stdin (sem terminal).
+    // Ligação do migrator a ESTA BD de teste; ambiente da API (APP_ENV=test, a mesma TOTP_ENC_KEY).
     let base = std::env::var("DATABASE_URL")?;
     let db = conn.get_database().unwrap_or("ptmarket");
     let admin_url = match base.rfind('/') {
         Some(i) => format!("{}/{db}", &base[..i]),
         None => anyhow::bail!("DATABASE_URL sem base de dados"),
     };
-    let run = |email: &str| -> anyhow::Result<(bool, String)> {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ptmarket-admin"))
-            .args([
-                "create-superadmin",
-                "--email",
-                email,
-                "--name",
-                "Raiz da Plataforma",
-            ])
-            .env("ADMIN_DATABASE_URL", &admin_url)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(format!("{PW}\n").as_bytes())?;
-        }
-        let out = child.wait_with_output()?;
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        Ok((out.status.success(), text))
-    };
-    let (ok, out) = run("Raiz@X.pt")?;
-    assert!(ok, "{out}");
-    assert!(!out.contains(PW));
-    let (ok, out) = run("raiz@x.pt")?;
-    assert!(!ok && out.contains("já existe"), "{out}");
-    let (ok, _) = run("--password")?;
-    assert!(!ok);
+    let enc = STANDARD.encode([42u8; 32]);
+    let ns = format!("test:totp:{}:", Uuid::now_v7());
+    let env = [
+        ("PTMARKET_TEST_REDIS_NS", ns.as_str()),
+        ("APP_ENV", "test"),
+        ("DATABASE_PRIMARY_URL", "postgres://u@127.0.0.1:1/x"),
+        ("DATABASE_REPLICA_URL", "postgres://u@127.0.0.1:1/x"),
+        ("REDIS_URL", "redis://127.0.0.1:6379"),
+        ("TOTP_ENC_KEY", enc.as_str()),
+        ("ADMIN_DATABASE_URL", admin_url.as_str()),
+    ];
+
+    // 1 código errado e depois o certo: criado com TOTP ativo; 10 códigos mostrados.
+    let run = run_cli(&env, "Raiz@X.pt", 1)?;
+    assert!(run.ok, "{}", run.out);
+    assert!(run.out.contains("Código errado (2 tentativa(s) restante(s))"), "{}", run.out);
+    let b32 = run.secret_b32.clone().ok_or_else(|| anyhow::anyhow!("sem segredo"))?;
+    let secret = base32_decode(&b32).ok_or_else(|| anyhow::anyhow!("base32"))?;
+    let after = run.out.split("Códigos de recuperação").nth(1).unwrap_or_default();
+    let codes: Vec<&str> = after.lines().skip(1).map(str::trim).filter(|l| l.len() == 10).collect();
+    assert_eq!(codes.len(), 10, "{}", run.out);
+    assert!(!run.out.contains(PW), "password na saída");
+    assert!(run.out.contains("HIBP) está DESLIGADA"), "{}", run.out);
+    assert_eq!(run.out.matches(b32.as_str()).count(), 2, "segredo só no enroll (uri + base32)");
+    // 2.ª execução com o mesmo email (outra grafia) → falha; papel da API → recusado.
+    let again = run_cli(&env, "raiz@x.pt", 0)?;
+    assert!(!again.ok && again.out.contains("email já existe"), "{}", again.out);
+    let mut app_env = env;
+    app_env[6] = ("ADMIN_DATABASE_URL", "postgres://ptmarket_app@127.0.0.1:1/x");
+    assert!(!run_cli(&app_env, "outro@x.pt", 0)?.ok);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_ptmarket-admin"));
+    c.args(["create-superadmin", "--email", "a@x.pt", "--name", "A", "--password", "x"]);
+    assert!(!c.output()?.status.success());
 
     // A API continua sem escrever em user_roles.
     let denied = sqlx::query!(
@@ -869,32 +934,37 @@ async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) ->
     .await;
     assert!(denied.is_err());
 
-    let ns = format!("test:totp:{}:", Uuid::now_v7());
     let app = router(&pool, &ns)?;
 
-    // Sem TOTP ativo → 404 (sessão de plataforma com ator admin).
-    let p0 = login(&app, PLATFORM, "raiz@x.pt").await?;
+    // super_admin sem TOTP ativo → 404 (ator admin na plataforma).
+    let p0 = login(&app, PLATFORM, "semtotp@x.pt").await?;
     assert!(p0.starts_with(&format!("{COOKIE_PLATFORM}=")));
-    assert_eq!(
-        get(&app, PLATFORM, WHOAMI, &p0).await?.status,
-        StatusCode::NOT_FOUND
-    );
+    let gated = get(&app, PLATFORM, WHOAMI, &p0).await?;
+    assert_eq!(gated.status, StatusCode::NOT_FOUND);
 
-    // Ativa → sessão elevada → 200.
-    let (secret, codes, p1) = activate(&app, PLATFORM, &p0).await?;
-    assert_eq!(codes.len(), 10);
+    // Super_admin do CLI: TOTP ativo mas sessão sem 2FA → 404; verify → 200.
+    let p2 = login(&app, PLATFORM, "raiz@x.pt").await?;
+    assert_eq!(get(&app, PLATFORM, WHOAMI, &p2).await?.status, StatusCode::NOT_FOUND);
+    let p3 = login(&app, PLATFORM, "raiz@x.pt").await?;
+    // O código usado no enroll do CLI ficou marcado: no /verify é `replayed`.
+    let s0 = run.enroll_step.ok_or_else(|| anyhow::anyhow!("sem passo do enroll"))?;
+    let r = post(&app, PLATFORM, VERIFY, &p3, &code_body(&fmt6(code(&secret, s0)))).await?;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
+    let r = post(&app, PLATFORM, VERIFY, &p3, &code_body(&fmt6(code(&secret, s0 + 1)))).await?;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    let p1 = r.cookie()?;
     let r = get(&app, PLATFORM, WHOAMI, &p1).await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     assert_eq!(r.json()["full_name"], json!("Raiz da Plataforma"));
     let sa = r.json()["id"].as_str().unwrap_or_default().to_owned();
-    // TOTP ativo mas sessão sem 2FA → 404.
-    let p2 = login(&app, PLATFORM, "raiz@x.pt").await?;
-    let gated = get(&app, PLATFORM, WHOAMI, &p2).await?;
-    assert_eq!(gated.status, StatusCode::NOT_FOUND);
-    // Caminho desconhecido mesmo com tudo certo: o mesmo 404 de uma recusa (catch-all do grupo),
-    // com `denied`/`superadmin_gate`.
+    // Um código de recuperação do CLI também serve (o hash com HMAC e o id bate certo).
+    let p4 = login(&app, PLATFORM, "raiz@x.pt").await?;
+    let r = post(&app, PLATFORM, VERIFY, &p4, &code_body(codes[0])).await?;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    // Caminho desconhecido com tudo certo: o mesmo 404 de uma recusa.
     let unknown = get(&app, PLATFORM, "/api/v1/superadmin/nao-existe", &p1).await?;
     assert_eq!((unknown.status, &unknown.body), (gated.status, &gated.body));
+
     // Noutro host (tenant) → 404 (o cookie da plataforma não vale lá).
     let r = get(&app, &a.domain, WHOAMI, &p1).await?;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
@@ -918,7 +988,13 @@ async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) ->
         n_events(&alerts, |e| whoami(e)
             && is(e, "outcome", "denied")
             && is(e, "reason", "superadmin_gate")),
-        2,
+        1,
+        "{alerts:?}"
+    );
+    assert_eq!(
+        n_events(&alerts, |e| is(e, "actor_id", &raw.to_string())
+            && is(e, "reason", "superadmin_gate")),
+        1,
         "{alerts:?}"
     );
     assert_eq!(
@@ -928,8 +1004,15 @@ async fn superadmin_cli_and_gate(opts: PgPoolOptions, conn: PgConnectOptions) ->
         1,
         "{alerts:?}"
     );
+    assert_eq!(
+        n_events(&alerts, |e| is(e, "actor_id", &sa)
+            && is(e, "action", "mfa.verify")
+            && is(e, "reason", "replayed")),
+        1,
+        "{alerts:?}"
+    );
     let all = serde_json::to_string(&alerts)?;
-    assert!(codes.iter().all(|c| !all.contains(c.as_str())));
-    assert!(!all.contains(&STANDARD.encode(&secret)));
+    assert!(codes.iter().all(|c| !all.contains(c)));
+    assert!(!all.contains(&b32));
     cleanup(&ns).await
 }

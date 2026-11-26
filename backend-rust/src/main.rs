@@ -34,6 +34,18 @@ async fn run() -> anyhow::Result<()> {
     // Sem CSRF_KEY o binário não arranca (as sessões precisam dela).
     let csrf_key = cfg.require_csrf_key()?;
     let state = AppState::from_config(&cfg)?;
+    // A API nunca pode ser membro dos papéis de bootstrap/operador (0024: criar super_admin).
+    let separated = sqlx::query_scalar!(
+        r#"SELECT (NOT pg_has_role(current_user, 'ptmarket_operator', 'MEMBER')
+                   AND NOT pg_has_role(current_user, 'ptmarket_bootstrap', 'MEMBER')) AS "ok!""#
+    )
+    .fetch_one(&state.db_primary)
+    .await;
+    if !matches!(separated, Ok(true)) {
+        anyhow::bail!(
+            "papel da API com acesso a ptmarket_operator/ptmarket_bootstrap (ou BD indisponível): recusado"
+        );
+    }
     let mut sessions = Sessions::new(state.db_primary.clone(), state.redis.clone(), csrf_key)
         .with_internal_token(cfg.internal_proxy_token.clone())
         // 2FA TOTP (cartão 02/20): TOTP_ENC_KEY obrigatória em staging/production (`Config`).

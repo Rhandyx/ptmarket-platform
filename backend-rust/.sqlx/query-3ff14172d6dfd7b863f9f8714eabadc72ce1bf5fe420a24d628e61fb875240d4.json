@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (NOT pg_has_role(current_user, 'ptmarket_operator', 'MEMBER')\n                   AND NOT pg_has_role(current_user, 'ptmarket_bootstrap', 'MEMBER')) AS \"ok!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3ff14172d6dfd7b863f9f8714eabadc72ce1bf5fe420a24d628e61fb875240d4"
+}

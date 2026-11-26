@@ -70,7 +70,7 @@ pub const ISSUER: &str = "PT Market";
 /// Máximo de caracteres aceites no campo `code`.
 pub const MAX_CODE_CHARS: usize = 32;
 /// Vida da marca anti-repetição (cobre a janela de ±1 passo).
-const REPLAY_TTL: Duration = Duration::from_secs(150);
+pub const REPLAY_TTL: Duration = Duration::from_secs(150);
 const REDIS_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Recusa por código errado (ou fora da janela).
@@ -106,8 +106,8 @@ pub fn step_at(t: SystemTime) -> u64 {
 }
 
 /// Passo da janela [agora - 1, agora + 1] cujo código é `given` (comparação em tempo constante,
-/// sempre os 3 passos).
-fn matching_step(secret: &[u8], now: u64, given: u32) -> Option<u64> {
+/// sempre os 3 passos). A mesma verificação no `confirm`/`verify` e no CLI `ptmarket-admin`.
+pub fn matching_step(secret: &[u8], now: u64, given: u32) -> Option<u64> {
     let mut found = None;
     for step in now.saturating_sub(SKEW_STEPS)..=now.saturating_add(SKEW_STEPS) {
         if bool::from(code(secret, step).ct_eq(&given)) {
@@ -167,7 +167,7 @@ fn pct(s: &str) -> String {
 }
 
 /// URI `otpauth://` (formato Key Uri das apps de autenticação).
-fn otpauth_uri(account: &str, secret_b32: &str) -> String {
+pub fn otpauth_uri(account: &str, secret_b32: &str) -> String {
     format!(
         "otpauth://totp/{}:{}?secret={secret_b32}&issuer={}&algorithm=SHA1&digits={DIGITS}&period={STEP_SECS}",
         pct(ISSUER),
@@ -299,6 +299,14 @@ fn validated(body: Result<Json<MfaCodeRequest>, JsonRejection>) -> Result<String
     Ok(req.code)
 }
 
+/// Código TOTP escrito pelo utilizador (6 dígitos, espaços ignorados); `None` se não tiver essa forma.
+pub fn parse_totp(raw: &str) -> Option<u32> {
+    match classify(raw) {
+        GivenCode::Totp(c) => Some(c),
+        _ => None,
+    }
+}
+
 fn classify(raw: &str) -> GivenCode {
     let digits: String = raw.chars().filter(|c| *c != ' ').collect();
     if digits.len() == DIGITS as usize && digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -417,15 +425,23 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 return 1
 "#;
 
-async fn mark_step(s: &Sessions, user: Uuid, step: u64) -> Result<bool, AppError> {
+/// Marca `step` como o último passo TOTP aceite de `user` (chave `<ns>mfa:totp:last:<id>`, TTL
+/// `REPLAY_TTL`). `false` = passo já usado (ou anterior). Também usada pelo CLI `ptmarket-admin`
+/// para o código do enroll (ns vazio em produção). Redis em baixo → `ServiceUnavailable`.
+pub async fn mark_step(
+    redis: &deadpool_redis::Pool,
+    ns: &str,
+    user: Uuid,
+    step: u64,
+) -> Result<bool, AppError> {
     let mut cmd = redis::cmd("EVAL");
     cmd.arg(MARK_STEP_SCRIPT)
         .arg(1)
-        .arg(format!("{}mfa:totp:last:{user}", s.ns()))
+        .arg(format!("{ns}mfa:totp:last:{user}"))
         .arg(step)
         .arg(u64::try_from(REPLAY_TTL.as_millis()).unwrap_or(150_000));
     let fut = async {
-        let mut conn = s.redis().get().await.map_err(|e| {
+        let mut conn = redis.get().await.map_err(|e| {
             tracing::error!(error = %e, "2FA: Redis indisponível");
             AppError::ServiceUnavailable
         })?;
@@ -538,7 +554,7 @@ impl<'a> Call<'a> {
         let Some(step) = found else {
             return Ok(Some(REASON_BAD_CODE));
         };
-        if !mark_step(self.cur.sessions(), self.user, step).await? {
+        if !mark_step(self.cur.sessions().redis(), self.cur.sessions().ns(), self.user, step).await? {
             return Ok(Some(REASON_REPLAYED));
         }
         Ok(None)
@@ -569,13 +585,10 @@ impl<'a> Call<'a> {
                 let revoke = self.failures >= MFA_REVOKE_AFTER;
                 let mut email = None;
                 if revoke {
-                    email = sqlx::query_scalar!(
-                        "SELECT email FROM users WHERE id = $1",
-                        self.user
-                    )
-                    .fetch_optional(tx.conn())
-                    .await
-                    .map_err(db_error)?;
+                    email = sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", self.user)
+                        .fetch_optional(tx.conn())
+                        .await
+                        .map_err(db_error)?;
                     tx.revoke(self.info.id).await?;
                     tx.record(AuditEvent {
                         action: "auth.logout",

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SET LOCAL ROLE ptmarket_operator",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "741a933a47f765fe14604e39ba5454ff429e981cf9f0aefc91a5b235ad1cf17c"
+}
