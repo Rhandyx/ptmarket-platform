@@ -98,6 +98,24 @@ pub fn api(
         .route(
             "/api/v1/me",
             get(identity::customers::get_me).patch(identity::customers::patch_me),
+        )
+        // Backoffice (cartão 02/19): login de staff e dados do próprio.
+        .route("/api/v1/staff/auth/login", post(identity::staff::login))
+        .route("/api/v1/staff/me", get(identity::staff::me));
+    // Rotas de prova dos extractores de RBAC: só existem com a feature `test-support` (testes).
+    #[cfg(feature = "test-support")]
+    let read_sync = read_sync
+        .route(
+            "/api/v1/_test/stores/{store_id}",
+            get(identity::rbac::test_store),
+        )
+        .route(
+            "/api/v1/_test/stores/{store_id}/owner",
+            get(identity::rbac::test_store_owner),
+        )
+        .route(
+            "/api/v1/_test/tenant-admin",
+            get(identity::rbac::test_tenant_admin),
         );
     let read_async = with_csrf(read_async, sessions.clone());
     let read_sync = with_csrf(read_sync, sessions.clone());

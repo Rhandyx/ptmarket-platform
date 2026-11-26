@@ -14,7 +14,7 @@
 //!   trabalho (lookup + Argon2 + evento) e o 401 do captcha depende só dos contadores, nunca de a
 //!   conta existir.
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
@@ -25,7 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -41,11 +41,15 @@ use crate::{
         email,
         http::{CurrentSession, no_store},
         password::{self, PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS, Password, Verified},
+        rbac::load_roles,
         session::{self, CookieKind, SessionId, SessionKind, Subject},
         throttle::{self, AccountKey, Gate, Keys, Limits, account_hash},
     },
     state::AppState,
-    tenancy::{ResolvedTenant, TenantId, TenantTx, begin_tenant_tx, db::db_error},
+    tenancy::{
+        ResolvedTenant, TenantId, begin_tenant_tx,
+        db::{AuditedTx, begin_platform_tx, db_error},
+    },
 };
 
 /// Ação na caixa negra (sucesso e falha).
@@ -56,6 +60,8 @@ pub const REASON_CAPTCHA: &str = "captcha";
 /// Sessão de outro sujeito no mesmo browser, terminada pelo login.
 pub const ACTION_LOGOUT: &str = "auth.logout";
 pub const REASON_SUPERSEDED: &str = "superseded_by_login";
+/// Login de staff (cartão 02/19): ação própria, mesmos motivos.
+pub const ACTION_STAFF_LOGIN: &str = "auth.staff_login";
 
 // ---------------------------------------------------------------------------------------------
 // Dependências
@@ -207,24 +213,76 @@ fn unavailable(e: AppError) -> AppError {
     }
 }
 
-/// id + PHC pela única leitura por email (`identity_customer_credentials`, 0017/0021).
+/// Que contas o login verifica: clientes (`/api/v1/auth/login`) ou utilizadores de backoffice
+/// (`/api/v1/staff/auth/login`, cartão 02/19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Accounts {
+    Customers,
+    Users,
+}
+
+impl Accounts {
+    /// Ação na caixa negra.
+    fn action(self) -> &'static str {
+        match self {
+            Self::Customers => ACTION_LOGIN,
+            Self::Users => ACTION_STAFF_LOGIN,
+        }
+    }
+
+    /// Prefixo próprio das chaves do travão (contadores separados dos de clientes).
+    fn throttle_prefix(self) -> &'static str {
+        match self {
+            Self::Customers => "",
+            Self::Users => "staff:",
+        }
+    }
+}
+
+/// Conta encontrada pelo email (`password_hash` NULL = só passkey).
+struct Found {
+    id: Uuid,
+    phc: Option<String>,
+    totp_enabled: bool,
+}
+
+/// id + PHC (+ `totp_enabled` dos utilizadores) pela única leitura por email
+/// (`identity_customer_credentials` 0017/0021; `identity_user_credentials` 0018/0021, só ativos).
 ///
 /// Exceção à regra `query!` (como `session::lookup`): o EXPLAIN da macro exige EXECUTE na função,
 /// que o migrator não tem (dono `ptmarket_identity`). SQL estático, função qualificada, argumento e
-/// colunas com o tipo exato; verificado no teste `login`.
-async fn credentials(db: &PgPool, email: &str) -> Result<Option<(Uuid, Option<String>)>, AppError> {
-    sqlx::query_as(
-        "SELECT c.id::uuid, c.password_hash::text
-         FROM public.identity_customer_credentials($1::text) AS c",
-    )
+/// colunas com o tipo exato; verificado nos testes `login` e `rbac`.
+async fn credentials(
+    db: &PgPool,
+    accounts: Accounts,
+    email: &str,
+) -> Result<Option<Found>, AppError> {
+    let row: Option<(Uuid, Option<String>, bool)> = match accounts {
+        Accounts::Customers => sqlx::query_as(
+            "SELECT c.id::uuid, c.password_hash::text, false::boolean
+             FROM public.identity_customer_credentials($1::text) AS c",
+        ),
+        Accounts::Users => sqlx::query_as(
+            "SELECT u.id::uuid, u.password_hash::text, u.totp_enabled::boolean
+             FROM public.identity_user_credentials($1::text) AS u",
+        ),
+    }
     .bind(email)
     .fetch_optional(db)
     .await
-    .map_err(db_error)
+    .map_err(db_error)?;
+    Ok(row.map(|(id, phc, totp_enabled)| Found {
+        id,
+        phc,
+        totp_enabled,
+    }))
 }
 
 /// Regrava o PHC (parâmetros atuais) na transação do próprio cliente (RLS: só a sua linha).
-async fn update_hash(tx: &mut TenantTx, id: Uuid, phc: &str) -> Result<(), AppError> {
+async fn update_hash<T>(tx: &mut T, id: Uuid, phc: &str) -> Result<(), AppError>
+where
+    T: AuditedTx + DerefMut<Target = PgConnection>,
+{
     let r = sqlx::query!(
         "UPDATE customers SET password_hash = $2, updated_at = now() WHERE id = $1",
         id,
@@ -236,6 +294,30 @@ async fn update_hash(tx: &mut TenantTx, id: Uuid, phc: &str) -> Result<(), AppEr
     if r.rows_affected() != 1 {
         return Err(AppError::Internal(anyhow::anyhow!(
             "login: PHC não regravado (linha do cliente não visível)"
+        )));
+    }
+    Ok(())
+}
+
+/// `last_login_at` (e o PHC, se fraco) na transação do próprio utilizador (RLS `self_update`: só a
+/// sua linha, ativa). O gatilho da caixa negra grava `users.update`.
+async fn update_user<T>(tx: &mut T, id: Uuid, phc: Option<&str>) -> Result<(), AppError>
+where
+    T: AuditedTx + DerefMut<Target = PgConnection>,
+{
+    let r = sqlx::query!(
+        "UPDATE users
+         SET last_login_at = now(), password_hash = COALESCE($2, password_hash), updated_at = now()
+         WHERE id = $1",
+        id,
+        phc
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)?;
+    if r.rows_affected() != 1 {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "login: last_login_at não gravado (linha do utilizador não visível)"
         )));
     }
     Ok(())
@@ -257,30 +339,46 @@ fn anonymous_ctx(ctx: &AuditCtx) -> AuditCtx {
     )
 }
 
-/// `auth.login` `denied` (transação própria, ator anónimo). Falhou → 503.
+/// Grava `ev` numa transação própria com o ator `ctx`: no tenant ou, sem ele, na plataforma.
+async fn record_alone(
+    db: &PgPool,
+    tenant: Option<TenantId>,
+    ctx: &AuditCtx,
+    ev: AuditEvent,
+) -> Result<(), AppError> {
+    match tenant {
+        Some(t) => {
+            let mut tx = begin_tenant_tx(db, t, ctx).await?;
+            record(&mut tx, ev).await?;
+            tx.commit().await
+        }
+        None => {
+            let mut tx = begin_platform_tx(db, ctx).await?;
+            record(&mut tx, ev).await?;
+            tx.commit().await
+        }
+    }
+}
+
+/// `auth.login`/`auth.staff_login` `denied` (transação própria, ator anónimo). Falhou → 503.
 async fn record_denied(
     db: &PgPool,
-    tenant: TenantId,
+    tenant: Option<TenantId>,
     ctx: &AuditCtx,
+    action: &'static str,
     account_hash: &str,
     reason: &str,
 ) -> Result<(), AppError> {
-    let anon = anonymous_ctx(ctx);
-    let mut tx = begin_tenant_tx(db, tenant, &anon).await?;
-    record(
-        &mut tx,
-        AuditEvent {
-            action: ACTION_LOGIN,
-            target_type: Some("account_hash"),
-            target_id: Some(account_hash.to_owned()),
-            outcome: Outcome::Denied,
-            reason: Some(reason.to_owned()),
-            changes: None,
-            store_id: None,
-        },
-    )
-    .await?;
-    tx.commit().await
+    let ev = AuditEvent {
+        action,
+        target_type: Some("account_hash"),
+        target_id: Some(account_hash.to_owned()),
+        outcome: Outcome::Denied,
+        reason: Some(reason.to_owned()),
+        changes: None,
+        store_id: None,
+    };
+    record_alone(db, tenant, &anonymous_ctx(ctx), ev).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -341,33 +439,87 @@ pub async fn login(
     };
     let mut req = json_body(body)?;
     let expected_host = host.and_then(|Extension(h)| h.host).unwrap_or_default();
-    let result = login_steps(&st, tenant.id(), &ctx, &cur, &deps, &req, &expected_host).await;
+    let attempt = Attempt {
+        st: &st,
+        tenant: Some(tenant.id()),
+        ctx: &ctx,
+        cur: &cur,
+        deps: &deps,
+        expected_host: &expected_host,
+        accounts: Accounts::Customers,
+    };
+    let result = customer_login(&attempt, &req).await;
+    wipe(&mut req);
+    result
+}
+
+/// Apaga da memória a password e o token do captcha.
+pub(crate) fn wipe(req: &mut LoginRequest) {
     req.password.zeroize();
     if let Some(t) = req.turnstile_token.as_mut() {
         t.zeroize();
     }
-    result
 }
 
-async fn login_steps(
-    st: &AppState,
-    tenant: TenantId,
-    ctx: &AuditCtx,
-    cur: &CurrentSession,
-    deps: &Login,
-    req: &LoginRequest,
-    expected_host: &str,
-) -> Result<Response, AppError> {
+async fn customer_login(a: &Attempt<'_>, req: &LoginRequest) -> Result<Response, AppError> {
+    let passed = match check(a, req).await? {
+        Checked::Refused(resp) => return Ok(resp),
+        Checked::Passed(p) => p,
+    };
+    let subject = Subject::Customer(passed.id);
+    let value = a
+        .open_session(ActorType::Customer, subject, &passed)
+        .await?;
+    let mut resp = no_store(StatusCode::NO_CONTENT.into_response());
+    resp.headers_mut().append(
+        SET_COOKIE,
+        session::set_cookie(CookieKind::Tenant, &value, a.lifetime(subject))?,
+    );
+    Ok(resp)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tentativa (partilhada com o login de staff, cartão 02/19)
+// ---------------------------------------------------------------------------------------------
+
+/// Uma tentativa de login: onde decorre (`tenant` `None` = `PLATFORM_ADMIN_HOST`), quem pede e que
+/// contas verifica.
+pub(crate) struct Attempt<'a> {
+    pub st: &'a AppState,
+    pub tenant: Option<TenantId>,
+    pub ctx: &'a AuditCtx,
+    pub cur: &'a CurrentSession,
+    pub deps: &'a Login,
+    pub expected_host: &'a str,
+    pub accounts: Accounts,
+}
+
+/// Credenciais certas: a conta, o PHC novo (se o guardado era fraco) e as chaves do travão.
+pub(crate) struct Passed {
+    pub id: Uuid,
+    pub totp_enabled: bool,
+    new_phc: Option<String>,
+    keys: Keys,
+    account_hash: String,
+}
+
+pub(crate) enum Checked {
+    Passed(Passed),
+    /// Resposta final já decidida (401 genérico ou com `captcha_required`; evento gravado).
+    Refused(Response),
+}
+
+/// Travão → captcha (se exigido) → credenciais (Argon2 SEMPRE). Não cria sessão.
+pub(crate) async fn check(a: &Attempt<'_>, req: &LoginRequest) -> Result<Checked, AppError> {
     let email = validate(req)?;
-    let account_hash = account_hash(&deps.account, &email);
-    let redis = cur.sessions().redis();
-    let keys = Keys::new(cur.sessions().ns(), &account_hash, ctx.ip());
+    let account_hash = account_hash(&a.deps.account, &email);
+    let redis = a.cur.sessions().redis();
+    let ns = format!("{}{}", a.cur.sessions().ns(), a.accounts.throttle_prefix());
+    let keys = Keys::new(&ns, &account_hash, a.ctx.ip());
+    let limits = &a.deps.limits;
 
     // 1. Travão (só Redis): 429 sem tocar na BD; o middleware conta-o.
-    let captcha = match throttle::decide(
-        throttle::begin(redis, &keys, &deps.limits).await,
-        &deps.limits,
-    ) {
+    let captcha = match throttle::decide(throttle::begin(redis, &keys, limits).await, limits) {
         Gate::TooMany { retry_after_s } => {
             // Não houve tentativa de credenciais: desconta-a nos contadores de falhas.
             throttle::not_attempted(redis, &keys).await;
@@ -379,35 +531,42 @@ async fn login_steps(
     // 2. Captcha (só quando exigido; o token é de uso único).
     if captcha {
         let ok = match req.turnstile_token.as_deref() {
-            Some(t) if !t.is_empty() => deps.captcha.verify(t, ctx.ip(), expected_host).await,
+            Some(t) if !t.is_empty() => a.deps.captcha.verify(t, a.ctx.ip(), a.expected_host).await,
             _ => false,
         };
         if !ok {
             throttle::not_attempted(redis, &keys).await;
-            record_denied(&st.db_primary, tenant, ctx, &account_hash, REASON_CAPTCHA)
-                .await
-                .map_err(unavailable)?;
-            return captcha_required().await;
+            record_denied(
+                &a.st.db_primary,
+                a.tenant,
+                a.ctx,
+                a.accounts.action(),
+                &account_hash,
+                REASON_CAPTCHA,
+            )
+            .await
+            .map_err(unavailable)?;
+            return Ok(Checked::Refused(captcha_required().await?));
         }
     }
 
     // 3. Credenciais: Argon2 SEMPRE (sem conta / sem password → hash falso).
     let n = req.password.chars().count();
-    let found = credentials(&st.db_primary, &email)
+    let found = credentials(&a.st.db_primary, a.accounts, &email)
         .await
         .map_err(unavailable)?;
-    let (id, phc) = match found {
-        Some((id, phc)) => (Some(id), phc),
-        None => (None, None),
+    let (id, phc, totp_enabled) = match found {
+        Some(f) => (Some(f.id), f.phc, f.totp_enabled),
+        None => (None, None, false),
     };
     let (verified, pw) = if n >= PASSWORD_MIN_CHARS {
         let pw = Password::parse(&req.password)?;
-        let v = deps.passwords.verify(&pw, phc.as_deref()).await?;
+        let v = a.deps.passwords.verify(&pw, phc.as_deref()).await?;
         (v, Some(pw))
     } else {
         // Mais curta do que qualquer password aceite no registo: nunca confere. Mesmo custo.
         let filler = Password::parse(&"\u{0}".repeat(PASSWORD_MIN_CHARS))?;
-        deps.passwords.verify(&filler, None).await?;
+        a.deps.passwords.verify(&filler, None).await?;
         (
             Verified {
                 ok: false,
@@ -417,142 +576,228 @@ async fn login_steps(
         )
     };
 
+    // Staff: a falha corre a mesma leitura de papéis do sucesso (id encontrado ou `Uuid::nil()`),
+    // para que o tempo não revele se a password estava certa num host sem papel.
+    if a.accounts == Accounts::Users && !(id.is_some() && verified.ok) {
+        let who = id.unwrap_or(Uuid::nil());
+        if let Err(e) = load_roles(&a.st.db_primary, who, a.ctx.request_id()).await {
+            tracing::warn!(error = ?e, "login de staff: leitura de igualação falhou");
+        }
+    }
     let (Some(id), Some(pw), true) = (id, pw, verified.ok) else {
-        throttle::failed(redis, &keys, &deps.limits).await;
-        record_denied(
-            &st.db_primary,
-            tenant,
-            ctx,
-            &account_hash,
-            REASON_BAD_CREDENTIALS,
-        )
-        .await
-        .map_err(unavailable)?;
-        return Ok(unauthorized());
+        return a
+            .refuse(&keys, &account_hash, REASON_BAD_CREDENTIALS)
+            .await
+            .map(Checked::Refused);
     };
-
-    // 4. Sucesso.
     let new_phc = if verified.needs_rehash {
         Some(password::hash(&pw).await?)
     } else {
         None
     };
     drop(pw);
-    let subject = Subject::Customer(id);
-    let (sid, value) = open_session(st, tenant, ctx, cur, subject, new_phc.as_deref())
+    Ok(Checked::Passed(Passed {
+        id,
+        totp_enabled,
+        new_phc,
+        keys,
+        account_hash,
+    }))
+}
+
+impl Attempt<'_> {
+    /// Falha: conta no travão, `denied` com `reason` (ator anónimo) e o 401 genérico.
+    async fn refuse(
+        &self,
+        keys: &Keys,
+        account_hash: &str,
+        reason: &str,
+    ) -> Result<Response, AppError> {
+        throttle::failed(self.cur.sessions().redis(), keys, &self.deps.limits).await;
+        record_denied(
+            &self.st.db_primary,
+            self.tenant,
+            self.ctx,
+            self.accounts.action(),
+            account_hash,
+            reason,
+        )
         .await
         .map_err(unavailable)?;
-    revoke_foreign_session(st, tenant, ctx, cur, id).await;
-    throttle::succeeded(redis, &keys).await;
-
-    let lifetime = SessionKind::of(subject, Some(tenant)).max_lifetime();
-    let mut resp = no_store(StatusCode::NO_CONTENT.into_response());
-    resp.headers_mut().append(
-        SET_COOKIE,
-        session::set_cookie(CookieKind::Tenant, &value, lifetime)?,
-    );
-    tracing::debug!(session = %sid.as_uuid(), "login: sessão criada");
-    Ok(resp)
-}
-
-/// Sessão anterior deste browser, se for do mesmo cliente (revogada na transação do login).
-fn own_previous(cur: &CurrentSession, id: Uuid) -> Option<SessionId> {
-    let actor = cur.actor()?;
-    (actor.actor_type == ActorType::Customer && actor.actor_id == Some(id))
-        .then(|| cur.info().map(|i| i.id))
-        .flatten()
-}
-
-/// Transação do cliente: PHC regravado (se fraco), rotação da sessão e `auth.login` `success`.
-async fn open_session(
-    st: &AppState,
-    tenant: TenantId,
-    ctx: &AuditCtx,
-    cur: &CurrentSession,
-    subject: Subject,
-    new_phc: Option<&str>,
-) -> Result<(SessionId, session::CookieValue), AppError> {
-    let Subject::Customer(id) = subject else {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "login de cliente com sujeito não cliente"
-        )));
-    };
-    let customer = AuditCtx::new(
-        ActorType::Customer,
-        Some(id),
-        None,
-        None,
-        ctx.request_id(),
-        ctx.ip(),
-        ctx.user_agent_hash().copied(),
-    );
-    let old = own_previous(cur, id);
-    let mut tx = begin_tenant_tx(&st.db_primary, tenant, &customer).await?;
-    if let Some(phc) = new_phc {
-        update_hash(&mut tx, id, phc).await?;
+        Ok(unauthorized())
     }
-    let (sid, value) = session::rotate(&mut tx, old, subject, Some(tenant), &customer).await?;
-    record(
-        &mut tx,
-        AuditEvent {
-            action: ACTION_LOGIN,
-            target_type: Some("session"),
-            target_id: Some(sid.as_uuid().to_string()),
-            outcome: Outcome::Success,
-            reason: None,
-            changes: None,
-            store_id: None,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    if let Some(old) = old {
-        forget(cur, old).await;
-    }
-    Ok((sid, value))
-}
 
-/// O browser tinha a sessão de OUTRO sujeito: revogada com o ator dela (o do pedido) e
-/// `auth.logout` (`superseded_by_login`) na mesma transação. O cookie já foi substituído; uma
-/// falha aqui só fica no log (a sessão antiga deixa de ter cookie).
-async fn revoke_foreign_session(
-    st: &AppState,
-    tenant: TenantId,
-    ctx: &AuditCtx,
-    cur: &CurrentSession,
-    id: Uuid,
-) {
-    let (Some(info), Some(_)) = (cur.info(), cur.actor()) else {
-        return;
-    };
-    if own_previous(cur, id).is_some() {
-        return;
+    /// Credenciais certas mas recusadas depois (ex.: staff sem papel neste host): exatamente o
+    /// mesmo 401 e a mesma contagem de uma password errada.
+    pub(crate) async fn refuse_passed(
+        &self,
+        passed: &Passed,
+        reason: &str,
+    ) -> Result<Response, AppError> {
+        self.refuse(&passed.keys, &passed.account_hash, reason)
+            .await
     }
-    let res = async {
-        let mut tx = begin_tenant_tx(&st.db_primary, tenant, ctx).await?;
-        session::revoke(&mut tx, info.id).await?;
+
+    /// Duração absoluta do cookie da sessão de `subject` neste host.
+    pub(crate) fn lifetime(&self, subject: Subject) -> std::time::Duration {
+        SessionKind::of(subject, self.tenant).max_lifetime()
+    }
+
+    /// Sucesso: transação do próprio (`actor` com o id do sujeito) com o PHC regravado (se fraco),
+    /// `last_login_at` (utilizadores), `session::rotate` e o evento `success`; depois revoga a
+    /// sessão de outro sujeito deste browser e limpa os contadores. Falha a gravar → 503.
+    pub(crate) async fn open_session(
+        &self,
+        actor: ActorType,
+        subject: Subject,
+        passed: &Passed,
+    ) -> Result<session::CookieValue, AppError> {
+        let me = AuditCtx::new(
+            actor,
+            Some(passed.id),
+            None,
+            None,
+            self.ctx.request_id(),
+            self.ctx.ip(),
+            self.ctx.user_agent_hash().copied(),
+        );
+        let old = own_previous(self.cur, subject);
+        let db = &self.st.db_primary;
+        let phc = passed.new_phc.as_deref();
+        let opened = match self.tenant {
+            Some(t) => {
+                async {
+                    let mut tx = begin_tenant_tx(db, t, &me).await?;
+                    let r = self.in_session_tx(&mut tx, old, subject, phc, &me).await?;
+                    tx.commit().await?;
+                    Ok(r)
+                }
+                .await
+            }
+            None => {
+                async {
+                    let mut tx = begin_platform_tx(db, &me).await?;
+                    let r = self.in_session_tx(&mut tx, old, subject, phc, &me).await?;
+                    tx.commit().await?;
+                    Ok(r)
+                }
+                .await
+            }
+        };
+        let (sid, value) = opened.map_err(unavailable)?;
+        if let Some(old) = old {
+            forget(self.cur, old).await;
+        }
+        revoke_foreign_session(self, subject).await;
+        throttle::succeeded(self.cur.sessions().redis(), &passed.keys).await;
+        tracing::debug!(session = %sid.as_uuid(), "login: sessão criada");
+        Ok(value)
+    }
+
+    async fn in_session_tx<T>(
+        &self,
+        tx: &mut T,
+        old: Option<SessionId>,
+        subject: Subject,
+        new_phc: Option<&str>,
+        me: &AuditCtx,
+    ) -> Result<(SessionId, session::CookieValue), AppError>
+    where
+        T: AuditedTx + DerefMut<Target = PgConnection>,
+    {
+        match subject {
+            Subject::Customer(id) => {
+                if let Some(phc) = new_phc {
+                    update_hash(tx, id, phc).await?;
+                }
+            }
+            Subject::User(id) => update_user(tx, id, new_phc).await?,
+        }
+        let (sid, value) = session::rotate(tx, old, subject, self.tenant, me).await?;
         record(
-            &mut tx,
+            tx,
             AuditEvent {
-                action: ACTION_LOGOUT,
+                action: self.accounts.action(),
                 target_type: Some("session"),
-                target_id: Some(info.id.as_uuid().to_string()),
+                target_id: Some(sid.as_uuid().to_string()),
                 outcome: Outcome::Success,
-                reason: Some(REASON_SUPERSEDED.to_owned()),
+                reason: None,
                 changes: None,
                 store_id: None,
             },
         )
         .await?;
-        tx.commit().await
+        Ok((sid, value))
+    }
+}
+
+/// Sessão anterior deste browser, se for do mesmo sujeito (revogada na transação do login).
+fn own_previous(cur: &CurrentSession, subject: Subject) -> Option<SessionId> {
+    let actor = cur.actor()?;
+    let same = match subject {
+        Subject::Customer(id) => {
+            actor.actor_type == ActorType::Customer && actor.actor_id == Some(id)
+        }
+        Subject::User(id) => {
+            matches!(
+                actor.actor_type,
+                ActorType::Merchant | ActorType::Municipal | ActorType::Admin
+            ) && actor.actor_id == Some(id)
+        }
+    };
+    same.then(|| cur.info().map(|i| i.id)).flatten()
+}
+
+/// O browser tinha a sessão de OUTRO sujeito: revogada com o ator dela (o do pedido) e
+/// `auth.logout` (`superseded_by_login`) na mesma transação. O cookie já foi substituído; uma
+/// falha aqui só fica no log (a sessão antiga deixa de ter cookie).
+async fn revoke_foreign_session(a: &Attempt<'_>, subject: Subject) {
+    let (Some(info), Some(_)) = (a.cur.info(), a.cur.actor()) else {
+        return;
+    };
+    if own_previous(a.cur, subject).is_some() {
+        return;
+    }
+    let res = async {
+        let db = &a.st.db_primary;
+        match a.tenant {
+            Some(t) => {
+                let mut tx = begin_tenant_tx(db, t, a.ctx).await?;
+                revoke_superseded(&mut tx, info.id).await?;
+                tx.commit().await
+            }
+            None => {
+                let mut tx = begin_platform_tx(db, a.ctx).await?;
+                revoke_superseded(&mut tx, info.id).await?;
+                tx.commit().await
+            }
+        }
     }
     .await;
     match res {
-        Ok(()) => forget(cur, info.id).await,
+        Ok(()) => forget(a.cur, info.id).await,
         Err(e) => {
             tracing::warn!(error = ?e, "login: sessão anterior de outro sujeito não revogada")
         }
     }
+}
+
+async fn revoke_superseded<T: AuditedTx>(tx: &mut T, id: SessionId) -> Result<(), AppError> {
+    session::revoke(tx, id).await?;
+    record(
+        tx,
+        AuditEvent {
+            action: ACTION_LOGOUT,
+            target_type: Some("session"),
+            target_id: Some(id.as_uuid().to_string()),
+            outcome: Outcome::Success,
+            reason: Some(REASON_SUPERSEDED.to_owned()),
+            changes: None,
+            store_id: None,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn forget(cur: &CurrentSession, id: SessionId) {

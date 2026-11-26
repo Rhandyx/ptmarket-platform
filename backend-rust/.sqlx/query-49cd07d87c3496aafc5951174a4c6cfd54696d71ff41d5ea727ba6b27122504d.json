@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sessions SET mfa_verified_at = now()\n         WHERE subject_type = 'user' AND subject_id = $1 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49cd07d87c3496aafc5951174a4c6cfd54696d71ff41d5ea727ba6b27122504d"
+}

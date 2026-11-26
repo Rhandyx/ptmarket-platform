@@ -399,7 +399,10 @@ mod tests {
             let pad = u64::from(complement_m_cost(&parsed)) * u64::from(ARGON2_T_COST);
             let total = argon2_work(&parsed).unwrap() + pad;
             // Igual ao de uma verificação atual (± o arredondamento de uma passagem).
-            assert!(total <= full && full - total < u64::from(ARGON2_T_COST), "{m},{t}");
+            assert!(
+                total <= full && full - total < u64::from(ARGON2_T_COST),
+                "{m},{t}"
+            );
         }
         // PHC atual: nada a completar. O dummy usa os parâmetros atuais.
         let dummy = PasswordHash::new(DUMMY_PHC).unwrap();

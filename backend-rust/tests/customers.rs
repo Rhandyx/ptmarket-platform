@@ -218,7 +218,7 @@ fn app_router_with(
         Arc::new(StaticBreach(breached)),
         account_key(),
     )
-        .with_min_response_for_tests(min_response);
+    .with_min_response_for_tests(min_response);
     let sessions = Sessions::for_tests(app.clone(), redis()?, CSRF_KEY.to_owned().into(), ns, None)
         .with_internal_token(Some(INTERNAL_TOKEN.to_owned().into()))
         .with_registration(registration);

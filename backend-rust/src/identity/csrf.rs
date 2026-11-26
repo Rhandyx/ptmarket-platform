@@ -186,7 +186,11 @@ fn deny() -> Response {
 /// Rotas de autenticação anónimas que criam estado: exigem `Origin` válida mesmo sem sessão (login
 /// CSRF / registo forçado a partir de outro site). O logout anónimo não muda nada (204 idempotente)
 /// e fica de fora.
-pub const ANONYMOUS_ORIGIN_PATHS: [&str; 2] = ["/api/v1/auth/register", "/api/v1/auth/login"];
+pub const ANONYMOUS_ORIGIN_PATHS: [&str; 3] = [
+    "/api/v1/auth/register",
+    "/api/v1/auth/login",
+    "/api/v1/staff/auth/login",
+];
 
 /// Layer (`from_fn_with_state`) POR DENTRO da caixa negra: a recusa (403 + `Denied("csrf")`) fica
 /// gravada. Mutações com sessão válida (`SessionInfo`): `Origin` + token. Registo e login anónimos

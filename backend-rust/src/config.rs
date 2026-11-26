@@ -457,8 +457,9 @@ mod tests {
         v.push(("ACCOUNT_HASH_KEY", "chave-conta-segredo-com-32-bytes-ok"));
         let c = Config::from_lookup(env(&v));
         assert!(!format!("{c:?}").contains("chave-conta"));
-        assert!(c.is_ok_and(|c| c.account_hash_key().expose_secret()
-            == "chave-conta-segredo-com-32-bytes-ok"));
+        assert!(c.is_ok_and(
+            |c| c.account_hash_key().expose_secret() == "chave-conta-segredo-com-32-bytes-ok"
+        ));
     }
 
     #[test]

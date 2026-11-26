@@ -23,6 +23,14 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
+    // Um binário com `test-support` tem rotas e construtores só de testes (ex.: `/api/v1/_test/*`,
+    // cartão 02/19): nunca arranca em staging/production.
+    #[cfg(feature = "test-support")]
+    if cfg.app_env.is_strict() {
+        anyhow::bail!(
+            "binário compilado com a feature test-support: recusado em staging/production"
+        );
+    }
     // Sem CSRF_KEY o binário não arranca (as sessões precisam dela).
     let csrf_key = cfg.require_csrf_key()?;
     let state = AppState::from_config(&cfg)?;
@@ -35,7 +43,9 @@ async fn run() -> anyhow::Result<()> {
             .with_registration(Registration::from_config(&cfg)?)
             .with_login(Login::from_config(&cfg)?);
     } else {
-        tracing::warn!("TURNSTILE_SECRET ausente: /api/v1/auth/register e /api/v1/auth/login respondem 503");
+        tracing::warn!(
+            "TURNSTILE_SECRET ausente: /api/v1/auth/register e /api/v1/auth/login respondem 503"
+        );
     }
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!(addr = %cfg.bind_addr, app_env = ?cfg.app_env, "a escutar");

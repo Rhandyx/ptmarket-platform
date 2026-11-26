@@ -237,6 +237,88 @@
         }
       }
     },
+    "/api/v1/staff/auth/login": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Inicia sessão de backoffice no host do pedido. Falha → 401 sempre igual (exista ou não a conta,\ntenha ou não papel aqui).",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Sessão iniciada (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma); `mfa_required` diz se falta o 2FA",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffLoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Credenciais inválidas ou sem acesso a este site (corpo sempre igual). Com `\"captcha_required\": true` no corpo: repetir com `turnstile_token`"
+          },
+          "403": {
+            "description": "Origin ausente ou de outro site (com sessão: também o token CSRF)"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "422": {
+            "description": "Dados inválidos"
+          },
+          "429": {
+            "description": "Demasiadas tentativas; repetir depois de `Retry-After` segundos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/staff/me": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Dados do utilizador de backoffice autenticado (leitura síncrona na caixa negra).",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Utilizador, papéis neste host e estado do 2FA",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffMe"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem papel neste host"
+          },
+          "404": {
+            "description": "Host desconhecido ou tenant inativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/tenant": {
       "get": {
         "tags": [
@@ -524,6 +606,42 @@
         },
         "additionalProperties": false
       },
+      "Role": {
+        "type": "string",
+        "description": "Papel de backoffice (`user_roles.role`).",
+        "enum": [
+          "super_admin",
+          "tenant_admin",
+          "merchant_owner",
+          "merchant_staff"
+        ]
+      },
+      "RoleGrant": {
+        "type": "object",
+        "description": "Um papel com o seu âmbito (`tenant_id`/`store_id` NULL conforme o CHECK da 0018).",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "store_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "SessionStatus": {
         "type": "object",
         "description": "Estado da sessão do pedido.",
@@ -549,6 +667,49 @@
               "null"
             ],
             "description": "Token a enviar em `X-CSRF-Token` (ou no campo `_csrf`) em todas as mutações; `null` se\nanónimo."
+          }
+        }
+      },
+      "StaffLoginResponse": {
+        "type": "object",
+        "description": "Resposta do login de staff.",
+        "required": [
+          "mfa_required"
+        ],
+        "properties": {
+          "mfa_required": {
+            "type": "boolean",
+            "description": "`true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin ou TOTP ligado)."
+          }
+        }
+      },
+      "StaffMe": {
+        "type": "object",
+        "description": "Utilizador de backoffice da sessão: nunca hashes nem segredos.",
+        "required": [
+          "id",
+          "full_name",
+          "roles",
+          "mfa_verified"
+        ],
+        "properties": {
+          "full_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mfa_verified": {
+            "type": "boolean",
+            "description": "A sessão já passou o 2FA."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleGrant"
+            },
+            "description": "Só os papéis no âmbito deste host."
           }
         }
       },

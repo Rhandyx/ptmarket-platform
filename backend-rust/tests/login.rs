@@ -29,12 +29,11 @@ use ptmarket_api::{
     error::AppError,
     http::{api, audit_layer::AuditLayerState, client_ip::TrustedProxies},
     identity::{
-        AccountKey, BreachChecker, CaptchaVerifier, Login, Password, PasswordCheck, Registration, Sessions,
-        Subject, Verified,
+        AccountKey, BreachChecker, CaptchaVerifier, Login, Password, PasswordCheck, Registration,
+        Sessions, Subject, Verified, account_hash,
         csrf::X_CSRF_TOKEN,
         password,
         session::{self, COOKIE_TENANT},
-        account_hash,
         throttle::{self, Gate, Keys, Limits},
     },
     state::AppState,
@@ -197,7 +196,7 @@ impl Setup {
         };
         let registration =
             Registration::new(Arc::new(FakeCaptcha), Arc::new(NoBreach), account_key())
-            .with_min_response_for_tests(Duration::ZERO);
+                .with_min_response_for_tests(Duration::ZERO);
         let login = Login::new(Arc::new(FakeCaptcha), account_key())
             .with_password_check_for_tests(self.counter.clone())
             .with_limits_for_tests(self.limits);
@@ -941,9 +940,15 @@ async fn login_over_another_customers_session_logs_it_out(
     assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
 
     // A sessão da Yara ficou revogada, com auth.logout (ator Yara) e o motivo.
-    assert_eq!(sessions_of(&pool, &a, y).await?, vec![(y_sid.as_uuid(), true)]);
+    assert_eq!(
+        sessions_of(&pool, &a, y).await?,
+        vec![(y_sid.as_uuid(), true)]
+    );
     assert_eq!(sessions_of(&pool, &a, x).await?.len(), 1);
-    assert_eq!(session_status(&app, &a.domain, &y_cookie).await?["authenticated"], false);
+    assert_eq!(
+        session_status(&app, &a.domain, &y_cookie).await?["authenticated"],
+        false
+    );
     let ev = events(&pool, &a, Some("auth.logout")).await?;
     assert_eq!(ev.len(), 1, "{ev:?}");
     let (_, outcome, reason, actor_type, actor_id, target_type, target_id, _) = &ev[0];
@@ -952,7 +957,10 @@ async fn login_over_another_customers_session_logs_it_out(
     assert_eq!(actor_type, "customer");
     assert_eq!(*actor_id, Some(y));
     assert_eq!(target_type.as_deref(), Some("session"));
-    assert_eq!(target_id.as_deref(), Some(y_sid.as_uuid().to_string().as_str()));
+    assert_eq!(
+        target_id.as_deref(),
+        Some(y_sid.as_uuid().to_string().as_str())
+    );
     cleanup(&ns).await
 }
 
@@ -968,10 +976,22 @@ async fn anonymous_login_without_own_origin_is_403(
     let s = Setup::new(&pool);
     let app = s.router(&ns)?;
     register(&app, &a, "olga@exemplo.pt").await?;
-    let r = login_from(&app, &a, "olga@exemplo.pt", PW, None, "203.0.113.80", None, None).await?;
+    let r = login_from(
+        &app,
+        &a,
+        "olga@exemplo.pt",
+        PW,
+        None,
+        "203.0.113.80",
+        None,
+        None,
+    )
+    .await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
     assert!(r.session_cookie().is_none());
-    let rid = r.request_id.ok_or_else(|| anyhow::anyhow!("sem x-request-id"))?;
+    let rid = r
+        .request_id
+        .ok_or_else(|| anyhow::anyhow!("sem x-request-id"))?;
     let denied = events(&pool, &a, None)
         .await?
         .into_iter()
@@ -1039,7 +1059,11 @@ async fn redis_down_asks_captcha_on_every_login() -> TestResult {
     let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
         .create_pool(Some(Runtime::Tokio1))?;
     let l = Limits::default();
-    let keys = Keys::new("test:login:dead:", &hash_of("ana@x.pt"), Some(ip("203.0.113.60")));
+    let keys = Keys::new(
+        "test:login:dead:",
+        &hash_of("ana@x.pt"),
+        Some(ip("203.0.113.60")),
+    );
     let snap = throttle::begin(&dead, &keys, &l).await;
     assert!(snap.is_none());
     assert_eq!(throttle::decide(snap, &l), Gate::Proceed { captcha: true });

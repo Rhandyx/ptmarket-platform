@@ -96,6 +96,43 @@ export interface paths {
         patch: operations["patch_me"];
         trace?: never;
     };
+    "/api/v1/staff/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Inicia sessão de backoffice no host do pedido. Falha → 401 sempre igual (exista ou não a conta,
+         *     tenha ou não papel aqui).
+         */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/staff/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Dados do utilizador de backoffice autenticado (leitura síncrona na caixa negra). */
+        get: operations["me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenant": {
         parameters: {
             query?: never;
@@ -234,6 +271,19 @@ export interface components {
             /** @description Honeypot: campo invisível; tem de vir vazio (ou ausente). */
             website?: string;
         };
+        /**
+         * @description Papel de backoffice (`user_roles.role`).
+         * @enum {string}
+         */
+        Role: "super_admin" | "tenant_admin" | "merchant_owner" | "merchant_staff";
+        /** @description Um papel com o seu âmbito (`tenant_id`/`store_id` NULL conforme o CHECK da 0018). */
+        RoleGrant: {
+            role: components["schemas"]["Role"];
+            /** Format: uuid */
+            store_id?: string | null;
+            /** Format: uuid */
+            tenant_id?: string | null;
+        };
         /** @description Estado da sessão do pedido. */
         SessionStatus: {
             /** @description `customer`, `merchant`, `municipal` ou `admin`; `null` se anónimo. */
@@ -244,6 +294,21 @@ export interface components {
              *     anónimo.
              */
             csrf_token: string | null;
+        };
+        /** @description Resposta do login de staff. */
+        StaffLoginResponse: {
+            /** @description `true`: completar o 2FA antes de qualquer ação (super_admin, tenant_admin ou TOTP ligado). */
+            mfa_required: boolean;
+        };
+        /** @description Utilizador de backoffice da sessão: nunca hashes nem segredos. */
+        StaffMe: {
+            full_name: string;
+            /** Format: uuid */
+            id: string;
+            /** @description A sessão já passou o 2FA. */
+            mfa_verified: boolean;
+            /** @description Só os papéis no âmbito deste host. */
+            roles: components["schemas"]["RoleGrant"][];
         };
         Status: {
             status: string;
@@ -546,6 +611,120 @@ export interface operations {
             };
             /** @description Dados inválidos (ex.: NIF com dígito de controlo errado) */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Sessão iniciada (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma); `mfa_required` diz se falta o 2FA */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffLoginResponse"];
+                };
+            };
+            /** @description Credenciais inválidas ou sem acesso a este site (corpo sempre igual). Com `"captcha_required": true` no corpo: repetir com `turnstile_token` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Origin ausente ou de outro site (com sessão: também o token CSRF) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Demasiadas tentativas; repetir depois de `Retry-After` segundos */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Utilizador, papéis neste host e estado do 2FA */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffMe"];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem papel neste host */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

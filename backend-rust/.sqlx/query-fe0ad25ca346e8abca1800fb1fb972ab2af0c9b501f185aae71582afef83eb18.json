@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET totp_secret_enc = 'segredo-cifrado', totp_enabled = true WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fe0ad25ca346e8abca1800fb1fb972ab2af0c9b501f185aae71582afef83eb18"
+}

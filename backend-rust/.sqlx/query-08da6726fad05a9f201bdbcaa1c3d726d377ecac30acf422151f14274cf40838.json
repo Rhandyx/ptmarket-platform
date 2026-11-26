@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE user_roles NO FORCE ROW LEVEL SECURITY",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "08da6726fad05a9f201bdbcaa1c3d726d377ecac30acf422151f14274cf40838"
+}

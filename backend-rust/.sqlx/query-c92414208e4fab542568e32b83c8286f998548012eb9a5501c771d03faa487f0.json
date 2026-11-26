@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE users FORCE ROW LEVEL SECURITY",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c92414208e4fab542568e32b83c8286f998548012eb9a5501c771d03faa487f0"
+}

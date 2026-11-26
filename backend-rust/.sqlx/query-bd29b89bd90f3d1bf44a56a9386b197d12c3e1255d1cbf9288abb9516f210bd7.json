@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.totp_enabled, r.role AS \"role?\", r.tenant_id, r.store_id\n           FROM users u\n           LEFT JOIN user_roles r ON r.user_id = u.id\n           WHERE u.id = $1\n           ORDER BY r.role, r.tenant_id NULLS FIRST, r.store_id NULLS FIRST",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "totp_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "totp_enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "role?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_roles",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "tenant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "user_roles",
+            "name": "tenant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "store_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "user_roles",
+            "name": "store_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "bd29b89bd90f3d1bf44a56a9386b197d12c3e1255d1cbf9288abb9516f210bd7"
+}

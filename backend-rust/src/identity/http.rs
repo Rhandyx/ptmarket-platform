@@ -21,6 +21,7 @@ use axum::{
 };
 use secrecy::SecretString;
 use serde::Serialize;
+use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -31,7 +32,8 @@ use crate::{
         csrf::{CsrfKey, capture_host, csrf_guard},
         customers::Registration,
         login::Login,
-        session::{self, CookieKind, CookieRead, SessionId, SessionKind, SessionRow, Subject},
+        rbac::{StaffRoles, load_roles},
+        session::{self, CookieKind, CookieRead, SessionId, SessionKind, Subject},
     },
     tenancy::{ResolvedHost, TenantId, begin_tenant_tx, db::begin_platform_tx},
 };
@@ -138,6 +140,11 @@ impl Sessions {
         self.inner.login.as_ref()
     }
 
+    /// BD primária (lookup de sessões e papéis; nunca a réplica).
+    pub(crate) fn db(&self) -> &sqlx::PgPool {
+        &self.inner.db
+    }
+
     pub(crate) fn redis(&self) -> &deadpool_redis::Pool {
         &self.inner.redis
     }
@@ -163,6 +170,7 @@ impl Sessions {
         &self,
         hash: &[u8; 32],
         tenant: Option<TenantId>,
+        request_id: Uuid,
     ) -> Result<Resolution, AppError> {
         let Some(row) = session::lookup(&self.inner.db, hash).await? else {
             return Ok(Resolution::Invalid);
@@ -171,9 +179,6 @@ impl Sessions {
         if row.tenant != tenant.map(|t| t.as_uuid()) {
             return Ok(Resolution::Invalid);
         }
-        let Some(actor) = actor_of(&row) else {
-            return Ok(Resolution::Unmapped);
-        };
         if !session::touch(
             &self.inner.redis,
             &self.inner.ns,
@@ -184,6 +189,28 @@ impl Sessions {
         {
             return Ok(Resolution::Invalid);
         }
+        let (actor, staff) = match row.subject {
+            Subject::Customer(id) => (
+                Actor {
+                    actor_type: ActorType::Customer,
+                    actor_id: Some(id),
+                    impersonator_id: row.impersonator_id,
+                },
+                None,
+            ),
+            // Papéis lidos uma vez por pedido (cache em `StaffRoles`); o tipo de ator depende deles
+            // e do host (cartão 02/19).
+            Subject::User(id) => {
+                let roles = load_roles(&self.inner.db, id, request_id).await?;
+                let staff = StaffRoles::new(id, tenant, roles);
+                let actor = Actor {
+                    actor_type: staff.actor_type(),
+                    actor_id: Some(id),
+                    impersonator_id: row.impersonator_id,
+                };
+                (actor, Some(staff))
+            }
+        };
         Ok(Resolution::Valid(
             actor,
             SessionInfo {
@@ -191,16 +218,16 @@ impl Sessions {
                 mfa_verified_at: row.mfa_verified_at,
                 tenant,
             },
+            staff,
         ))
     }
 }
 
 enum Resolution {
-    Valid(Actor, SessionInfo),
+    /// Sessão válida; `StaffRoles` só nas sessões `user`.
+    Valid(Actor, SessionInfo, Option<StaffRoles>),
     /// Inválida para este pedido: anónimo e cookie limpo.
     Invalid,
-    /// Válida, mas o sujeito ainda não tem ator (sessões `user`: cartão 19). Anónimo; o cookie fica.
-    Unmapped,
 }
 
 /// Sessão do pedido (extensão posta por `authenticate`).
@@ -215,20 +242,6 @@ pub struct SessionInfo {
 impl SessionInfo {
     pub fn tenant(&self) -> Option<TenantId> {
         self.tenant
-    }
-}
-
-/// Ator de uma sessão válida. `customer` → `Customer`. `user` → Merchant/Municipal/Admin conforme
-/// os papéis: decidido pelo cartão 19 (que substitui este ramo); até lá, sem ator (anónimo) e não se
-/// criam sessões `user`.
-fn actor_of(row: &SessionRow) -> Option<Actor> {
-    match row.subject {
-        Subject::Customer(id) => Some(Actor {
-            actor_type: ActorType::Customer,
-            actor_id: Some(id),
-            impersonator_id: row.impersonator_id,
-        }),
-        Subject::User(_) => None,
     }
 }
 
@@ -253,14 +266,23 @@ pub async fn authenticate(State(s): State<Sessions>, mut req: Request, next: Nex
         CookieRead::Invalid => return cleared(next.run(req).await, kind),
         CookieRead::Token(h) => h,
     };
-    match s.resolve(&hash, tenant).await {
-        Ok(Resolution::Valid(actor, info)) => {
+    // O mesmo `request_id` da caixa negra (`SetRequestIdLayer`, sempre UUIDv7).
+    let request_id = req
+        .extensions()
+        .get::<RequestId>()
+        .and_then(|r| r.header_value().to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .unwrap_or_else(Uuid::now_v7);
+    match s.resolve(&hash, tenant, request_id).await {
+        Ok(Resolution::Valid(actor, info, staff)) => {
             req.extensions_mut().insert(actor);
             req.extensions_mut().insert(info);
+            if let Some(staff) = staff {
+                req.extensions_mut().insert(staff);
+            }
             next.run(req).await
         }
         Ok(Resolution::Invalid) => cleared(next.run(req).await, kind),
-        Ok(Resolution::Unmapped) => next.run(req).await,
         Err(e) => e.into_response(),
     }
 }
