@@ -95,6 +95,27 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
     todas as sessões. O `pg_settings` não mostra GUCs personalizados (passo 0, provado no PG 18), por isso a BD
     não os recusa na escrita: `audit.audit_guc_defaults()` (worker) lista-os de `pg_db_role_setting`; o verify
     do cartão 09 alerta se devolver linhas.
+- **L2: event triggers de DDL (0013, cartão 02/04):** `audit.audit_ddl_end()` (ddl_command_end) e
+  `audit.audit_ddl_drop()` (sql_drop), INVOKER e seladas. Cada comando gera um evento `ddl.<tag>` (ou
+  `ddl.drop_<tipo>`) na cadeia da plataforma, com `changes = {query_sha256 (do texto já mascarado, inteiro), query (mascarado:
+  literal a seguir a PASSWORD/SECRET → '[redacted]'; cortado a 4096), truncated}`. Uma tabela nova em `public`
+  (fora de `audit_events`/`outbox_events`, não partição) recebe sozinha `zz_audit_row` + `zz_audit_truncate`
+  (ALWAYS): **as migrations novas não criam esses triggers à mão**. Qualquer papel não superuser (o migrator
+  incluído) que desligue, troque, renomeie ou apague um `zz_audit_*` recebe `PTA04` (e o comando é desfeito).
+  - `CREATE EVENT TRIGGER` exige superuser: os event triggers vivem em `postgres/bootstrap/event-triggers.sql`
+    (idempotente), corrido **depois das migrations** pelo `migrations/tests/run.sh` e pelo `scripts/dev-check.sh`;
+    em produção é um passo do deploy. Na BD de dev, depois de aplicar a 0013:
+    `docker compose -f infra/docker-compose.dev.yml exec -T postgres psql -U postgres -d ptmarket -X -q -v ON_ERROR_STOP=1 -f - < infra/postgres/bootstrap/event-triggers.sql`
+  - Alteração aprovada `0013_ddl_owner_exec`: EXECUTE em `audit_append_db` para `ptmarket_audit_owner`
+    (`audit_ensure_partitions` corre como ele; cada partição criada fica em `ddl.create_table`).
+  - Limites do PostgreSQL: objetos globais (CREATE/ALTER/DROP ROLE, GRANT de pertença) não disparam event
+    triggers: só a L3 (pgaudit) os vê. Num GRANT/REVOKE o evento fica sem `target_id` (o alvo está em
+    `changes.query`). As BDs do `sqlx::test` (criadas de `template1`, sem as funções) não têm L2: a prova da L2 é o
+    `run.sh`. O superuser pode desligar a L2 (`event_triggers = off`, `ALTER EVENT TRIGGER … DISABLE`): fica no
+    pgaudit (`pgaudit.log='all'` no `postgres`).
+  - Volume: cada `audit_seal()` (fim de cada migration que mexe em `audit`) grava dezenas de `ddl.grant`/`ddl.revoke`
+    (um por objeto de `audit.*`), na cadeia da plataforma. `ALTER TABLE … DETACH PARTITION` de uma tabela de
+    `public` com L1 apaga os `zz_audit_*` clonados e é recusado (`PTA04`); hoje não há tabelas particionadas em `public`.
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

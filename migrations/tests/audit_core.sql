@@ -6,6 +6,7 @@
 -- prova-se em audit_seal.sql, numa sessão dele. Tudo numa transação com ROLLBACK.
 
 BEGIN;
+SET LOCAL event_triggers = off; -- L2 (0013) desligada só nesta transação: este teste não é sobre DDL
 
 -- Base: eventos que já existiam antes deste teste (ex.: os do sqlx em _sqlx_migrations, L1 da 0010).
 -- As asserções contam só o que este teste grava (id fora da base).

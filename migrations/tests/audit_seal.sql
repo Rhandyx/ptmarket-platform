@@ -216,7 +216,9 @@ SELECT pg_temp.expect_value(
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM pg_proc p
        WHERE p.pronamespace = 'audit'::regnamespace
-         AND (p.prosrc ~* '\mpublic\s*\.' OR p.prosrc ~* 'outbox')$q$,
+         AND (p.prosrc ~* '\mpublic\s*\.' OR p.prosrc ~* 'outbox')
+         -- L2 (0013): as funções de DDL só comparam o nome outbox_events (allowlist da L1 automática).
+         AND p.oid NOT IN ('audit.audit_ddl_end()'::regprocedure, 'audit.audit_ddl_drop()'::regprocedure)$q$,
     0, 'nenhuma função de audit.* refere o schema public nem o outbox');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM pg_proc p
@@ -264,6 +266,10 @@ END
 $$;
 CREATE TRIGGER ptm_evil_outbox BEFORE INSERT OR UPDATE ON public.outbox_events
     FOR EACH ROW EXECUTE FUNCTION public.ptm_evil_outbox();
+-- L2 (0013): o DDL acima também é gravado (ddl.*, que o migrator não desliga); a base passa a ser depois da montagem.
+SET ROLE ptmarket_worker;
+SELECT set_config('ptm.base_seq_sum', (SELECT COALESCE(sum(last_seq), 0) FROM audit.audit_chains())::text, false);
+RESET ROLE;
 
 -- App: admin (plataforma) e impersonação (tenant A); depois um evento normal no outbox (o trigger dispara).
 SET ROLE ptmarket_app;

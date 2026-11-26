@@ -109,16 +109,16 @@ SELECT pg_temp.expect_value(
        WHERE t.tgrelid = 'public.outbox_events'::regclass AND t.tgname LIKE 'zz_audit%'$q$,
     0, 'outbox_events fica de fora (allowlist)');
 
+-- L2 (0013): uma tabela nova de public recebe sozinha os dois triggers (event trigger, ENABLE ALWAYS).
 CREATE TABLE public.ptm_l1_bare (id int);
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM pg_temp.l1_uncovered() u WHERE u = 'ptm_l1_bare'$q$, 1, 'tabela nova sem trigger chumba');
-CREATE TRIGGER zz_audit_row AFTER INSERT OR UPDATE OR DELETE ON public.ptm_l1_bare
-    FOR EACH ROW EXECUTE FUNCTION audit.audit_row_trigger();
-CREATE TRIGGER zz_audit_truncate BEFORE TRUNCATE ON public.ptm_l1_bare
-    FOR EACH STATEMENT EXECUTE FUNCTION audit.audit_row_trigger();
+    $q$SELECT count(*) FROM pg_temp.l1_uncovered() u WHERE u = 'ptm_l1_bare'$q$, 0, 'tabela nova coberta sem CREATE TRIGGER manual');
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM pg_temp.l1_uncovered() u WHERE u = 'ptm_l1_bare'$q$,
-    1, 'tabela nova com triggers ENABLE (não ALWAYS) chumba');
+    $q$SELECT count(*) FROM pg_trigger t
+       WHERE t.tgrelid = 'public.ptm_l1_bare'::regclass AND t.tgenabled = 'A'
+         AND t.tgfoid = 'audit.audit_row_trigger()'::regprocedure
+         AND ((t.tgname = 'zz_audit_row' AND t.tgtype = 29) OR (t.tgname = 'zz_audit_truncate' AND t.tgtype = 34))$q$,
+    2, 'tabela nova: zz_audit_row + zz_audit_truncate com tgenabled A');
 DROP TABLE public.ptm_l1_bare;
 
 -- ---------------------------------------------------------------------------
@@ -159,15 +159,9 @@ CREATE TABLE public.ptm_l1_probe (
     tenant_id UUID,
     note      TEXT
 );
-CREATE TRIGGER zz_audit_row AFTER INSERT OR UPDATE OR DELETE ON public.ptm_l1_probe
-    FOR EACH ROW EXECUTE FUNCTION audit.audit_row_trigger();
-CREATE TRIGGER zz_audit_truncate BEFORE TRUNCATE ON public.ptm_l1_probe
-    FOR EACH STATEMENT EXECUTE FUNCTION audit.audit_row_trigger();
-ALTER TABLE public.ptm_l1_probe ENABLE ALWAYS TRIGGER zz_audit_row;
-ALTER TABLE public.ptm_l1_probe ENABLE ALWAYS TRIGGER zz_audit_truncate;
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON public.ptm_l1_probe TO ptmarket_app, ptmarket_worker;
 SELECT pg_temp.expect_value(
-    $q$SELECT count(*) FROM pg_temp.l1_uncovered()$q$, 0, 'migrator põe zz_audit_row/zz_audit_truncate numa tabela nova');
+    $q$SELECT count(*) FROM pg_temp.l1_uncovered()$q$, 0, 'tabela nova do migrator coberta sozinha (L2)');
 
 -- ---------------------------------------------------------------------------
 -- 3. Dono sem ator: grava 'db' com o session_user; o label não se muda pelo contexto.

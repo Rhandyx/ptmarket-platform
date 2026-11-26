@@ -986,6 +986,16 @@ END
 $body$;
 $chg_0012$);
 
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0013_ddl_owner_exec (cartão 02/04). Disparada por migrations/0013_audit_ddl.sql.
+--   A L2 (event trigger de DDL, INVOKER) grava por audit_append_db como quem faz o DDL. audit_ensure_partitions
+--   (DEFINER, dono ptmarket_audit_owner) cria partições: sem este EXECUTE, a criação falhava (42501). O dono é
+--   NOLOGIN e sem membros (só código selado corre como ele).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, sql) VALUES ('0013_ddl_owner_exec', $chg_0013$
+GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_audit_owner;
+$chg_0013$);
+
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
 DECLARE

@@ -6,6 +6,7 @@
 -- Tudo numa transação com ROLLBACK.
 
 BEGIN;
+SET LOCAL event_triggers = off; -- L2 (0013) desligada só nesta transação: este teste não é sobre DDL
 
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
 RETURNS void LANGUAGE plpgsql AS $$

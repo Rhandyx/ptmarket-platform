@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prova das migrations: BD PostgreSQL 18 limpa -> bootstrap -> sqlx migrate run -> todos os tests/*.sql
-# (ON_ERROR_STOP).
+# Prova das migrations: BD PostgreSQL 18 limpa -> bootstrap -> sqlx migrate run -> event triggers da L2
+# (infra/postgres/bootstrap/event-triggers.sql, superuser) -> todos os tests/*.sql (ON_ERROR_STOP).
 # As migrations correm SEMPRE como papel não superuser (equivalente ao ptmarket_migrator de dev:
 #   LOGIN CREATEDB CREATEROLE NOSUPERUSER NOBYPASSRLS, dono da BD e do schema public).
 # Os testes também, exceto os que começam pela linha "-- run.sh: superuser" (ex.: caixa negra: adulterar a
@@ -106,6 +106,10 @@ fi
 
 echo "== sqlx migrate run --source migrations"
 "$SQLX" migrate run --source "$MIG_DIR" --database-url "$DB_URL"
+
+# L2 da caixa negra (0013): os event triggers exigem superuser; correm DEPOIS das migrations.
+echo "== infra/postgres/bootstrap/event-triggers.sql (superuser)"
+run_psql_super "$ROOT/infra/postgres/bootstrap/event-triggers.sql"
 
 shopt -s nullglob
 tests=("$MIG_DIR"/tests/*.sql)

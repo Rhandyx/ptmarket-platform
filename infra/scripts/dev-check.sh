@@ -38,6 +38,20 @@ if "${DC[@]}" exec -T postgres psql -U ptmarket_migrator -d ptmarket -At -c "SET
 fi
 [ "$("${DC[@]}" exec -T redis redis-cli ping | tr -d '\r')" = PONG ] || fail "Redis não responde PONG"
 
+# Caixa negra L2 (0013): event triggers de DDL, só o superuser os cria; aplicados DEPOIS das migrations
+# (idempotente). Sem a 0013 aplicada, avisa e segue (BD nova antes do sqlx migrate run).
+if [ "$(q "SELECT to_regprocedure('audit.audit_ddl_end()') IS NOT NULL AND to_regprocedure('audit.audit_ddl_drop()') IS NOT NULL")" = t ]; then
+  "${DC[@]}" exec -T postgres psql -U postgres -d ptmarket -X -q -v ON_ERROR_STOP=1 -f - \
+    < postgres/bootstrap/event-triggers.sql >/dev/null || fail "postgres/bootstrap/event-triggers.sql falhou"
+  [ "$(q "SELECT count(*) FROM pg_event_trigger WHERE evtenabled = 'A' AND evttags IS NULL
+          AND ((evtname = 'audit_ddl_end' AND evtevent = 'ddl_command_end' AND evtfoid = 'audit.audit_ddl_end()'::regprocedure)
+            OR (evtname = 'audit_ddl_drop' AND evtevent = 'sql_drop' AND evtfoid = 'audit.audit_ddl_drop()'::regprocedure))")" = 2 ] \
+    || fail "event triggers da L2 (audit_ddl_end/audit_ddl_drop) em falta ou sem ENABLE ALWAYS"
+  [ "$(q "SHOW event_triggers")" = on ] || fail "event_triggers=off (a L2 não dispara)"
+else
+  echo "AVISO: migrations até à 0013 por aplicar: L2 (event triggers de DDL) inativa; correr sqlx migrate run e repetir" >&2
+fi
+
 # pgaudit (spec 13 §0 L3)
 q "SHOW shared_preload_libraries" | grep -qw pgaudit || fail "pgaudit não está em shared_preload_libraries"
 [ "$(q "SELECT count(*) FROM pg_extension WHERE extname='pgaudit'")" = 1 ] \
@@ -86,4 +100,4 @@ case "$worm_out" in
 esac
 
 if "${DC[@]}" ps --format '{{.Publishers}}' | grep -q '0\.0\.0\.0'; then fail "porta publicada em 0.0.0.0"; fi
-echo "OK: pg18 uuidv7 papéis redis pgaudit worm"
+echo "OK: pg18 uuidv7 papéis redis L2 pgaudit worm"
