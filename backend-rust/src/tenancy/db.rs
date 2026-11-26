@@ -60,6 +60,8 @@ pub struct TenantTx {
     tenant: TenantId,
     ctx: AuditCtx,
     tx: Transaction<'static, Postgres>,
+    /// `audit::record` gravou nesta transação; o `AuditCtx` só fica marcado depois do COMMIT.
+    recorded: bool,
 }
 
 impl TenantTx {
@@ -71,13 +73,27 @@ impl TenantTx {
         &self.ctx
     }
 
+    /// Confirma; só então o `AuditCtx` fica marcado como registado (se `audit::record` gravou).
     pub async fn commit(self) -> Result<(), AppError> {
-        self.tx.commit().await.map_err(db_error)
+        commit_and_mark(self.tx, &self.ctx, self.recorded).await
     }
 
     pub async fn rollback(self) -> Result<(), AppError> {
         self.tx.rollback().await.map_err(db_error)
     }
+}
+
+/// COMMIT e, só se passou, promove a marca pendente de `audit::record` para o `AuditCtx`.
+async fn commit_and_mark(
+    tx: Transaction<'static, Postgres>,
+    ctx: &AuditCtx,
+    recorded: bool,
+) -> Result<(), AppError> {
+    tx.commit().await.map_err(db_error)?;
+    if recorded {
+        ctx.mark_recorded();
+    }
+    Ok(())
 }
 
 impl Deref for TenantTx {
@@ -100,6 +116,8 @@ impl DerefMut for TenantTx {
 pub struct PlatformTx {
     ctx: AuditCtx,
     tx: Transaction<'static, Postgres>,
+    /// Ver `TenantTx::recorded`.
+    recorded: bool,
 }
 
 impl PlatformTx {
@@ -107,8 +125,9 @@ impl PlatformTx {
         &self.ctx
     }
 
+    /// Confirma; só então o `AuditCtx` fica marcado como registado (se `audit::record` gravou).
     pub async fn commit(self) -> Result<(), AppError> {
-        self.tx.commit().await.map_err(db_error)
+        commit_and_mark(self.tx, &self.ctx, self.recorded).await
     }
 
     pub async fn rollback(self) -> Result<(), AppError> {
@@ -138,6 +157,8 @@ pub(crate) mod sealed {
     /// Fora do crate não se nomeia: só `TenantTx` e `PlatformTx` implementam `AuditedTx`.
     pub trait Sealed {
         fn parts(&mut self) -> (&mut PgConnection, &AuditCtx);
+        /// Chamado por `audit::record` depois de gravar: a marca só passa ao `AuditCtx` no COMMIT.
+        fn mark_recorded_on_commit(&mut self);
     }
 }
 
@@ -148,12 +169,18 @@ impl sealed::Sealed for TenantTx {
     fn parts(&mut self) -> (&mut PgConnection, &AuditCtx) {
         (&mut self.tx, &self.ctx)
     }
+    fn mark_recorded_on_commit(&mut self) {
+        self.recorded = true;
+    }
 }
 impl AuditedTx for TenantTx {}
 
 impl sealed::Sealed for PlatformTx {
     fn parts(&mut self) -> (&mut PgConnection, &AuditCtx) {
         (&mut self.tx, &self.ctx)
+    }
+    fn mark_recorded_on_commit(&mut self) {
+        self.recorded = true;
     }
 }
 impl AuditedTx for PlatformTx {}
@@ -212,6 +239,7 @@ pub async fn begin_tenant_tx(
         tenant,
         ctx: ctx.clone(),
         tx,
+        recorded: false,
     })
 }
 
@@ -222,5 +250,6 @@ pub async fn begin_platform_tx(pool: &PgPool, ctx: &AuditCtx) -> Result<Platform
     Ok(PlatformTx {
         ctx: ctx.clone(),
         tx,
+        recorded: false,
     })
 }

@@ -42,7 +42,8 @@ impl ActorType {
 }
 
 /// Contexto de ator de um pedido ou job. Um `clone` partilha a marca `recorded`: o middleware
-/// (cartão 07) guarda uma cópia e vê se `audit::record` foi chamado durante o pedido.
+/// (cartão 07) guarda uma cópia e vê se um evento de `audit::record` chegou a ser confirmado
+/// (COMMIT) durante o pedido.
 #[derive(Debug, Clone)]
 pub struct AuditCtx {
     actor_type: ActorType,
@@ -147,7 +148,8 @@ impl AuditCtx {
         self.user_agent_hash.as_ref()
     }
 
-    /// `true` depois de um `audit::record` bem-sucedido com este contexto (ou um clone dele).
+    /// `true` só depois do COMMIT de uma transação em que `audit::record` gravou com este contexto
+    /// (ou um clone dele). Rollback ou drop sem commit não marcam.
     pub fn is_recorded(&self) -> bool {
         self.recorded.load(Ordering::Acquire)
     }

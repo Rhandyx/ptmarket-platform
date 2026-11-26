@@ -24,7 +24,13 @@ use uuid::Uuid;
 
 type TestResult = anyhow::Result<()>;
 /// actor_type, actor_id, request_id, host(ip), tenant_id
-type L1Row = (String, Option<Uuid>, Option<Uuid>, Option<String>, Option<Uuid>);
+type L1Row = (
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<String>,
+    Option<Uuid>,
+);
 /// actor_type, actor_id, request_id, outcome, changes, tenant_id
 type RecordRow = (
     String,
@@ -249,7 +255,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     let mut tx = begin_tenant_tx(&app, a, &ctx).await?;
     assert!(!ctx.is_recorded());
     let id = record(&mut tx, event("store.settings_changed", Some(changes))).await?;
-    assert!(ctx.is_recorded(), "record tem de marcar o AuditCtx");
+    assert!(!ctx.is_recorded(), "a marca só vale depois do COMMIT");
     let (actor_type, actor_id, request_id, outcome, changes, tenant_id): RecordRow =
         sqlx::query_as(
             "SELECT actor_type::text, actor_id, request_id, outcome::text, changes, tenant_id
@@ -259,6 +265,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
+    assert!(ctx.is_recorded(), "COMMIT tem de marcar o AuditCtx");
     assert_eq!(actor_type, "merchant");
     assert_eq!(actor_id, ctx.actor_id());
     assert_eq!(request_id, Some(ctx.request_id()));
@@ -279,6 +286,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     let rb_id = record(&mut tx, event("store.settings_changed", None)).await?;
     assert_eq!(count_event(&mut tx, rb_id).await?, 1);
     tx.rollback().await?;
+    assert!(!ctx_rb.is_recorded(), "rollback não pode marcar");
     let mut tx = begin_tenant_tx(&app, a, &ctx_rb).await?;
     assert_eq!(
         count_event(&mut tx, rb_id).await?,
