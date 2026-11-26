@@ -24,6 +24,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Regista um cliente (conta global). Responde sempre 202 com o mesmo corpo, exista ou não o
+         *     email; não inicia sessão.
+         */
+        post: operations["register"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/session": {
         parameters: {
             query?: never;
@@ -39,6 +59,24 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Perfil do cliente autenticado (só o próprio: não há id no pedido). */
+        get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Altera nome, telefone, NIF e consentimento de marketing do cliente autenticado. */
+        patch: operations["patch_me"];
         trace?: never;
     };
     "/api/v1/tenant": {
@@ -94,11 +132,76 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado). */
+        ConsentsInput: {
+            marketing?: boolean;
+            /** @description Versão da política de privacidade aceite (obrigatória; 1–64 caracteres). */
+            privacy_version: string;
+            /** @description Versão dos termos aceites (obrigatória; 1–64 caracteres). */
+            terms_version: string;
+        };
         /**
          * @description `tenants.country_code`.
          * @enum {string}
          */
         CountryCode: "PT" | "ES";
+        /** @description Perfil do cliente autenticado. */
+        CustomerProfile: {
+            /**
+             * @description `{"terms": {"version", "at"}, "privacy": {"version", "at"}, "marketing": {"granted", "at"}}`
+             *     (`at` em RFC 3339 UTC).
+             */
+            consents: Record<string, never>;
+            /** @description RFC 3339 UTC. */
+            created_at: string;
+            email: string;
+            /** Format: uuid */
+            id: string;
+            name: string | null;
+            nif: string | null;
+            phone: string | null;
+        };
+        /**
+         * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
+         *     Email e password ficam fora (exigem reautenticação).
+         */
+        ProfilePatch: {
+            /** @description Consentimento de marketing (datado no servidor). */
+            marketing?: boolean | null;
+            /** @description 1 a 255 caracteres. */
+            name?: string | null;
+            /** @description PT: 9 dígitos com dígito de controlo; ES: 9 caracteres alfanuméricos; `""` apaga. */
+            nif?: string | null;
+            /** @description Até 50 caracteres; `""` apaga. */
+            phone?: string | null;
+        };
+        /** @description Resposta do registo: sempre a mesma, exista ou não a conta. */
+        RegisterAccepted: {
+            /** @description Sempre `ok`. */
+            status: string;
+        };
+        /** @description Pedido de registo. Sem `Debug`: leva a password. */
+        RegisterRequest: {
+            consents: components["schemas"]["ConsentsInput"];
+            /** @description Até 255 caracteres; gravado normalizado (trim, NFC, minúsculas). */
+            email: string;
+            /**
+             * Format: int64
+             * @description Instante em que o formulário foi aberto (ms desde 1970-01-01 UTC).
+             */
+            form_started_at: number;
+            /** @description 1 a 255 caracteres. */
+            name: string;
+            /**
+             * Format: password
+             * @description 8 a 128 caracteres.
+             */
+            password: string;
+            /** @description Token do widget Cloudflare Turnstile (verificado no servidor; uso único). */
+            turnstile_token: string;
+            /** @description Honeypot: campo invisível; tem de vir vazio (ou ausente). */
+            website?: string;
+        };
         /** @description Estado da sessão do pedido. */
         SessionStatus: {
             /** @description `customer`, `merchant`, `municipal` ou `admin`; `null` se anónimo. */
@@ -179,6 +282,58 @@ export interface operations {
             };
         };
     };
+    register: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Pedido aceite (sempre igual, exista ou não a conta) */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisterAccepted"];
+                };
+            };
+            /** @description Pedido com sessão iniciada */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos, password vazada ou verificação anti-robô falhada */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     session_status: {
         parameters: {
             query?: never;
@@ -196,6 +351,109 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SessionStatus"];
                 };
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Perfil do cliente da sessão */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomerProfile"];
+                };
+            };
+            /** @description Sem sessão de cliente */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    patch_me: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfilePatch"];
+            };
+        };
+        responses: {
+            /** @description Perfil depois da alteração */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomerProfile"];
+                };
+            };
+            /** @description Sem sessão de cliente */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Token CSRF ou Origin inválidos */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Host desconhecido ou tenant inativo */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Dados inválidos (ex.: NIF com dígito de controlo errado) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Serviço temporariamente indisponível */
             503: {
