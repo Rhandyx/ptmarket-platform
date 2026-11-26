@@ -4,14 +4,16 @@
 > Mantido pelo supervisor (sessão principal, Opus). Secções recentes no topo. Máx. ~40 linhas: o histórico está no git.
 
 ## 26/11/2026 — Épico 03 EM CURSO (`docs/plans/03-patrocinio-comissoes/`, ordem no `00-INDICE.md`)
-- **Feito e commitado:** 01, 02, 12, 03, 04, 13. A BD de dev está na 0029 e tem o DICOFRE carregado (CAOP 2025, 3596 linhas). **Próximo:** 05 → 06 → 07 → par A [08 → 16] …
+- **Feito e commitado:** 01, 02, 12, 03, 04, 13, 05, 06, 07 e par A (08 + 16). A BD de dev está na **0033** e tem o DICOFRE carregado (CAOP 2025, 3596 linhas).
+- **Próximo:** par B [08b → 14]: ler a **adenda no fim do cartão 08b** (índice de um `national_portal` por país; testes com dois nacionais passam a PT + ES). Depois 09 → 10 → 11 → 15 → 17 …; o Go 24 entra depois do 11.
+- **Como correu:** db-architect/rust-core em série no checkout principal, sem commits dos agentes; o supervisor revê, corre as suites, aplica em dev e commita. A auditoria pode correr em paralelo com o executor seguinte (só lê). Quando um executor pára no limite de turnos, retomá-lo com SendMessage. Corrigir uma migration aplicada em dev mas ainda não commitada: CREATE OR REPLACE em dev + `UPDATE _sqlx_migrations SET checksum = decode(sha384 do ficheiro,'hex')`.
 - **CAOP:** `infra/data/geo/dicofre_caop2025.csv` + `infra/scripts/caop-to-dicofre-csv.py` (README "Seed DICOFRE"). Os códigos DTMNFR de 2025 têm 18 freguesias com letras (ex.: `0302FA`): validar sempre com `length()` + FK, nunca com regex só de algarismos.
 - **Testes (sem `.env` no repo):** `cd backend-rust && DATABASE_URL=postgres://ptmarket_migrator:dev_migrator@127.0.0.1:5432/ptmarket cargo test -p ptmarket-api --no-fail-fast`; a mesma URL para `sqlx migrate run --source migrations`. O `build.rs` recompila quando `migrations/` muda (antes dava verde falso). O owner autorizou correr os testes (26/11).
 - **Regras novas:**
   - `stores` tem grants por coluna (0029): uma coluna nova precisa de `GRANT INSERT/UPDATE (col)` à app.
   - Tabelas de referência levam a policy `migrator_all`.
   - Rotas de dinheiro/IBAN usam `RequireStoreOwner` (2FA), nunca `RequireStoreRole`.
-- **Dívida:** a sessão absoluta de staff/sponsor_admin fica em 8 h, e não nas 12 h, por causa do CHECK `sessions_max_lifetime` da 0019 (precisa de uma migration nova). O `RequireTenantAdmin` dá 403 a quem não tem o papel e 404 a quem o tem noutro tenant (aceite).
+- **Dívida:** a sessão absoluta de staff/sponsor_admin fica em 8 h, e não nas 12 h, por causa do CHECK `sessions_max_lifetime` da 0019 (precisa de uma migration nova). O `RequireTenantAdmin` dá 403 a quem não tem o papel e 404 a quem o tem noutro tenant (aceite). Mudar o `tenant_type` de um tenant que já tem lojas ou é canal não é revalidado (trigger em `tenants` futuro). `portal::with_badges` faz O(n·m) (≤100): trocar por HashMap.
 
 ## 26/11/2026 — Fase 2 CONCLUÍDA (épico `02-identidade-tenancy`, cartões em `docs/plans/02-identidade-tenancy/`)
 - **Feito:** todos os cartões (01–24b, 20b/20c, 23a). Cada um passou pela auditoria ASVS (L3 em admin/identity) e os achados foram corrigidos na mesma ronda. No fim: Rust (suite completa), `run.sh` (com L2) e `npm run verify` verdes; o Go não muda desde o 24a.
