@@ -22,7 +22,7 @@ func TestMain(m *testing.M) {
 
 func TestStartupRequiresWormAndAlerts(t *testing.T) {
 	base := []string{
-		"PTM_WORKER_MAIN=1",
+		"PTM_WORKER_MAIN=1", "APP_ENV=test",
 		"WORKER_DATABASE_URL=postgres://u:dbsecret-xyz@127.0.0.1:1/x",
 		"REDIS_URL=redis://127.0.0.1:1",
 		"WORM_ENDPOINT=http://127.0.0.1:1", "WORM_BUCKET=b",
@@ -48,6 +48,10 @@ func TestStartupRequiresWormAndAlerts(t *testing.T) {
 		{"WORM em http remoto", append(append(without(base, "WORM_ENDPOINT"), "WORM_ENDPOINT=http://example.com"), "ALERT_SINK=log://", "ALERT_DEV_LOG_ONLY=1"), "WORM_ENDPOINT"},
 		// Cartão 02/09b: log:// como único canal não avisa ninguém → só com ALERT_DEV_LOG_ONLY=1.
 		{"só log:// sem ALERT_DEV_LOG_ONLY", append(base, "ALERT_SINK=log://"), "ALERT_DEV_LOG_ONLY=1"},
+		{"sem APP_ENV", without(base, "APP_ENV"), "APP_ENV obrigatória"},
+		{"APP_ENV=prod", append(without(base, "APP_ENV"), "APP_ENV=prod"), "APP_ENV obrigatória"},
+		{"production com ALERT_DEV_LOG_ONLY=1", append(without(base, "APP_ENV"), "APP_ENV=production", "ALERT_SINK=log://", "ALERT_DEV_LOG_ONLY=1"), "ALERT_DEV_LOG_ONLY não é permitido com APP_ENV=production"},
+		{"staging com WORM em http", append(without(base, "APP_ENV"), "APP_ENV=staging", "ALERT_SINK=log://"), "WORM_ENDPOINT tem de começar por https://"},
 		{"só log:// com ALERT_DEV_LOG_ONLY=0", append(base, "ALERT_SINK=log://", "ALERT_DEV_LOG_ONLY=0"), "ALERT_DEV_LOG_ONLY=1"},
 	}
 	for _, c := range cases {
@@ -74,6 +78,7 @@ func TestStartupRequiresWormAndAlerts(t *testing.T) {
 // Discord + log:// sem a variável.
 func TestStartupAlertChannels(t *testing.T) {
 	env := map[string]string{
+		"APP_ENV": "test",
 		"WORKER_DATABASE_URL": "postgres://u:p@127.0.0.1:1/x", "REDIS_URL": "redis://127.0.0.1:1",
 		"WORM_ENDPOINT": "http://127.0.0.1:1", "WORM_REGION": "", "WORM_BUCKET": "b",
 		"WORM_ACCESS_KEY": "ak", "WORM_SECRET_KEY": "sk",

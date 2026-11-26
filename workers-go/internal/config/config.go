@@ -5,10 +5,49 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
+// Env é o ambiente de execução (APP_ENV). Obrigatório e exato: sem valor por omissão.
+type Env string
+
+const (
+	EnvDevelopment Env = "development"
+	EnvTest        Env = "test"
+	EnvStaging     Env = "staging"
+	EnvProduction  Env = "production"
+)
+
+// Strict: staging e production recusam as válvulas de dev.
+func (e Env) Strict() bool { return e == EnvStaging || e == EnvProduction }
+
+// LoadEnv lê APP_ENV (development | test | staging | production, minúsculas). Ausente ou outro valor = erro.
+func LoadEnv() (Env, error) {
+	switch e := Env(os.Getenv("APP_ENV")); e {
+	case EnvDevelopment, EnvTest, EnvStaging, EnvProduction:
+		return e, nil
+	}
+	return "", errors.New("APP_ENV obrigatória: development | test | staging | production")
+}
+
+// Validate recusa, em ambientes Strict, ALERT_DEV_LOG_ONLY=1 e WORM_ENDPOINT sem https://.
+// As mensagens nunca incluem tokens nem URLs de alerta.
+func Validate(env Env, w Worm, a Alerts) error {
+	if !env.Strict() {
+		return nil
+	}
+	if a.DevLogOnly {
+		return errors.New("ALERT_DEV_LOG_ONLY não é permitido com APP_ENV=" + string(env))
+	}
+	if !strings.HasPrefix(w.Endpoint, "https://") {
+		return errors.New("WORM_ENDPOINT tem de começar por https:// com APP_ENV=" + string(env))
+	}
+	return nil
+}
+
 type Config struct {
+	Env          Env
 	DatabaseURL  string
 	RedisURL     string
 	PollInterval time.Duration
@@ -86,7 +125,12 @@ func LoadAlerts() Alerts {
 }
 
 func Load() (Config, error) {
+	env, err := LoadEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	c := Config{
+		Env:          env,
 		DatabaseURL:  os.Getenv("WORKER_DATABASE_URL"),
 		RedisURL:     os.Getenv("REDIS_URL"),
 		PollInterval: time.Second,
@@ -123,5 +167,8 @@ func Load() (Config, error) {
 	}
 	c.Worm = w
 	c.Alerts = LoadAlerts()
+	if err := Validate(env, c.Worm, c.Alerts); err != nil {
+		return c, err
+	}
 	return c, nil
 }

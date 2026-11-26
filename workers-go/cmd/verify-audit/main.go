@@ -37,6 +37,11 @@ func main() { os.Exit(realMain()) }
 
 func realMain() int {
 	log := logx.New()
+	env, err := config.LoadEnv()
+	if err != nil {
+		log.Error("configuração inválida", "err", err.Error())
+		return exitError
+	}
 	dbURL := os.Getenv("WORKER_DATABASE_URL")
 	if dbURL == "" {
 		log.Error("configuração inválida", "err", "WORKER_DATABASE_URL é obrigatória")
@@ -48,6 +53,10 @@ func realMain() int {
 		return exitError
 	}
 	acfg := config.LoadAlerts()
+	if err := config.Validate(env, wcfg, acfg); err != nil {
+		log.Error("configuração inválida", "err", err.Error())
+		return exitError
+	}
 	channels, err := audit.NewChannels(audit.AlertSettings{
 		TelegramBotToken: acfg.TelegramBotToken, TelegramChatID: acfg.TelegramChatID,
 		DiscordWebhookURL: acfg.DiscordWebhookURL, Sink: acfg.Sink, DevLogOnly: acfg.DevLogOnly,
