@@ -16,6 +16,12 @@ use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::error::{AppError, FieldError};
 
+pub mod commission;
+pub use commission::{
+    CommissionInput, CommissionQuote, CommissionRule, PlanTier, effective_commission,
+    monthly_fee_for,
+};
+
 #[cfg(test)]
 mod no_float;
 #[cfg(test)]
@@ -33,13 +39,20 @@ pub enum MoneyError {
     BpsOutOfRange,
     #[error("overflow no cálculo de dinheiro")]
     Overflow,
+    /// Configuração de escalões de plano inválida (erro da plataforma, não do pedido): 500.
+    #[error("escalões de plano inválidos")]
+    InvalidPlanTiers,
 }
 
 impl From<MoneyError> for AppError {
     fn from(e: MoneyError) -> Self {
+        if e == MoneyError::InvalidPlanTiers {
+            return AppError::Internal(anyhow::anyhow!(e));
+        }
         let field = match e {
             MoneyError::NegativeCents | MoneyError::Overflow => "amount",
             MoneyError::BpsOutOfRange => "bps",
+            MoneyError::InvalidPlanTiers => "plan_tiers",
         };
         AppError::Validation(vec![FieldError {
             field: field.to_owned(),

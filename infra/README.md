@@ -243,3 +243,24 @@ Variáveis novas (`.env.example`): `WORM_ENDPOINT`, `WORM_REGION`, `WORM_BUCKET`
 
 **Produção:** o WORM é externo (R2 ou S3 Object Lock, decisão do owner) e vive numa conta **diferente** da que
 corre a aplicação; as credenciais da app só podem gravar (sem apagar nem alterar retenção/configuração).
+
+## Seed DICOFRE (cartão 03/02; tabela `geo_dicofre`, migration 0027)
+Carrega distritos, concelhos e freguesias (CAOP/DGT) a partir de um CSV local; idempotente, numa só transação,
+nunca apaga linhas. Fonte: DGT — CAOP 2025.
+- Carregar (dev ou produção; `DATABASE_URL` = ligação do **migrator**, passada por quem corre):
+  `DATABASE_URL=postgres://ptmarket_migrator:…@host:5432/ptmarket infra/scripts/seed-dicofre.sh infra/data/geo/dicofre_caop2025.csv CAOP2025`
+  (dev: URL do migrator acima). Imprime `inseridos=… atualizados=… retirados|em_falta=…`. Qualquer erro aborta tudo e indica a linha.
+- `--retire-missing`: fecha com `valid_to = now()` os códigos em vigor que não vêm no ficheiro (mantêm a `caop_version` antiga);
+  sem a opção só diz quantos faltam. Um código retirado que volte a aparecer fica de novo em vigor.
+- Carga com histórico: se houver uma versão anterior a 2025, carregar primeiro a antiga e depois a mais recente com
+  `--retire-missing`, para os patrocínios antigos continuarem a resolver.
+- Contrato do CSV intermédio (UTF-8, cabeçalho `code,name`, vírgula): `code` com 2, 4 ou 6 caracteres (distrito, concelho,
+  freguesia), regex `^[0-9]{2}([0-9]{2}([0-9A-Z]{2})?)?$` (igual ao CHECK da 0027); nome não vazio (≤160); sem duplicados;
+  cada pai no ficheiro ou já na tabela. Nota: os códigos DTMNFR de 2025 podem ter letras maiúsculas na freguesia
+  (ex.: `0302FA`, Barcelos); distrito e concelho são só algarismos. Linhas com `\` são recusadas.
+- Regenerar o CSV (passo do supervisor, fora do script): em
+  https://www.dgterritorio.gov.pt/cartografia/cartografia-tematica/caop descarregar `Areas_Freg_Mun_Dist_Pais_CAOP2025.zip`,
+  extrair o zip para uma pasta e convertê-lo com `python3 -I infra/scripts/caop-to-dicofre-csv.py <pasta-dos-csv> <saida.csv>`
+  com saída `infra/data/geo/dicofre_caop2025.csv`.
+- Prova: `infra/scripts/tests/seed-dicofre-test.sh` (postgres:18 descartável, removido no fim). Os ficheiros
+  `infra/scripts/tests/fixtures/dicofre_v*.csv` são dados **fictícios** de teste, não uma amostra oficial.

@@ -15,7 +15,7 @@ Existe a tabela oficial de distritos, concelhos e freguesias (vazia), só de lei
 ```
 geo_dicofre: referência (distrito DD, concelho DDCC, freguesia DDCCFF, nome, caop_version), carregada dos dados abertos oficiais da CAOP/DGT por script de seed, NÃO por migration. A reorganização de freguesias de 2025 alterou códigos e os patrocínios antigos têm de continuar a resolver → uma linha NUNCA é apagada; um código que desaparece fica com valid_to preenchido.
 CREATE TABLE geo_dicofre (
-    code VARCHAR(6) PRIMARY KEY CHECK (code ~ '^[0-9]{2}([0-9]{2}([0-9]{2})?)?$'),
+    code VARCHAR(6) PRIMARY KEY CHECK (code ~ '^[0-9]{2}([0-9]{2}([0-9A-Z]{2})?)?$') /* Os códigos DTMNFR da CAOP 2025 (INE) têm 18 freguesias com letras maiúsculas nos 2 últimos caracteres (ex.: 0302FA, Barcelos); distrito e concelho são só algarismos. */,
     level VARCHAR(12) NOT NULL CHECK (level IN ('district', 'municipality', 'parish')),
     parent_code VARCHAR(4) REFERENCES geo_dicofre (code) ON DELETE RESTRICT,
     name VARCHAR(160) NOT NULL, caop_version VARCHAR(16) NOT NULL /* última versão da CAOP em que o código apareceu */, valid_to TIMESTAMPTZ /* NULL = em vigor */,
@@ -29,7 +29,7 @@ Tabela nova → bloco L1 condicional: copiar o DO $$ … $$ da 0018 (linhas 77�
 
 ## Feito quando
 - [ ] BD limpa e BD com L2: a 0027 aplica; `geo_dicofre` tem os dois triggers `zz_audit_*`
-- [ ] Teste novo `geo_dicofre`: aceita `11`, `1106`, `110601` com pais coerentes; recusa código com 3 ou 5 dígitos, `level` errado, pai errado e freguesia sem concelho (FK)
+- [ ] Teste novo `geo_dicofre`: aceita `11`, `1106`, `110601` e `0302FA` com pais coerentes; recusa código com 3 ou 5 dígitos, minúsculas, letra no distrito ou no concelho, `level` errado, pai errado e freguesia sem concelho (FK)
 - [ ] Como `ptmarket_app`: SELECT funciona sem tenant no contexto; INSERT, UPDATE e DELETE → 42501; DELETE como migrator → erro do trigger
 
 ## Prova (um comando)
