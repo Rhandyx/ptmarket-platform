@@ -42,14 +42,15 @@ pub struct AuditEvent {
     pub store_id: Option<Uuid>,
 }
 
-/// Grava o evento na transação `tx` e marca o `AuditCtx` como registado. Devolve o id do evento.
+/// Grava o evento na transação `tx`. A marca `recorded` do `AuditCtx` fica pendente na transação
+/// e só passa a valer no `commit` (rollback ou drop sem commit = não registado). Devolve o id.
 /// Chamar no fim da transação: o bloqueio da cabeça da cadeia fica até ao COMMIT.
 pub async fn record<T: AuditedTx>(tx: &mut T, ev: AuditEvent) -> Result<Uuid, AppError> {
     let mut changes = ev.changes;
     if let Some(c) = changes.as_mut() {
         redact(c);
     }
-    let (conn, ctx) = tx.parts();
+    let (conn, _) = tx.parts();
     let outcome = ev.outcome.as_str();
     // Os 8 argumentos com o tipo exato da assinatura (nunca resolve para uma sobrecarga plantada);
     // p_tenant_id = NULL: o tenant vem sempre do contexto da transação.
@@ -76,6 +77,6 @@ pub async fn record<T: AuditedTx>(tx: &mut T, ev: AuditEvent) -> Result<Uuid, Ap
             "audit_append devolveu NULL (evento não gravado)"
         ))
     })?;
-    ctx.mark_recorded();
+    tx.mark_recorded_on_commit();
     Ok(id)
 }

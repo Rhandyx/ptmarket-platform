@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 
+use ipnet::IpNet;
 use secrecy::SecretString;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
@@ -21,6 +22,25 @@ pub struct Config {
     pub database_replica_url: SecretString,
     pub redis_url: SecretString,
     pub bind_addr: SocketAddr,
+    /// `TRUSTED_PROXY_CIDRS` (separadas por vírgula): só destes peers se aceita `CF-Connecting-IP`.
+    /// Ausente ou vazia = nunca confiar. `/0` é recusado (seria confiar em toda a Internet).
+    pub trusted_proxy_cidrs: Vec<IpNet>,
+}
+
+fn trusted_proxies(raw: Option<String>) -> Result<Vec<IpNet>, ConfigError> {
+    const KEY: &str = "TRUSTED_PROXY_CIDRS";
+    let raw = raw.unwrap_or_default();
+    let mut nets = Vec::new();
+    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let net: IpNet = item
+            .parse()
+            .map_err(|_| ConfigError::Invalid(KEY, "esperado CIDR, ex.: 173.245.48.0/20"))?;
+        if net.prefix_len() == 0 {
+            return Err(ConfigError::Invalid(KEY, "rede /0 não é permitida"));
+        }
+        nets.push(net.trunc());
+    }
+    Ok(nets)
 }
 
 fn secret(
@@ -54,6 +74,7 @@ impl Config {
             bind_addr: bind
                 .parse()
                 .map_err(|_| ConfigError::Invalid("BIND_ADDR", "esperado endereço:porta"))?,
+            trusted_proxy_cidrs: trusted_proxies(get("TRUSTED_PROXY_CIDRS"))?,
         })
     }
 }
@@ -107,6 +128,23 @@ mod tests {
         let mut v = OK.to_vec();
         v.push(("BIND_ADDR", "nope"));
         assert!(Config::from_lookup(env(&v)).is_err());
+    }
+
+    #[test]
+    fn trusted_proxy_cidrs_optional_and_validated() {
+        let c = Config::from_lookup(env(&OK));
+        assert!(c.is_ok_and(|c| c.trusted_proxy_cidrs.is_empty()));
+
+        let mut v = OK.to_vec();
+        v.push(("TRUSTED_PROXY_CIDRS", " 173.245.48.0/20, 2400:cb00::/32 ,"));
+        let c = Config::from_lookup(env(&v));
+        assert!(c.is_ok_and(|c| c.trusted_proxy_cidrs.len() == 2));
+
+        for bad in ["nope", "10.0.0.1", "0.0.0.0/0", "::/0"] {
+            let mut v = OK.to_vec();
+            v.push(("TRUSTED_PROXY_CIDRS", bad));
+            assert!(Config::from_lookup(env(&v)).is_err(), "{bad}");
+        }
     }
 
     #[test]

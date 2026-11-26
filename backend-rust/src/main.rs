@@ -1,4 +1,6 @@
-use ptmarket_api::{config::Config, http, state::AppState};
+use std::net::SocketAddr;
+
+use ptmarket_api::{config::Config, http, http::client_ip::TrustedProxies, state::AppState};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -18,7 +20,10 @@ async fn run() -> anyhow::Result<()> {
     let state = AppState::from_config(&cfg)?;
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!(addr = %cfg.bind_addr, "a escutar");
-    axum::serve(listener, http::router(state))
+    let trusted = TrustedProxies::new(cfg.trusted_proxy_cidrs);
+    // ConnectInfo: o peer TCP decide se `CF-Connecting-IP`/`x-request-id` contam (caixa negra).
+    let app = http::router_with(state, trusted).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

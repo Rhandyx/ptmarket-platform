@@ -29,6 +29,9 @@ pub enum AppError {
     /// Capacidade esgotada (ex.: fila de hashes de password cheia). 503 + `Retry-After`.
     #[error("busy")]
     Busy,
+    /// Dependência obrigatória indisponível (ex.: caixa negra não gravou): falha fechado, 503.
+    #[error("service unavailable")]
+    ServiceUnavailable,
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 }
@@ -42,6 +45,7 @@ impl AppError {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict => StatusCode::CONFLICT,
             Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -54,6 +58,7 @@ impl AppError {
             Self::Validation(_) => "validation",
             Self::Conflict => "conflict",
             Self::Busy => "busy",
+            Self::ServiceUnavailable => "service_unavailable",
             Self::Internal(_) => "internal",
         }
     }
@@ -66,6 +71,7 @@ impl AppError {
             Self::Validation(_) => "Dados inválidos.",
             Self::Conflict => "Conflito com o estado atual.",
             Self::Busy => "Serviço ocupado. Tente novamente dentro de instantes.",
+            Self::ServiceUnavailable => "Serviço temporariamente indisponível.",
             Self::Internal(_) => "Erro interno.",
         }
     }
@@ -120,6 +126,7 @@ mod tests {
             (AppError::Validation(vec![]), 422, "validation"),
             (AppError::Conflict, 409, "conflict"),
             (AppError::Busy, 503, "busy"),
+            (AppError::ServiceUnavailable, 503, "service_unavailable"),
             (AppError::Internal(anyhow::anyhow!("x")), 500, "internal"),
         ];
         for (e, status, code) in cases {

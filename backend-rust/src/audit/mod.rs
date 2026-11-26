@@ -6,3 +6,6 @@ pub mod record;
 
 pub use ctx::{ActorType, AuditCtx};
 pub use record::{AuditEvent, Outcome, record};
+
+/// Extensões do pedido lidas pelo middleware da caixa negra (`http::audit_layer`).
+pub use crate::http::audit_layer::{Actor, AuditClass, Denied};
