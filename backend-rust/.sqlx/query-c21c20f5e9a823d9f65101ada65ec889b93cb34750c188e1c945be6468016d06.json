@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT slug, name, tenant_type, country_code, currency, template_layout,\n                theme_config, legal_config\n         FROM tenants WHERE id = $1 AND is_active",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "slug",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "tenant_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "tenant_type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "country_code",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "country_code"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "template_layout",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "template_layout"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "theme_config",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "theme_config"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "legal_config",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "legal_config"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c21c20f5e9a823d9f65101ada65ec889b93cb34750c188e1c945be6468016d06"
+}

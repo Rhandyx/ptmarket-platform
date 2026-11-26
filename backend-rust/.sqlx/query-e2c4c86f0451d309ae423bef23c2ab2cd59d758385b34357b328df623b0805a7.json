@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash",
+  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,\n                set_config('app.portal_national', $9, true) AS portal_national",
   "describe": {
     "columns": [
       {
@@ -50,10 +50,17 @@
         "name": "user_agent_hash",
         "type_info": "Text",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "portal_national",
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text",
         "Text",
         "Text",
@@ -72,8 +79,9 @@
       null,
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "b2b22a1ac0e9ba3aed0ceaa164058c7890f2cecb93270e76a893ebb1126b89a7"
+  "hash": "e2c4c86f0451d309ae423bef23c2ab2cd59d758385b34357b328df623b0805a7"
 }

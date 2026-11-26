@@ -3,12 +3,13 @@
 pub mod audit_layer;
 pub mod client_ip;
 pub mod health;
+pub mod openapi;
 pub mod telemetry;
 
 use std::time::Duration;
 
 use axum::{
-    Router,
+    Extension, Router,
     body::Body,
     http::{HeaderName, Request, StatusCode},
     routing::get,
@@ -23,11 +24,13 @@ use tower_http::{
 use tracing::Span;
 
 use crate::{
+    audit::AuditClass,
     http::{
         audit_layer::{AuditLayerState, MakeRequestUuidV7, audited, take_client_request_id},
         client_ip::TrustedProxies,
     },
     state::AppState,
+    tenancy,
 };
 
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -43,13 +46,31 @@ pub fn router(state: AppState) -> Router {
 /// servir com `into_make_service_with_connect_info::<SocketAddr>()`.
 pub fn router_with(state: AppState, trusted: TrustedProxies) -> Router {
     let audit = AuditLayerState::new(state.db_primary.clone(), state.redis.clone(), trusted);
-    let api: Router<AppState> = Router::new();
     let app = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
-        .merge(audited(api, audit))
+        .merge(api(state.clone(), audit))
         .with_state(state);
     with_edge_layers(app)
+}
+
+/// Rotas da API, de fora para dentro: `resolve_host` (tenant pelo `Host`; nunca recusa) →
+/// `AuditClass` → caixa negra → handler (os extractores `ResolvedTenant`/`PlatformHost` recusam
+/// com 404 por dentro da caixa negra).
+pub fn api(state: AppState, audit: AuditLayerState) -> Router<AppState> {
+    let read_async = Router::new().route("/api/v1/tenant", get(tenancy::http::tenant_info));
+    with_host_resolution(
+        Router::new().merge(audited(read_async, audit).layer(Extension(AuditClass::ReadAsync))),
+        state,
+    )
+}
+
+/// Aplica a resolução do tenant pelo `Host` (por fora da caixa negra) às rotas de `router`.
+pub fn with_host_resolution(router: Router<AppState>, state: AppState) -> Router<AppState> {
+    router.route_layer(axum::middleware::from_fn_with_state(
+        state,
+        tenancy::http::resolve_host,
+    ))
 }
 
 /// Layers de entrada (por esta ordem, de fora para dentro): o `x-request-id` do cliente sai do

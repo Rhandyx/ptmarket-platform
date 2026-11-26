@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET name = 'x' WHERE tenant_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c9ccadfec83378659727e8cd3cc880561b2156a51809638703c4d664b52055c"
+}

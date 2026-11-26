@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::ToSchema;
 
 use crate::state::AppState;
 
@@ -12,13 +12,6 @@ use crate::state::AppState;
 pub struct Status {
     pub status: &'static str,
 }
-
-#[derive(OpenApi)]
-#[openapi(
-    paths(healthz, readyz),
-    info(title = "PT Market API", version = "0.1.0")
-)]
-pub struct ApiDoc;
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200, body = Status)))]
 pub async fn healthz() -> Json<Status> {

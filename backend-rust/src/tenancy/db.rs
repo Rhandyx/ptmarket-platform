@@ -23,16 +23,13 @@ use uuid::Uuid;
 
 use crate::{audit::AuditCtx, error::AppError};
 
-/// Identificador de tenant (Câmara). Só se cria dentro do crate (extractor que resolve o Host);
-/// fora dele, só com a feature `test-support` (testes de integração).
+/// Identificador de tenant (Câmara). Só se cria no resolver do `Host` (`tenancy::resolver`);
+/// fora do crate, só com a feature `test-support` (testes de integração).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TenantId(Uuid);
 
 impl TenantId {
-    #[allow(
-        dead_code,
-        reason = "consumido pelo extractor que resolve o Host (cartão futuro)"
-    )]
+    /// Chamado SÓ em `tenancy::resolver` (o tenant vem sempre do `Host`).
     pub(crate) fn new(id: Uuid) -> Self {
         Self(id)
     }
@@ -40,7 +37,7 @@ impl TenantId {
     /// Só para testes de integração (`tests/`); não existe em `cargo build --release`.
     #[cfg(feature = "test-support")]
     pub fn for_tests(id: Uuid) -> Self {
-        Self::new(id)
+        Self(id)
     }
 
     pub fn as_uuid(&self) -> Uuid {
@@ -185,12 +182,23 @@ impl sealed::Sealed for PlatformTx {
 }
 impl AuditedTx for PlatformTx {}
 
-/// Fixa tenant e ator só para esta transação: uma query, `set_config(..., true)` (= `SET LOCAL`),
-/// valores sempre por parâmetro. `''` = sem valor (as funções da BD fazem `NULLIF(..., '')`).
-async fn set_context(
+/// Modo da transação quanto ao portal nacional (`app.portal_national`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PortalMode {
+    /// `''`: a flag fica explicitamente desligada (só o tenant do contexto).
+    Off,
+    /// `'on'`: só tem efeito se o tenant do contexto for um `national_portal` ativo (BD, 0016).
+    On,
+}
+
+/// Fixa tenant, ator e modo portal só para esta transação: uma query, `set_config(..., true)`
+/// (= `SET LOCAL`), valores sempre por parâmetro. `''` = sem valor (as funções da BD fazem
+/// `NULLIF(..., '')`).
+pub(super) async fn set_context(
     conn: &mut PgConnection,
     tenant: Option<TenantId>,
     ctx: &AuditCtx,
+    portal: PortalMode,
 ) -> Result<(), AppError> {
     fn text<T: ToString>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_default()
@@ -203,6 +211,10 @@ async fn set_context(
     let request_id = ctx.request_id().to_string();
     let ip = text(ctx.ip());
     let ua_hash = ctx.user_agent_hash_hex();
+    let portal = match portal {
+        PortalMode::Off => "",
+        PortalMode::On => "on",
+    };
     sqlx::query!(
         "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,
                 set_config('app.actor_type', $2, true) AS actor_type,
@@ -211,7 +223,8 @@ async fn set_context(
                 set_config('app.impersonator_id', $5, true) AS impersonator_id,
                 set_config('app.request_id', $6, true) AS request_id,
                 set_config('app.ip', $7, true) AS ip,
-                set_config('app.user_agent_hash', $8, true) AS user_agent_hash",
+                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,
+                set_config('app.portal_national', $9, true) AS portal_national",
         tenant_id,
         actor_type,
         actor_id,
@@ -219,7 +232,8 @@ async fn set_context(
         impersonator_id,
         request_id,
         ip,
-        ua_hash
+        ua_hash,
+        portal
     )
     .fetch_one(conn)
     .await
@@ -234,7 +248,7 @@ pub async fn begin_tenant_tx(
     ctx: &AuditCtx,
 ) -> Result<TenantTx, AppError> {
     let mut tx = pool.begin().await.map_err(db_error)?;
-    set_context(&mut tx, Some(tenant), ctx).await?;
+    set_context(&mut tx, Some(tenant), ctx, PortalMode::Off).await?;
     Ok(TenantTx {
         tenant,
         ctx: ctx.clone(),
@@ -246,7 +260,7 @@ pub async fn begin_tenant_tx(
 /// Abre uma transação de plataforma (sem tenant; tabelas globais) com o ator fixado só para ela.
 pub async fn begin_platform_tx(pool: &PgPool, ctx: &AuditCtx) -> Result<PlatformTx, AppError> {
     let mut tx = pool.begin().await.map_err(db_error)?;
-    set_context(&mut tx, None, ctx).await?;
+    set_context(&mut tx, None, ctx, PortalMode::Off).await?;
     Ok(PlatformTx {
         ctx: ctx.clone(),
         tx,

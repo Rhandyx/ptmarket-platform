@@ -9,9 +9,38 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/tenant": {
+      "get": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "Dados públicos do tenant do domínio pedido.",
+        "operationId": "tenant_info",
+        "responses": {
+          "200": {
+            "description": "Tenant do Host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Host desconhecido, inválido ou tenant inativo"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
-        "tags": [],
+        "tags": [
+          "health"
+        ],
         "operationId": "healthz",
         "responses": {
           "200": {
@@ -28,7 +57,9 @@
     },
     "/readyz": {
       "get": {
-        "tags": [],
+        "tags": [
+          "health"
+        ],
         "operationId": "readyz",
         "responses": {
           "200": {
@@ -55,6 +86,14 @@
   },
   "components": {
     "schemas": {
+      "CountryCode": {
+        "type": "string",
+        "description": "`tenants.country_code`.",
+        "enum": [
+          "PT",
+          "ES"
+        ]
+      },
       "Status": {
         "type": "object",
         "required": [
@@ -65,6 +104,65 @@
             "type": "string"
           }
         }
+      },
+      "TemplateLayout": {
+        "type": "string",
+        "description": "`tenants.template_layout`.",
+        "enum": [
+          "bairro",
+          "editorial",
+          "catalogo"
+        ]
+      },
+      "TenantInfo": {
+        "type": "object",
+        "description": "Dados públicos do tenant do `Host` (nunca ids internos nem comissões).",
+        "required": [
+          "slug",
+          "name",
+          "tenant_type",
+          "country_code",
+          "currency",
+          "template_layout",
+          "theme_config",
+          "legal_config"
+        ],
+        "properties": {
+          "country_code": {
+            "$ref": "#/components/schemas/CountryCode"
+          },
+          "currency": {
+            "type": "string",
+            "description": "ISO 4217 (ex.: `EUR`)."
+          },
+          "legal_config": {
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "template_layout": {
+            "$ref": "#/components/schemas/TemplateLayout"
+          },
+          "tenant_type": {
+            "$ref": "#/components/schemas/TenantType"
+          },
+          "theme_config": {
+            "type": "object"
+          }
+        }
+      },
+      "TenantType": {
+        "type": "string",
+        "description": "`tenants.tenant_type`.",
+        "enum": [
+          "municipal",
+          "national_portal",
+          "niche"
+        ]
       }
     }
   }

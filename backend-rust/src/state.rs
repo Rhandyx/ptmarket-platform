@@ -6,7 +6,7 @@ use deadpool_redis::Runtime;
 use secrecy::ExposeSecret;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::{config::Config, storage::NullStorage, storage::StorageBackend};
+use crate::{config::Config, storage::NullStorage, storage::StorageBackend, tenancy::HostResolver};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +16,8 @@ pub struct AppState {
     pub db_replica: sqlx::PgPool,
     pub redis: deadpool_redis::Pool,
     pub storage: Arc<dyn StorageBackend>,
+    /// Resolve o tenant pelo `Host` (cache partilhada entre pedidos; lê da réplica).
+    pub hosts: Arc<HostResolver>,
 }
 
 impl AppState {
@@ -30,13 +32,20 @@ impl AppState {
         let redis = deadpool_redis::Config::from_url(cfg.redis_url.expose_secret())
             .create_pool(Some(Runtime::Tokio1))
             .map_err(|_| anyhow::anyhow!("REDIS_URL inválida"))?;
+        let db_replica = lazy(cfg.database_replica_url.expose_secret())
+            .map_err(|_| anyhow::anyhow!("DATABASE_REPLICA_URL inválida"))?;
+        let hosts = HostResolver::new(
+            db_replica.clone(),
+            cfg.platform_admin_host.clone(),
+            cfg.internal_proxy_token.clone(),
+        );
         Ok(Self {
             db_primary: lazy(cfg.database_primary_url.expose_secret())
                 .map_err(|_| anyhow::anyhow!("DATABASE_PRIMARY_URL inválida"))?,
-            db_replica: lazy(cfg.database_replica_url.expose_secret())
-                .map_err(|_| anyhow::anyhow!("DATABASE_REPLICA_URL inválida"))?,
+            db_replica,
             redis,
             storage: Arc::new(NullStorage),
+            hosts: Arc::new(hosts),
         })
     }
 }

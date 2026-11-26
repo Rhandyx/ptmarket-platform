@@ -3,12 +3,16 @@
 use std::net::SocketAddr;
 
 use ipnet::IpNet;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
+
+use crate::tenancy::host::normalize_host;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 /// Prefixo mínimo aceite em `TRUSTED_PROXY_CIDRS`.
 const MIN_PROXY_PREFIX_V4: u8 = 8;
 const MIN_PROXY_PREFIX_V6: u8 = 16;
+/// Tamanho mínimo de `INTERNAL_PROXY_TOKEN`.
+pub const MIN_INTERNAL_TOKEN_BYTES: usize = 32;
 
 /// Erro de configuração legível; nunca contém valores de segredos.
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +33,44 @@ pub struct Config {
     /// Ausente ou vazia = nunca confiar. Prefixos IPv4 < /8 e IPv6 < /16 são recusados (seria
     /// confiar em boa parte da Internet).
     pub trusted_proxy_cidrs: Vec<IpNet>,
+    /// `PLATFORM_ADMIN_HOST` (ex.: `admin.ptmarket.pt`), já normalizado: o host das rotas de
+    /// plataforma (sem tenant). Ausente = nenhum host é de plataforma.
+    pub platform_admin_host: Option<String>,
+    /// `INTERNAL_PROXY_TOKEN` (≥ 32 bytes): só com ele o SSR do Next pode mandar
+    /// `X-Forwarded-Host`. Ausente = `X-Forwarded-Host` sempre ignorado.
+    pub internal_proxy_token: Option<SecretString>,
+}
+
+fn platform_host(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    const KEY: &str = "PLATFORM_ADMIN_HOST";
+    match raw.filter(|v| !v.trim().is_empty()) {
+        None => Ok(None),
+        Some(v) => normalize_host(v.trim())
+            .map(Some)
+            .ok_or(ConfigError::Invalid(
+                KEY,
+                "esperado nome de domínio, ex.: admin.ptmarket.pt",
+            )),
+    }
+}
+
+fn internal_token(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
+    const KEY: &str = "INTERNAL_PROXY_TOKEN";
+    let Some(v) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let token = SecretString::from(v);
+    let t = token.expose_secret();
+    if t.len() < MIN_INTERNAL_TOKEN_BYTES || t.trim() != t {
+        return Err(ConfigError::Invalid(
+            KEY,
+            "mínimo 32 bytes, sem espaços nas pontas",
+        ));
+    }
+    if axum::http::HeaderValue::from_str(t).is_err() {
+        return Err(ConfigError::Invalid(KEY, "só caracteres visíveis"));
+    }
+    Ok(Some(token))
 }
 
 fn trusted_proxies(raw: Option<String>) -> Result<Vec<IpNet>, ConfigError> {
@@ -86,6 +128,8 @@ impl Config {
                 .parse()
                 .map_err(|_| ConfigError::Invalid("BIND_ADDR", "esperado endereço:porta"))?,
             trusted_proxy_cidrs: trusted_proxies(get("TRUSTED_PROXY_CIDRS"))?,
+            platform_admin_host: platform_host(get("PLATFORM_ADMIN_HOST"))?,
+            internal_proxy_token: internal_token(get("INTERNAL_PROXY_TOKEN"))?,
         })
     }
 }
@@ -184,8 +228,52 @@ mod tests {
 
     #[test]
     fn debug_hides_secrets() {
-        let c = Config::from_lookup(env(&OK));
+        let token = "segredo-interno-".repeat(3);
+        let mut v = OK.to_vec();
+        v.push(("INTERNAL_PROXY_TOKEN", token.as_str()));
+        let c = Config::from_lookup(env(&v));
         let dbg = format!("{c:?}");
-        assert!(!dbg.contains("segredo1"));
+        assert!(!dbg.contains("segredo1") && !dbg.contains("segredo-interno"));
+    }
+
+    #[test]
+    fn platform_host_optional_and_normalized() {
+        assert!(Config::from_lookup(env(&OK)).is_ok_and(|c| c.platform_admin_host.is_none()));
+        let mut v = OK.to_vec();
+        v.push(("PLATFORM_ADMIN_HOST", "Admin.PTMarket.pt."));
+        let c = Config::from_lookup(env(&v));
+        assert!(c.is_ok_and(|c| c.platform_admin_host.as_deref() == Some("admin.ptmarket.pt")));
+        for bad in [
+            "127.0.0.1",
+            "admin ptmarket.pt",
+            "https://admin.ptmarket.pt",
+        ] {
+            let mut v = OK.to_vec();
+            v.push(("PLATFORM_ADMIN_HOST", bad));
+            assert!(Config::from_lookup(env(&v)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn internal_token_optional_and_min_32_bytes() {
+        assert!(Config::from_lookup(env(&OK)).is_ok_and(|c| c.internal_proxy_token.is_none()));
+        let short = "a".repeat(31);
+        let ok = "a".repeat(32);
+        let spaced = format!(" {}", "a".repeat(40));
+        let ctrl = format!("{}\n", "a".repeat(40));
+        for (val, good) in [
+            (&short, false),
+            (&ok, true),
+            (&spaced, false),
+            (&ctrl, false),
+        ] {
+            let mut v = OK.to_vec();
+            v.push(("INTERNAL_PROXY_TOKEN", val.as_str()));
+            let c = Config::from_lookup(env(&v));
+            assert_eq!(c.is_ok(), good, "{}", val.len());
+            if let Err(e) = c {
+                assert!(!e.to_string().contains("aaaa"));
+            }
+        }
     }
 }
