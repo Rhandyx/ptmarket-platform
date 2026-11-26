@@ -103,6 +103,12 @@ BEGIN
     IF to_regprocedure('audit.audit_append_db(text,text,text,jsonb,uuid,uuid)') IS NOT NULL THEN
         GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_bootstrap;
     END IF;
+    -- ptmarket_identity (0017, NOLOGIN): USAGE em audit só depois da 0025 (dono da DEFINER que chama
+    -- audit.admin_read_events). Numa BD nova é a própria alteração 0025_admin_read_events que o concede.
+    IF to_regrole('ptmarket_identity') IS NOT NULL
+       AND to_regprocedure('audit.admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)') IS NOT NULL THEN
+        GRANT USAGE ON SCHEMA audit TO ptmarket_identity;
+    END IF;
 END
 $$;
 
@@ -126,7 +132,9 @@ GRANT USAGE ON SCHEMA audit_admin TO ptmarket_migrator;
 --     audit.audit_append_db (as suas mutações ficam como 'db' com o session_user; app/worker/price_writer sem
 --     EXECUTE) e em audit.audit_row_trigger (só para CREATE TRIGGER em tabelas novas; não se chama diretamente); EXECUTE de
 --     ptmarket_bootstrap (NOLOGIN) em audit.audit_append_db (L1 dos INSERT da DEFINER da 0024, ator 'db' +
---     session_user). O migrator mantém USAGE + CREATE no schema: pode criar
+--     session_user); EXECUTE de ptmarket_identity (NOLOGIN) em audit.admin_read_events (0025: só a DEFINER
+--     public.identity_admin_read_events, que verifica super_admin + TOTP + sessão com 2FA, chama a timeline).
+--     O migrator mantém USAGE + CREATE no schema: pode criar
 --     objetos novos, mas depois da selagem não são dele e não lhes mexe.
 --   search_path = pg_catalog, pg_temp e catálogos qualificados: com o pg_temp fora da lista, o PostgreSQL
 --     pesquisa-o PRIMEIRO para relações e tipos, e quem migra (CREATE TEMP TABLE pg_proc/pg_class/...) faria a
@@ -164,7 +172,8 @@ DECLARE
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
         'audit.audit_verify_actors(uuid,text,timestamp with time zone,timestamp with time zone)',
         'audit.audit_guc_defaults()',
-        'audit._chain_insert(audit.audit_events,boolean,boolean)'
+        'audit._chain_insert(audit.audit_events,boolean,boolean)',
+        'audit.admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)'
     ];
     v_allow_owner text[] := ARRAY[
         'ptmarket_audit_writer',
@@ -178,18 +187,22 @@ DECLARE
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
-        'ptmarket_audit_writer'
+        'ptmarket_audit_writer',
+        'ptmarket_audit_writer'   -- 0025: timeline do Super-Admin (só lê audit.*)
     ];
     -- ALLOWLIST DE GRANTS: EXECUTE (assinatura regprocedure, papel) mantido pela selagem.
     v_grant_sig   text[] := ARRAY[
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
         'audit.audit_row_trigger()',
-        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)'  -- 0024: L1 dos INSERT da DEFINER de bootstrap
+        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',  -- 0024: L1 dos INSERT da DEFINER de bootstrap
+        -- 0025: só a DEFINER public.identity_admin_read_events (dono ptmarket_identity, NOLOGIN) chama a timeline.
+        'audit.admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)'
     ];
     v_grant_role  text[] := ARRAY[
         'ptmarket_migrator',
         'ptmarket_migrator',
-        'ptmarket_bootstrap'
+        'ptmarket_bootstrap',
+        'ptmarket_identity'
     ];
     v_callers oid[];
     v_c       oid;
@@ -2879,6 +2892,120 @@ BEGIN
 END
 $body$;
 $chg_0023$);
+
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0025_admin_read_events (cartão 02/23a). Disparada por migrations/0025_audit_admin_read_events.sql.
+--   Exige 0023. Timeline global do Super-Admin; só lê audit.* (a REGRA da 0008 fica: nada de public).
+--   audit._admin_read_events_sql(7 × boolean): INVOKER, IMMUTABLE; devolve o texto da consulta com $1..$11 e só
+--     os filtros pedidos (a DEFINER corre-o com EXECUTE … USING: plano por chamada com os valores, índices da
+--     0008/0015; o teste faz EXPLAIN do mesmo texto). EXECUTE só para ptmarket_audit_writer.
+--   audit.admin_read_events(…): DEFINER (dono ptmarket_audit_writer), STABLE. Recusa (42501) sem
+--     app.actor_type = 'admin'; valida (22023, mensagens fixas) janela [p_from, p_to) ≤ 31 dias, 1 ≤ p_limit ≤ 100,
+--     prefixo de ação ^[a-z0-9._]{1,100}$ (LIKE com '!' como escape de % e _), outcome da lista, cursor completo.
+--     Ordem (created_at, id) DESC; página seguinte (created_at, id) < cursor; nunca OFFSET.
+--     chain_ok: hash da linha = audit._event_hash (a única fórmula) e elo com o anterior da mesma cadeia
+--     (chain_key, retention_class): seq 1 → prev_hash a zeros; seq − 1 único → prev_hash = hash dele; sem
+--     seq − 1 → só aceite se não houver linhas mais antigas na cadeia (corte da retenção); repetido → false.
+--     EXECUTE só para ptmarket_identity (dono NOLOGIN da DEFINER public.identity_admin_read_events, que faz a
+--     porta super_admin + TOTP + sessão com 2FA); USAGE em audit para ptmarket_identity.
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0025_admin_read_events', '0023_mask_uuid', $chg_0025$
+CREATE FUNCTION audit._admin_read_events_sql(p_tenant boolean, p_store boolean, p_actor boolean, p_order boolean,
+    p_action boolean, p_outcome boolean, p_cursor boolean)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT 'WITH page AS MATERIALIZED ('
+        || ' SELECT e AS r FROM audit.audit_events e'
+        || ' WHERE e.created_at >= $1 AND e.created_at < $2'
+        || CASE WHEN p_tenant THEN ' AND e.tenant_id = $3' ELSE '' END
+        || CASE WHEN p_store THEN ' AND e.store_id = $4' ELSE '' END
+        || CASE WHEN p_actor THEN ' AND e.actor_id = $5' ELSE '' END
+        || CASE WHEN p_order
+                THEN ' AND ((e.target_type = ''order'' AND e.target_id = $6::text)'
+                     || ' OR (e.changes ? ''order_id'' AND e.changes ->> ''order_id'' = $6::text))'
+                ELSE '' END
+        || CASE WHEN p_action THEN ' AND e.action LIKE $7 ESCAPE ''!''' ELSE '' END
+        || CASE WHEN p_outcome THEN ' AND e.outcome = $8' ELSE '' END
+        || CASE WHEN p_cursor THEN ' AND e.created_at <= $9 AND (e.created_at, e.id) < ($9, $10)' ELSE '' END
+        || ' ORDER BY e.created_at DESC, e.id DESC LIMIT $11)'
+        || ' SELECT (p.r).id, (p.r).created_at, (p.r).tenant_id, (p.r).store_id, (p.r).actor_type::text,'
+        || ' (p.r).actor_id, (p.r).actor_label, (p.r).impersonator_id, (p.r).action::text, (p.r).target_type::text,'
+        || ' (p.r).target_id, (p.r).outcome::text, (p.r).reason, (p.r).changes, (p.r).chain_seq,'
+        || ' COALESCE((p.r).hash = audit._event_hash(p.r) AND CASE'
+        || ' WHEN (p.r).chain_seq = 1 THEN (p.r).prev_hash = decode(repeat(''00'', 32), ''hex'')'
+        || ' WHEN k.n = 1 THEN k.ok'
+        || ' WHEN k.n = 0 THEN NOT EXISTS (SELECT 1 FROM audit.audit_events o'
+        || ' WHERE o.chain_key = (p.r).chain_key AND o.retention_class = (p.r).retention_class'
+        || ' AND o.chain_seq < (p.r).chain_seq)'
+        || ' ELSE false END, false)'
+        || ' FROM page p'
+        || ' CROSS JOIN LATERAL (SELECT count(*) AS n, bool_and(q.hash = (p.r).prev_hash) AS ok'
+        || ' FROM audit.audit_events q'
+        || ' WHERE q.chain_key = (p.r).chain_key AND q.retention_class = (p.r).retention_class'
+        || ' AND q.chain_seq = (p.r).chain_seq - 1) k'
+        || ' ORDER BY (p.r).created_at DESC, (p.r).id DESC'
+$body$;
+
+REVOKE ALL ON FUNCTION audit._admin_read_events_sql(boolean, boolean, boolean, boolean, boolean, boolean, boolean)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._admin_read_events_sql(boolean, boolean, boolean, boolean, boolean, boolean, boolean)
+    TO ptmarket_audit_writer;
+
+CREATE FUNCTION audit.admin_read_events(p_from timestamptz, p_to timestamptz, p_tenant_id uuid, p_store_id uuid,
+    p_actor_id uuid, p_order_id uuid, p_action_prefix text, p_outcome text, p_cursor_at timestamptz,
+    p_cursor_id uuid, p_limit integer)
+RETURNS TABLE (id uuid, created_at timestamptz, tenant_id uuid, store_id uuid, actor_type text, actor_id uuid,
+    actor_label text, impersonator_id uuid, action text, target_type text, target_id text, outcome text,
+    reason text, changes jsonb, chain_seq bigint, chain_ok boolean)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_like text;
+BEGIN
+    IF current_setting('app.actor_type', true) IS DISTINCT FROM 'admin' THEN
+        RAISE EXCEPTION 'admin_read_events: acesso recusado' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF p_from IS NULL OR p_to IS NULL OR p_from >= p_to OR p_to - p_from > interval '31 days' THEN
+        RAISE EXCEPTION 'admin_read_events: janela inválida (p_from < p_to, no máximo 31 dias)'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
+        RAISE EXCEPTION 'admin_read_events: p_limit fora de 1..100' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_action_prefix IS NOT NULL AND p_action_prefix !~ '^[a-z0-9._]{1,100}$' THEN
+        RAISE EXCEPTION 'admin_read_events: prefixo de ação inválido' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_outcome IS NOT NULL AND p_outcome NOT IN ('success', 'denied', 'error') THEN
+        RAISE EXCEPTION 'admin_read_events: outcome inválido' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF (p_cursor_at IS NULL) <> (p_cursor_id IS NULL) THEN
+        RAISE EXCEPTION 'admin_read_events: cursor incompleto' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- LIKE de prefixo: '!' (fora do alfabeto aceite) escapa % e _.
+    v_like := replace(replace(p_action_prefix, '%', '!%'), '_', '!_') || '%';
+
+    RETURN QUERY EXECUTE audit._admin_read_events_sql(
+            (p_tenant_id IS NOT NULL)::boolean, (p_store_id IS NOT NULL)::boolean, (p_actor_id IS NOT NULL)::boolean,
+            (p_order_id IS NOT NULL)::boolean, (p_action_prefix IS NOT NULL)::boolean,
+            (p_outcome IS NOT NULL)::boolean, (p_cursor_at IS NOT NULL)::boolean)
+        USING p_from, p_to, p_tenant_id, p_store_id, p_actor_id, p_order_id, v_like, p_outcome, p_cursor_at,
+              p_cursor_id, p_limit;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION audit.admin_read_events(timestamptz, timestamptz, uuid, uuid, uuid, uuid, text, text,
+    timestamptz, uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit.admin_read_events(timestamptz, timestamptz, uuid, uuid, uuid, uuid, text, text,
+    timestamptz, uuid, integer) TO ptmarket_identity;
+GRANT USAGE ON SCHEMA audit TO ptmarket_identity;
+$chg_0025$);
 
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$

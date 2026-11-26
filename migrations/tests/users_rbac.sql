@@ -342,11 +342,18 @@ SELECT pg_temp.expect_count(
        WHERE has_table_privilege('ptmarket_identity', 'users', p.priv)
           OR (p.priv IN ('INSERT', 'UPDATE') AND has_any_column_privilege('ptmarket_identity', 'users', p.priv))$q$,
     0, 'ptmarket_identity sem escrita em users');
+-- 0025: a porta da timeline do Super-Admin lê user_roles (só as colunas do papel), nunca escreve.
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p(priv)
+    $q$SELECT count(*) FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(priv)
        WHERE has_table_privilege('ptmarket_identity', 'user_roles', p.priv)
-          OR (p.priv <> 'DELETE' AND has_any_column_privilege('ptmarket_identity', 'user_roles', p.priv))$q$,
-    0, 'ptmarket_identity sem acesso a user_roles');
+          OR (p.priv IN ('INSERT', 'UPDATE') AND has_any_column_privilege('ptmarket_identity', 'user_roles', p.priv))$q$,
+    0, 'ptmarket_identity sem escrita em user_roles (nem SELECT na tabela inteira)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM pg_attribute a
+       WHERE a.attrelid = 'user_roles'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+         AND has_column_privilege('ptmarket_identity', 'user_roles', a.attname, 'SELECT')
+             IS DISTINCT FROM (a.attname IN ('user_id', 'role', 'tenant_id', 'store_id'))$q$,
+    0, 'ptmarket_identity lê só (user_id, role, tenant_id, store_id) de user_roles');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a
        WHERE c.oid IN ('users'::regclass, 'user_roles'::regclass) AND a.grantee = 0$q$,
@@ -400,13 +407,14 @@ SELECT pg_temp.expect_count(
        WHERE p.oid = 'identity_user_credentials(text)'::regprocedure AND a.grantee = 0$q$,
     0, 'lookup sem EXECUTE para PUBLIC');
 -- Proibida função que liste utilizadores: ptmarket_identity só é dono dos lookups (0 ou 1 linha cada).
--- 14: lookups de sessão e passkey
+-- 14: lookups de sessão e passkey · 0025: porta da timeline do Super-Admin (lista eventos, não utilizadores)
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) AS fns
                              FROM pg_proc p WHERE p.proowner = 'ptmarket_identity'::regrole) s
-       WHERE s.fns = ARRAY['identity_customer_credentials(text)', 'identity_passkey_lookup(bytea)',
+       WHERE s.fns = ARRAY['identity_admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)',
+                           'identity_customer_credentials(text)', 'identity_passkey_lookup(bytea)',
                            'identity_session_lookup(bytea)', 'identity_user_credentials(text)']$q$,
-    1, 'ptmarket_identity não é dono de mais nenhuma função (allowlist exata de 4)');
+    1, 'ptmarket_identity não é dono de mais nenhuma função (allowlist exata de 5)');
 
 -- ---------------------------------------------------------------------------
 -- 5. Caixa negra: o UPDATE de password_hash / totp_secret_enc deixou evento com o ator, sem os valores.
