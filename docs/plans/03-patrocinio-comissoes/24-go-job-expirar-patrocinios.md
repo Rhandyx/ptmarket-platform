@@ -14,7 +14,7 @@ De hora a hora o worker marca como `expired` os patrocínios `active` cuja vigê
 ## Contexto exato (spec 14 §2, §9 + cartão 06)
 ```
 "Ativo" no cálculo = status = 'active' AND now() <@ tstzrange(valid_from, valid_to). O job que passa a expired é só higiene: o cálculo nunca depende dele. Evento: sponsorship.expired.
-BD: o papel do worker (ptmarket_worker) só vê e só altera linhas com status = 'active' AND valid_to <= now(), e só para status = 'expired' (policies + GRANT SELECT, UPDATE (status, updated_at)). A BD recusa qualquer outra transição.
+BD (0031): o papel do worker (ptmarket_worker) só vê linhas 'active' com valid_to <= now() e as 'expired' (precisa de as ver para o RETURNING), e só altera 'active' vencidas para status = 'expired' (policies + GRANT SELECT, UPDATE (status, updated_at)). A BD recusa qualquer outra transição.
 Em cada execução, por lotes de 500 até não haver mais (máximo 20 lotes), cada lote numa transação:
   1. audit.SetSystemActor(ctx, tx, "sponsorship_expire") — ator de sistema na caixa negra, antes de qualquer escrita
   2. UPDATE store_sponsorships SET status = 'expired', updated_at = now() WHERE id IN (SELECT id FROM store_sponsorships WHERE status = 'active' AND valid_to <= now() ORDER BY valid_to LIMIT 500 FOR UPDATE SKIP LOCKED) RETURNING id, tenant_id, store_id, sponsor_entity_id
