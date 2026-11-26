@@ -6,10 +6,10 @@
 Uma transação marcada como portal nacional lê (e só lê) lojas, produtos e variantes de qualquer tenant que tenham optado por publicar no portal; tudo o resto continua isolado.
 
 ## Pode alterar
-- `migrations/0015_national_portal_policies.sql`, `migrations/tests/portal.sql` (criar)
+- `migrations/0016_national_portal_policies.sql`, `migrations/tests/portal.sql` (criar)
 
 ## Não tocar
-- `migrations/0001–0014` — imutáveis (as policies `tenant_isolation` ficam como estão; aqui só se ACRESCENTAM policies de SELECT); `backend-rust/`, `workers-go/`, `infra/`
+- `migrations/0001–0015` — imutáveis (as policies `tenant_isolation` ficam como estão; aqui só se ACRESCENTAM policies de SELECT); `backend-rust/`, `workers-go/`, `infra/`
 
 ## Contexto exato (colado da spec; não ler a spec)
 ```

@@ -6,10 +6,10 @@
 A API consegue registar um cliente, autenticá-lo e deixá-lo ler/alterar SÓ a sua linha; nunca consegue listar nem ler clientes alheios, nem com SQL injetado.
 
 ## Pode alterar
-- `migrations/0016_customers_policies.sql`, `migrations/tests/customers.sql` (criar); `migrations/tests/rls.sql` (editar: só a asserção "app não lê customers", que passa a "sem ator lê 0 linhas")
+- `migrations/0017_customers_policies.sql`, `migrations/tests/customers.sql` (criar); `migrations/tests/rls.sql` (editar: só a asserção "app não lê customers", que passa a "sem ator lê 0 linhas")
 
 ## Não tocar
-- `migrations/0001–0015` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
+- `migrations/0001–0016` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
 
 ## Contexto exato (colado da spec; não ler a spec)
 ```

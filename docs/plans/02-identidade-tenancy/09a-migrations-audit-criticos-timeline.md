@@ -1,19 +1,19 @@
 # 09a — Eventos críticos e índices da timeline (épico: 02-identidade-tenancy)
 
-**Agente:** db-architect · **Modelo:** opus · **Depende de:** 01b, 03b, 03c, 04 (numeração 0014) · **Paralelo com:** 06, 08
+**Agente:** db-architect · **Modelo:** opus · **Depende de:** 01b, 03b, 03c, 03d, 04 (numeração 0015) · **Paralelo com:** 06, 08
 
 > **Mudou no 01b (ler antes de começar):** a caixa negra vive no schema `audit` (dono NOLOGIN). O migrator só tem USAGE + CREATE em `audit`. Qualquer migration que crie objetos em `audit` termina com `SELECT audit_admin.audit_seal();`. Uma função SECURITY DEFINER nova em `audit` só passa a selagem se a sua assinatura estiver na allowlist da `audit_seal()` em `infra/postgres/init/03-audit-bootstrap.sh`. Nenhuma função DEFINER de `audit.*` toca em objetos de papéis com LOGIN. Escrever na cadeia: só através de `audit._chain_insert`.
 
-> **Mudou no 03b (26/11):** o migrator NÃO consegue alterar objetos selados (`ALTER TABLE audit.audit_alerts`, `CREATE INDEX` em `audit.audit_events`, `CREATE OR REPLACE audit._chain_insert`). Tudo isso vai numa **alteração aprovada** `0014_critical_timeline` no bootstrap (`audit_admin.sealed_changes`), disparada na migration por `audit_admin.audit_upgrade(nome, sha256)`; ver `infra/README.md`. Parte do `_chain_insert` atual (com `db_user`, máscara e dedupe dos cartões 03b/03c), não do texto da 0008. `critical_kind` é função nova: pode nascer na própria migration.
+> **Mudou no 03b (26/11):** o migrator NÃO consegue alterar objetos selados (`ALTER TABLE audit.audit_alerts`, `CREATE INDEX` em `audit.audit_events`, `CREATE OR REPLACE audit._chain_insert`). Tudo isso vai numa **alteração aprovada** `0015_critical_timeline` no bootstrap (`audit_admin.sealed_changes`), disparada na migration por `audit_admin.audit_upgrade(nome, sha256)`; ver `infra/README.md`. Parte do `_chain_insert` atual (com `db_user`, máscara e dedupe dos cartões 03b/03c), não do texto da 0008. `critical_kind` é função nova: pode nascer na própria migration.
 
 ## Objetivo
 A caixa negra sabe quais são os eventos críticos (vão para o WORM e geram alerta Telegram/Discord) e tem os índices de que a timeline do Super-Admin precisa (filtros por tenant, loja, utilizador e encomenda). Decisão do owner, 26/11/2026: um só bucket da plataforma, sem buckets das Câmaras; por isso já não existe `audit.worm_targets`.
 
 ## Pode alterar
-- `migrations/0014_audit_critical_timeline.sql`, `migrations/tests/audit_critical.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste); `infra/postgres/init/03-audit-bootstrap.sh` (alteração aprovada `0014_critical_timeline` + allowlist)
+- `migrations/0015_audit_critical_timeline.sql`, `migrations/tests/audit_critical.sql` (criar); `migrations/tests/run.sh` (só para incluir o teste); `infra/postgres/init/03-audit-bootstrap.sh` (alteração aprovada `0015_critical_timeline` + allowlist)
 
 ## Não tocar
-- `migrations/0001–0013`, `backend-rust/`, `workers-go/`; nunca ler `.env`
+- `migrations/0001–0014`, `backend-rust/`, `workers-go/`; nunca ler `.env`
 
 ## Contexto exato
 ```

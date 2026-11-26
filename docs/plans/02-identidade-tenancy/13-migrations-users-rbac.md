@@ -6,10 +6,10 @@
 Existem as contas de backoffice e os seus papéis com âmbito (loja, tenant, global), fechados por RLS; a API não consegue conceder papéis — muito menos `super_admin`.
 
 ## Pode alterar
-- `migrations/0017_users_roles.sql`, `migrations/tests/users_rbac.sql` (criar)
+- `migrations/0018_users_roles.sql`, `migrations/tests/users_rbac.sql` (criar)
 
 ## Não tocar
-- `migrations/0001–0016` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
+- `migrations/0001–0017` — imutáveis; `backend-rust/`, `workers-go/`, `infra/`
 
 ## Contexto exato (colado da spec; não ler a spec)
 ```
