@@ -234,8 +234,9 @@ RESET ROLE;
 -- ---------------------------------------------------------------------------
 -- 3. Ponta a ponta: nada em cru chega a audit_events (app e worker), por chaves neutras c<n>.
 -- ---------------------------------------------------------------------------
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-0000000003ea', 'mask-03e', 'mask-03e.teste.invalid', 'Mask 03e');
+-- Desde a 0033 as lojas só vivem em tenants national_portal.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type) VALUES
+    ('00000000-0000-7000-8000-0000000003ea', 'mask-03e', 'mask-03e.teste.invalid', 'Mask 03e', 'national_portal');
 SELECT jsonb_object_agg('c' || n, input) AS e2e FROM vectors
  WHERE layers ? 'db' AND NOT must_equal_input \gset
 SET ROLE ptmarket_app;

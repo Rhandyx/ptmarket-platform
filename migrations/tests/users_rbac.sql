@@ -63,7 +63,7 @@ BEGIN
 END
 $$;
 
--- Tenants TA, TB; lojas SA (TA), SB (TB).
+-- Tenants TA, TB, TC; lojas SA (TA), SB (TC).
 -- Utilizadores: X = merchant_owner de SA · Y = tenant_admin de TB · S = super_admin · Z = merchant_staff de SA, INATIVO
 -- · W = sponsor_admin da entidade E (0028).
 SELECT set_config('app.actor_label', 'test', true);
@@ -72,18 +72,21 @@ SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013a0
 -- ---------------------------------------------------------------------------
 -- 0. Preparação.
 -- ---------------------------------------------------------------------------
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-0000000013a0', 'rbac-a', 'rbac-a.teste.invalid', 'Tenant RBAC A'),
-    ('00000000-0000-7000-8000-0000000013b0', 'rbac-b', 'rbac-b.teste.invalid', 'Tenant RBAC B');
+-- Desde a 0033 as lojas só vivem em tenants national_portal: TA = nacional PT (loja SA), TC = nacional ES (loja SB);
+-- TB = municipal PT, só para o papel tenant_admin de Y.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
+    ('00000000-0000-7000-8000-0000000013a0', 'rbac-a', 'rbac-a.teste.invalid', 'Tenant RBAC A', 'national_portal', 'PT'),
+    ('00000000-0000-7000-8000-0000000013b0', 'rbac-b', 'rbac-b.teste.invalid', 'Tenant RBAC B', 'municipal', 'PT'),
+    ('00000000-0000-7000-8000-0000000013c0', 'rbac-c', 'rbac-c.teste.invalid', 'Tenant RBAC C', 'national_portal', 'ES');
 
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system', '');
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000013a1', '00000000-0000-7000-8000-0000000013a0',
      'Loja SA', 'loja-sa', 'Loja SA Lda', '500001301', 'PT50000000000000000001301', 'sa@teste.invalid');
-SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013b0', true);
+SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013c0', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
-    ('00000000-0000-7000-8000-0000000013b1', '00000000-0000-7000-8000-0000000013b0',
+    ('00000000-0000-7000-8000-0000000013b1', '00000000-0000-7000-8000-0000000013c0',
      'Loja SB', 'loja-sb', 'Loja SB Lda', '500001302', 'PT50000000000000000001302', 'sb@teste.invalid');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013a0', true);
 SELECT pg_temp.as_actor('', '');
@@ -128,9 +131,9 @@ SELECT pg_temp.expect_error(
     '23514', 'tenant_admin sem tenant_id falha');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO user_roles (user_id, role, tenant_id, store_id) VALUES
-       ('00000000-0000-7000-8000-0000000013e2', 'tenant_admin', '00000000-0000-7000-8000-0000000013b0',
+       ('00000000-0000-7000-8000-0000000013e2', 'tenant_admin', '00000000-0000-7000-8000-0000000013c0',
         '00000000-0000-7000-8000-0000000013b1')$q$,
-    '23514', 'tenant_admin com store_id falha');
+    '23514', 'tenant_admin com store_id falha (mesmo com o par tenant/loja coerente)');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO user_roles (user_id, role, tenant_id) VALUES
        ('00000000-0000-7000-8000-0000000013e1', 'merchant_owner', '00000000-0000-7000-8000-0000000013a0')$q$,

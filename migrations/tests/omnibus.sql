@@ -43,9 +43,10 @@ BEGIN
 END
 $$;
 
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-00000000100a', 'omni-teste-a', 'omni-a.teste.invalid', 'Omni A'),
-    ('00000000-0000-7000-8000-00000000100b', 'omni-teste-b', 'omni-b.teste.invalid', 'Omni B');
+-- Desde a 0033 as lojas só vivem em tenants national_portal: A = nacional PT, B = nacional ES.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
+    ('00000000-0000-7000-8000-00000000100a', 'omni-teste-a', 'omni-a.teste.invalid', 'Omni A', 'national_portal', 'PT'),
+    ('00000000-0000-7000-8000-00000000100b', 'omni-teste-b', 'omni-b.teste.invalid', 'Omni B', 'national_portal', 'ES');
 
 -- ---------------------------------------------------------------------------
 -- Dono do trigger DEFINER: papel próprio, nunca superuser nem quem migra; só INSERT no histórico.

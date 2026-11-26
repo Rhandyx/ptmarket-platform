@@ -1,6 +1,6 @@
 //! Tenant pelo `Host` (cartão 02/11) contra Postgres real: `GET /api/v1/tenant`, normalização,
 //! 404 genérico, anti-IDOR (`X-Forwarded-Host` sem token, `tenant_id` forjado), rotas de
-//! plataforma, a transação só de leitura do portal nacional (view `portal_stores`) e o travão a
+//! plataforma, a transação só de leitura do canal (view `portal_stores`) e o travão a
 //! hosts desconhecidos por IP (Redis; falha aberta).
 //!
 //! As pools da app fazem `SET ROLE ptmarket_app` (o dono não prova nada). Os tenants semeiam-se
@@ -36,7 +36,7 @@ use ptmarket_api::{
     tenancy::{
         HostResolver, PlatformHost, ResolvedHost, ResolvedTenant, TenantId, begin_portal_read_tx,
         begin_tenant_tx,
-        portal::{DENIED_NOT_PORTAL, PORTAL_FORBIDDEN_COLUMNS},
+        portal::PORTAL_FORBIDDEN_COLUMNS,
         resolver::{MAX_UNKNOWN_HOSTS, MAX_UNKNOWN_HOSTS_48, POSITIVE_TTL},
     },
 };
@@ -506,39 +506,36 @@ async fn resolve(app: &PgPool, t: &Tenant) -> anyhow::Result<ResolvedTenant> {
 }
 
 #[sqlx::test(migrations = "../migrations")]
-async fn portal_reads_published_stores_of_all_tenants_without_secrets_and_is_read_only(
+async fn national_channel_reads_its_stores_without_opt_out_without_secrets_and_is_read_only(
     opts: PgPoolOptions,
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    // Lojas no canal nacional (cartão 03/13): dois tenants national_portal PT e um ES.
-    let a = seed_tenant(&owner, "nacional-a", "national_portal", "PT", true).await?;
-    let b = seed_tenant(&owner, "nacional-b", "national_portal", "PT", true).await?;
-    let es = seed_tenant(&owner, "nacional-es", "national_portal", "ES", true).await?;
+    // Canal nacional (0033): todas as lojas ativas do tenant nacional do pedido, com ou sem o antigo
+    // opt-in; as de outro national_portal (PT ou ES) ficam de fora.
     let p = seed_tenant(&owner, "portal", "national_portal", "PT", true).await?;
+    let a = seed_tenant(&owner, "nacional-a", "national_portal", "PT", true).await?;
+    let es = seed_tenant(&owner, "nacional-es", "national_portal", "ES", true).await?;
     let app = app_pool(&opts, &conn).await?;
-    seed_store(&app, &owner, &a, "a-publicada", true).await?;
-    seed_store(&app, &owner, &a, "a-privada", false).await?;
-    seed_store(&app, &owner, &b, "b-publicada", true).await?;
-    seed_store(&app, &owner, &es, "es-publicada", true).await?;
+    seed_store(&app, &owner, &p, "p-com-opt-in", true).await?;
+    seed_store(&app, &owner, &p, "p-sem-opt-in", false).await?;
+    seed_store(&app, &owner, &a, "a-outro-canal", true).await?;
+    seed_store(&app, &owner, &es, "es-outro-pais", true).await?;
 
     let portal = resolve(&app, &p).await?;
     let ctx = AuditCtx::for_tests(ActorType::Anonymous, None, None, None);
     let mut tx = begin_portal_read_tx(&app, &portal, &ctx).await?;
     assert_eq!(tx.tenant(), p.tid());
     let stores = tx.published_stores(100).await?;
-    let mut seen: Vec<(Uuid, &str)> = stores
+    let seen: Vec<(Uuid, &str)> = stores
         .iter()
         .map(|s| (s.tenant_id, s.slug.as_str()))
         .collect();
-    seen.sort_unstable();
-    let mut want = vec![(a.id, "a-publicada"), (b.id, "b-publicada")];
-    want.sort_unstable();
-    assert_eq!(seen, want);
+    assert_eq!(seen, vec![(p.id, "p-com-opt-in"), (p.id, "p-sem-opt-in")]);
 
     // Nenhuma coluna sensível sai do tipo do portal (nem o nome, nem o valor).
     let json = serde_json::to_string(&stores)?;
-    for secret in [IBAN, SECRET_ENC, SPLIT_KEY, STRIPE, "777"] {
+    for secret in [IBAN, SECRET_ENC, SPLIT_KEY, STRIPE, ":777"] {
         assert!(!json.contains(secret), "{secret}");
     }
     for col in PORTAL_FORBIDDEN_COLUMNS {
@@ -575,7 +572,7 @@ async fn portal_reads_published_stores_of_all_tenants_without_secrets_and_is_rea
     }
 
     // READ ONLY: um UPDATE (mesmo de uma loja visível) falha.
-    let err = sqlx::query!("UPDATE stores SET name = 'x' WHERE tenant_id = $1", a.id)
+    let err = sqlx::query!("UPDATE stores SET name = 'x' WHERE tenant_id = $1", p.id)
         .execute(tx.conn_for_tests())
         .await
         .err();
@@ -587,18 +584,18 @@ async fn portal_reads_published_stores_of_all_tenants_without_secrets_and_is_rea
     assert_eq!(code.as_deref(), Some(READ_ONLY), "{err:?}");
     tx.finish().await?;
 
-    // Fora do modo portal, o mesmo tenant não vê lojas de outros.
+    // Fora do modo portal, o mesmo tenant só vê as suas lojas (nenhuma de outro tenant).
     let mut t = begin_tenant_tx(&app, p.tid(), &ctx).await?;
-    let n = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM stores"#)
-        .fetch_one(&mut *t)
+    let tenants = sqlx::query_scalar!("SELECT tenant_id FROM stores")
+        .fetch_all(&mut *t)
         .await?;
-    assert_eq!(n, 0);
+    assert_eq!(tenants, vec![p.id, p.id]);
     t.rollback().await?;
     Ok(())
 }
 
 #[sqlx::test(migrations = "../migrations")]
-async fn portal_refuses_municipal_tenant_with_denied_event(
+async fn white_label_channel_opens_without_national_flag_and_is_not_denied(
     opts: PgPoolOptions,
     conn: PgConnectOptions,
 ) -> TestResult {
@@ -606,14 +603,34 @@ async fn portal_refuses_municipal_tenant_with_denied_event(
     let a = seed_tenant(&owner, "camara-a", "municipal", "PT", true).await?;
     let p = seed_tenant(&owner, "portal", "national_portal", "PT", true).await?;
     let pool = app_pool(&opts, &conn).await?;
+    seed_store(&pool, &owner, &p, "p-sem-patrocinio", true).await?;
 
-    // Direto: tenant municipal → Forbidden, sem abrir transação.
+    // Direto: um canal municipal abre (white-label), sem `app.portal_national` e sem lojas
+    // nacionais (nenhum patrocínio do seu canal).
     let municipal = resolve(&pool, &a).await?;
     let ctx = AuditCtx::for_tests(ActorType::Anonymous, None, None, None);
-    let res = begin_portal_read_tx(&pool, &municipal, &ctx).await;
-    assert!(matches!(res, Err(AppError::Forbidden)), "{res:?}");
+    let mut tx = begin_portal_read_tx(&pool, &municipal, &ctx).await?;
+    assert_eq!(tx.tenant(), a.tid());
+    let flag: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('app.portal_national', true)::text")
+            .fetch_one(tx.conn_for_tests())
+            .await?;
+    assert_eq!(flag.unwrap_or_default(), "");
+    assert!(tx.published_stores(100).await?.is_empty());
+    assert_eq!(tx.store_by_slug("p-sem-patrocinio").await?, None);
+    tx.finish().await?;
 
-    // Pelo HTTP: 403 com a marca `Denied` → evento `denied` no tenant resolvido pelo Host.
+    // O nacional liga a flag.
+    let national = resolve(&pool, &p).await?;
+    let mut tx = begin_portal_read_tx(&pool, &national, &ctx).await?;
+    let flag: Option<String> =
+        sqlx::query_scalar("SELECT current_setting('app.portal_national', true)::text")
+            .fetch_one(tx.conn_for_tests())
+            .await?;
+    assert_eq!(flag.as_deref(), Some("on"));
+    tx.finish().await?;
+
+    // Pelo HTTP: o canal municipal abre (200) e o pedido não fica `denied` na caixa negra.
     let st = state(&pool)?;
     let audit = AuditLayerState::for_tests(
         pool.clone(),
@@ -626,13 +643,9 @@ async fn portal_refuses_municipal_tenant_with_denied_event(
         "/portal-probe",
         get(
             |State(s): State<AppState>, ctx: AuditCtx, t: ResolvedTenant| async move {
-                match begin_portal_read_tx(&s.db_replica, &t, &ctx).await {
-                    Ok(tx) => {
-                        tx.finish().await?;
-                        Ok::<_, AppError>(StatusCode::OK.into_response())
-                    }
-                    Err(e) => Ok((Extension(DENIED_NOT_PORTAL), e).into_response()),
-                }
+                let tx = begin_portal_read_tx(&s.db_replica, &t, &ctx).await?;
+                tx.finish().await?;
+                Ok::<_, AppError>(StatusCode::OK.into_response())
             },
         ),
     );
@@ -650,7 +663,7 @@ async fn portal_refuses_municipal_tenant_with_denied_event(
     .with_state(st);
 
     let r = send(&app, "/portal-probe", &[(HOST, &a.domain)]).await?;
-    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let rid = r
         .request_id
         .ok_or_else(|| anyhow::anyhow!("sem x-request-id"))?;
@@ -664,14 +677,11 @@ async fn portal_refuses_municipal_tenant_with_denied_event(
     .fetch_all(&mut *tx)
     .await?;
     tx.rollback().await?;
-    assert_eq!(
-        rows,
-        vec![(
-            Some(a.id),
-            "denied".to_owned(),
-            Some("not_national_portal".to_owned()),
-            actor.actor_id
-        )]
+    assert!(!rows.is_empty(), "leitura síncrona sem evento");
+    assert!(
+        rows.iter()
+            .all(|r| r.0 == Some(a.id) && r.1 != "denied" && r.3 == actor.actor_id),
+        "{rows:?}"
     );
 
     // O portal abre (e o pedido não é recusado).

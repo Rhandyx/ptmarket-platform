@@ -1,18 +1,21 @@
-//! Transação só de leitura do portal nacional.
+//! Transação só de leitura do catálogo por canal (spec 14 §1.1).
 //!
-//! `begin_portal_read_tx` só abre para um tenant `national_portal` (senão `Forbidden`; o handler
-//! junta a marca `DENIED_NOT_PORTAL` à resposta e a caixa negra grava o `denied`). Dentro dela a BD
-//! deixa ver lojas/produtos/variantes publicados de todos os tenants ativos do mesmo país.
+//! `begin_portal_read_tx` abre para qualquer tenant resolvido pelo `Host`: é o canal do pedido.
+//! - Canal nacional (`national_portal`): liga `app.portal_national = 'on'` e a BD mostra todas as
+//!   lojas ativas desse canal (todas as do país; sem opt-out; `shipping_scope` não esconde a loja).
+//! - Canal white-label (os outros tipos): a flag fica desligada e a BD mostra só as lojas com ≥ 1
+//!   patrocínio `active` e vigente de uma entidade ativa cujo `channel_tenant_id` é este canal.
 //!
-//! As lojas de outros tenants leem-se SÓ na view `portal_stores` (0021: `security_barrier`, já
-//! filtrada por publicada + ativa + mesmo país, sem colunas sensíveis); a tabela `stores` só mostra
-//! as do próprio tenant. Produtos e variantes continuam nas tabelas.
+//! As lojas leem-se SÓ na view `portal_stores` (0033: `security_barrier`, já filtrada pelo canal do
+//! contexto, sem colunas sensíveis) e os selos na view `portal_store_badges` (só das lojas
+//! visíveis); a tabela `stores` só mostra as do próprio tenant. `portal_stores` é a forma ÚNICA de
+//! ler lojas fora do backoffice: outros módulos usam `stores_by_ids`.
 //!
 //! Defesa em profundidade: `PortalReadTx` NÃO dá acesso à ligação: só tem consultas dedicadas,
 //! cujas linhas (`PortalStore`) não têm campos sensíveis. Colunas que nunca saem em modo portal
 //! (nem existem na view): `PORTAL_FORBIDDEN_COLUMNS`.
 //!
-//! Exceção à regra `query!` (como a do `audit.*`): a view é `REVOKE ALL FROM PUBLIC` + `SELECT`
+//! Exceção à regra `query!` (como a do `audit.*`): as views são `REVOKE ALL FROM PUBLIC` + `SELECT`
 //! só para `ptmarket_app`, por isso o migrator não tem SELECT para o `EXPLAIN` da macro. Usa-se
 //! `query_as` com SQL estático, cast de tipo exato em cada coluna e argumento, e `FromRow`.
 //!
@@ -42,17 +45,14 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    audit::{AuditCtx, Denied},
-    error::AppError,
+    audit::AuditCtx,
+    error::{AppError, FieldError},
     tenancy::{
         TenantId,
         db::{PortalMode, db_error, set_context},
         resolver::{ResolvedTenant, TenantType},
     },
 };
-
-/// Marca de recusa para a resposta de um tenant que não é o portal nacional.
-pub const DENIED_NOT_PORTAL: Denied = Denied("not_national_portal");
 
 /// Colunas de `stores` que nunca são selecionadas em modo portal (nem qualquer `*_enc`/`*_key`)
 /// e que a view `portal_stores` não tem.
@@ -65,19 +65,115 @@ pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 6] = [
     "kyc_verified",
 ];
 
-/// Máximo de linhas por consulta do portal.
+/// Máximo de linhas por consulta do portal (e de ids em `stores_by_ids`).
 pub const MAX_PORTAL_ROWS: i64 = 100;
 
-/// Loja vista pelo portal nacional: só dados públicos.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
+/// `stores.shipping_scope` (0029). Não esconde a loja: só limita o que o checkout oferece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShippingScope {
+    National,
+    LocalOnly,
+    PickupOnly,
+}
+
+impl ShippingScope {
+    fn parse(s: &str) -> Result<Self, AppError> {
+        match s {
+            "national" => Ok(Self::National),
+            "local_only" => Ok(Self::LocalOnly),
+            "pickup_only" => Ok(Self::PickupOnly),
+            _ => Err(AppError::Internal(anyhow::anyhow!(
+                "stores.shipping_scope desconhecido"
+            ))),
+        }
+    }
+}
+
+/// `sponsor_entities.kind` (0028). A ordem das variantes é a ordem fixa dos selos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SponsorKind {
+    Municipality,
+    Parish,
+    Association,
+}
+
+impl SponsorKind {
+    fn parse(s: &str) -> Result<Self, AppError> {
+        match s {
+            "municipality" => Ok(Self::Municipality),
+            "parish" => Ok(Self::Parish),
+            "association" => Ok(Self::Association),
+            _ => Err(AppError::Internal(anyhow::anyhow!(
+                "sponsor_entities.kind desconhecido"
+            ))),
+        }
+    }
+}
+
+/// Selo de uma entidade patrocinadora (patrocínio `active` e vigente de entidade ativa).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StoreBadge {
+    pub sponsor_entity_id: Uuid,
+    pub kind: SponsorKind,
+    pub name: String,
+    pub slug: String,
+    pub logo_key: Option<String>,
+}
+
+/// Loja vista pelo canal: só dados públicos. `badges` pela ordem fixa municipality → parish →
+/// association; no mesmo tipo, por nome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PortalStore {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
     pub slug: String,
+    pub nif: String,
+    pub shipping_scope: ShippingScope,
+    pub storefront_dicofre: Option<String>,
+    pub badges: Vec<StoreBadge>,
 }
 
-/// Transação só de leitura no modo portal nacional, com tenant e ator fixados.
+/// Linha de `portal_stores` (antes dos selos).
+#[derive(sqlx::FromRow)]
+struct StoreRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    name: String,
+    slug: String,
+    nif: String,
+    shipping_scope: String,
+    storefront_dicofre: Option<String>,
+}
+
+/// Linha de `portal_store_badges`.
+#[derive(sqlx::FromRow)]
+struct BadgeRow {
+    store_id: Uuid,
+    sponsor_entity_id: Uuid,
+    kind: String,
+    name: String,
+    slug: String,
+    logo_key: Option<String>,
+}
+
+/// Colunas de `portal_stores` lidas pelo módulo (todas `NOT NULL` em `stores`, menos o DICOFRE).
+macro_rules! store_select {
+    ($rest:literal) => {
+        concat!(
+            "SELECT s.id::uuid AS id, s.tenant_id::uuid AS tenant_id, s.name::text AS name,
+                    s.slug::text AS slug, s.nif::text AS nif,
+                    s.shipping_scope::text AS shipping_scope,
+                    s.storefront_dicofre::text AS storefront_dicofre
+             FROM portal_stores s ",
+            $rest
+        )
+    };
+}
+
+/// Transação só de leitura no canal do pedido, com tenant e ator fixados.
 #[derive(Debug)]
 pub struct PortalReadTx {
     tenant: TenantId,
@@ -89,22 +185,126 @@ impl PortalReadTx {
         self.tenant
     }
 
-    /// Lojas publicadas no portal (view `portal_stores`, já filtrada pela BD), por nome; no
-    /// máximo `MAX_PORTAL_ROWS` (o `limit` é limitado a 1..=100). As 4 colunas são `NOT NULL`
-    /// em `stores`.
+    /// Lojas visíveis neste canal, por nome; no máximo `MAX_PORTAL_ROWS` (o `limit` é limitado a
+    /// 1..=100). Uma loja co-patrocinada sai uma só vez, com todos os selos.
     pub async fn published_stores(&mut self, limit: i64) -> Result<Vec<PortalStore>, AppError> {
         let limit = limit.clamp(1, MAX_PORTAL_ROWS);
-        sqlx::query_as::<_, PortalStore>(
-            "SELECT id::uuid AS id, tenant_id::uuid AS tenant_id, name::text AS name,
-                    slug::text AS slug
-             FROM portal_stores
-             ORDER BY name, id
-             LIMIT $1::int8",
-        )
+        let rows =
+            sqlx::query_as::<_, StoreRow>(store_select!("ORDER BY s.name, s.id LIMIT $1::int8"))
+                .bind(limit)
+                .fetch_all(&mut *self.tx)
+                .await
+                .map_err(db_error)?;
+        self.with_badges(rows).await
+    }
+
+    /// Lojas visíveis neste canal com selo da entidade `entity_slug` (página `/entidade/<slug>`),
+    /// por nome; `limit` em 1..=100. As lojas visíveis são todas do país do canal e o slug da
+    /// entidade é único por país.
+    pub async fn stores_by_entity(
+        &mut self,
+        entity_slug: &str,
+        limit: i64,
+    ) -> Result<Vec<PortalStore>, AppError> {
+        let limit = limit.clamp(1, MAX_PORTAL_ROWS);
+        let rows = sqlx::query_as::<_, StoreRow>(store_select!(
+            "WHERE EXISTS (SELECT 1 FROM portal_store_badges b
+                           WHERE b.store_id = s.id AND b.slug = $1::text)
+             ORDER BY s.name, s.id LIMIT $2::int8"
+        ))
+        .bind(entity_slug)
         .bind(limit)
         .fetch_all(&mut *self.tx)
         .await
-        .map_err(db_error)
+        .map_err(db_error)?;
+        self.with_badges(rows).await
+    }
+
+    /// A loja `slug` se for visível NESTE canal; `None` caso contrário (não revela se existe
+    /// noutro canal).
+    pub async fn store_by_slug(&mut self, slug: &str) -> Result<Option<PortalStore>, AppError> {
+        let rows = sqlx::query_as::<_, StoreRow>(store_select!(
+            "WHERE s.slug = $1::text ORDER BY s.id LIMIT 1"
+        ))
+        .bind(slug)
+        .fetch_all(&mut *self.tx)
+        .await
+        .map_err(db_error)?;
+        Ok(self.with_badges(rows).await?.into_iter().next())
+    }
+
+    /// As lojas de `ids` visíveis neste canal (as outras ficam de fora, sem erro), por nome. É por
+    /// aqui que outros módulos obtêm nome, NIF e DICOFRE de lojas sem ler `stores`. Mais de
+    /// `MAX_PORTAL_ROWS` ids → `Validation`.
+    pub async fn stores_by_ids(&mut self, ids: &[Uuid]) -> Result<Vec<PortalStore>, AppError> {
+        if ids.len() > MAX_PORTAL_ROWS as usize {
+            return Err(AppError::Validation(vec![FieldError {
+                field: "ids".to_owned(),
+                message: format!("máximo {MAX_PORTAL_ROWS} lojas por pedido"),
+            }]));
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, StoreRow>(store_select!(
+            "WHERE s.id = ANY($1::uuid[]) ORDER BY s.name, s.id"
+        ))
+        .bind(ids)
+        .fetch_all(&mut *self.tx)
+        .await
+        .map_err(db_error)?;
+        self.with_badges(rows).await
+    }
+
+    /// Junta os selos às lojas numa só consulta (`store_id = ANY($1)`, sem N+1).
+    async fn with_badges(&mut self, rows: Vec<StoreRow>) -> Result<Vec<PortalStore>, AppError> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+        let badges = sqlx::query_as::<_, BadgeRow>(
+            "SELECT b.store_id::uuid AS store_id, b.sponsor_entity_id::uuid AS sponsor_entity_id,
+                    b.kind::text AS kind, b.name::text AS name, b.slug::text AS slug,
+                    b.logo_key::text AS logo_key
+             FROM portal_store_badges b
+             WHERE b.store_id = ANY($1::uuid[])
+             ORDER BY b.store_id,
+                      CASE b.kind WHEN 'municipality' THEN 1 WHEN 'parish' THEN 2
+                                  WHEN 'association' THEN 3 ELSE 4 END,
+                      b.name, b.sponsor_entity_id",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *self.tx)
+        .await
+        .map_err(db_error)?;
+        let mut out = rows
+            .into_iter()
+            .map(|r| {
+                Ok(PortalStore {
+                    id: r.id,
+                    tenant_id: r.tenant_id,
+                    name: r.name,
+                    slug: r.slug,
+                    nif: r.nif,
+                    shipping_scope: ShippingScope::parse(&r.shipping_scope)?,
+                    storefront_dicofre: r.storefront_dicofre,
+                    badges: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        for b in badges {
+            let badge = StoreBadge {
+                sponsor_entity_id: b.sponsor_entity_id,
+                kind: SponsorKind::parse(&b.kind)?,
+                name: b.name,
+                slug: b.slug,
+                logo_key: b.logo_key,
+            };
+            if let Some(s) = out.iter_mut().find(|s| s.id == b.store_id) {
+                s.badges.push(badge);
+            }
+        }
+        Ok(out)
     }
 
     /// Fecha a transação (só leitura: nada a confirmar).
@@ -120,22 +320,25 @@ impl PortalReadTx {
     }
 }
 
-/// Abre a transação do portal: só para tenants `national_portal` (senão `Forbidden`). Faz
-/// `SET TRANSACTION READ ONLY` e fixa o tenant, o ator e `app.portal_national = 'on'` só para ela.
+/// Abre a transação de leitura do canal do pedido (qualquer tipo de tenant). Faz
+/// `SET TRANSACTION READ ONLY` e fixa o tenant e o ator só para ela; `app.portal_national = 'on'`
+/// só quando o tenant resolvido é `national_portal`.
 pub async fn begin_portal_read_tx(
     replica: &PgPool,
     tenant: &ResolvedTenant,
     ctx: &AuditCtx,
 ) -> Result<PortalReadTx, AppError> {
-    if tenant.tenant_type() != TenantType::NationalPortal {
-        return Err(AppError::Forbidden);
-    }
+    let mode = if tenant.tenant_type() == TenantType::NationalPortal {
+        PortalMode::On
+    } else {
+        PortalMode::Off
+    };
     let mut tx = replica.begin().await.map_err(db_error)?;
     sqlx::query!("SET TRANSACTION READ ONLY")
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    set_context(&mut tx, Some(tenant.id()), ctx, PortalMode::On).await?;
+    set_context(&mut tx, Some(tenant.id()), ctx, mode).await?;
     Ok(PortalReadTx {
         tenant: tenant.id(),
         tx,
@@ -146,7 +349,17 @@ pub async fn begin_portal_read_tx(
 mod tests {
     use super::*;
 
-    /// Os campos de `PortalStore` (as colunas da consulta): nenhum é sensível.
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        k.sort_unstable();
+        k
+    }
+
+    /// Os campos de `PortalStore` e de `StoreBadge`: nenhum é sensível (sem IBAN, chaves nem
+    /// comissões).
     #[test]
     fn portal_store_has_no_sensitive_column() {
         let s = PortalStore {
@@ -154,18 +367,54 @@ mod tests {
             tenant_id: Uuid::nil(),
             name: String::new(),
             slug: String::new(),
+            nif: String::new(),
+            shipping_scope: ShippingScope::LocalOnly,
+            storefront_dicofre: None,
+            badges: vec![StoreBadge {
+                sponsor_entity_id: Uuid::nil(),
+                kind: SponsorKind::Parish,
+                name: String::new(),
+                slug: String::new(),
+                logo_key: None,
+            }],
         };
         let json = serde_json::to_value(&s).unwrap_or_default();
-        let mut keys: Vec<&str> = json
-            .as_object()
-            .map(|o| o.keys().map(String::as_str).collect())
-            .unwrap_or_default();
-        keys.sort_unstable();
-        assert_eq!(keys, ["id", "name", "slug", "tenant_id"]);
-        for k in &keys {
-            assert!(!PORTAL_FORBIDDEN_COLUMNS.contains(k), "{k}");
-            assert!(!k.ends_with("_enc") && !k.ends_with("_key"), "{k}");
+        let store_keys = keys(&json);
+        assert_eq!(
+            store_keys,
+            [
+                "badges",
+                "id",
+                "name",
+                "nif",
+                "shipping_scope",
+                "slug",
+                "storefront_dicofre",
+                "tenant_id"
+            ]
+        );
+        assert_eq!(json["shipping_scope"], "local_only");
+        let badge_keys = keys(&json["badges"][0]);
+        assert_eq!(
+            badge_keys,
+            ["kind", "logo_key", "name", "slug", "sponsor_entity_id"]
+        );
+        assert_eq!(json["badges"][0]["kind"], "parish");
+        // `logo_key` é a chave pública do logótipo no storage, não um segredo: é a única `*_key`.
+        for k in store_keys.iter().chain(&badge_keys) {
+            assert!(!PORTAL_FORBIDDEN_COLUMNS.contains(&k.as_str()), "{k}");
+            assert!(!k.contains("commission") && !k.contains("iban"), "{k}");
+            assert!(
+                !k.ends_with("_enc") && (!k.ends_with("_key") || k == "logo_key"),
+                "{k}"
+            );
         }
+    }
+
+    #[test]
+    fn sponsor_kind_order_is_the_badge_order() {
+        assert!(SponsorKind::Municipality < SponsorKind::Parish);
+        assert!(SponsorKind::Parish < SponsorKind::Association);
     }
 
     /// O código deste módulo (fora dos testes e da doc) nunca nomeia uma coluna sensível.

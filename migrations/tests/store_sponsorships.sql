@@ -64,7 +64,8 @@ $$;
 SELECT set_config('app.actor_label', 'test', true);
 
 -- ---------------------------------------------------------------------------
--- 0. Preparação (migrator): geografia (distrito 96), tenants T1/T2 (PT) e T3 (ES), entidades.
+-- 0. Preparação (migrator): geografia (distrito 96), tenants T1 (nacional PT) e T3 (nacional ES), entidades.
+--    Desde a 0033 as lojas só vivem em tenants national_portal (um por país): o "outro tenant" é o T3.
 --    e1 Câmara PT · e2 Junta PT · e3 Câmara ES · e4 Associação PT.
 -- ---------------------------------------------------------------------------
 INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version) VALUES
@@ -74,7 +75,6 @@ INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version) VALUES
 
 INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
     ('00000000-0000-7000-8000-0000000031a1', 'ssp-npt', 'ssp-npt.teste.invalid', 'Nacional PT 31', 'national_portal', 'PT'),
-    ('00000000-0000-7000-8000-0000000031a2', 'ssp-mun', 'ssp-mun.teste.invalid', 'Outro tenant PT 31', 'municipal', 'PT'),
     ('00000000-0000-7000-8000-0000000031a3', 'ssp-nes', 'ssp-nes.teste.invalid', 'Nacional ES 31', 'national_portal', 'ES');
 
 INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code) VALUES
@@ -83,7 +83,7 @@ INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code) VAL
     ('00000000-0000-7000-8000-0000000031e3', 'municipality', 'ES', 'Ayuntamiento 31', 'ayto-31', '9601'),
     ('00000000-0000-7000-8000-0000000031e4', 'association', 'PT', 'Associação 31', 'assoc-31', NULL);
 
--- Lojas: S1 e S1b em T1, S2 em T2 (pela app, cada uma no seu tenant).
+-- Lojas: S1 e S1b em T1, S2 em T3 (pela app, cada uma no seu tenant).
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a1', true);
@@ -94,9 +94,9 @@ INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VAL
      'Loja S1b', 'ssp-s1b', 'Loja S1b Lda', '500003103', 'PT50000000000000000003103', 's1b@teste.invalid'),
     ('00000000-0000-7000-8000-0000000031b4', '00000000-0000-7000-8000-0000000031a1',
      'Loja S1c', 'ssp-s1c', 'Loja S1c Lda', '500003104', 'PT50000000000000000003104', 's1c@teste.invalid');
-SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a2', true);
+SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a3', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
-    ('00000000-0000-7000-8000-0000000031b2', '00000000-0000-7000-8000-0000000031a2',
+    ('00000000-0000-7000-8000-0000000031b2', '00000000-0000-7000-8000-0000000031a3',
      'Loja S2', 'ssp-s2', 'Loja S2 Lda', '500003102', 'PT50000000000000000003102', 's2@teste.invalid');
 
 -- ---------------------------------------------------------------------------
@@ -282,8 +282,8 @@ SELECT pg_temp.expect_error(
     '23514', 'commission_override_bps acima de 10000 falha');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO store_sponsorships (tenant_id, store_id, sponsor_entity_id) VALUES
-       ('00000000-0000-7000-8000-0000000031a2', '00000000-0000-7000-8000-0000000031b1',
-        '00000000-0000-7000-8000-0000000031e2')$q$,
+       ('00000000-0000-7000-8000-0000000031a3', '00000000-0000-7000-8000-0000000031b1',
+        '00000000-0000-7000-8000-0000000031e3')$q$,
     '23503', 'loja de outro tenant (FK composta) falha');
 SELECT pg_temp.expect_error(
     $q$DELETE FROM sponsor_entities WHERE id = '00000000-0000-7000-8000-0000000031e1'$q$,
@@ -333,7 +333,7 @@ SELECT pg_temp.expect_count(
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('merchant');
-SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a2', true);
+SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a3', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_sponsorships WHERE tenant_id = '00000000-0000-7000-8000-0000000031a1'$q$,
     0, 'outro tenant não vê os patrocínios de T1');
@@ -347,9 +347,9 @@ SELECT pg_temp.expect_error(
     '42501', 'outro tenant não cria patrocínios em T1');
 SELECT pg_temp.expect_rows(
     $q$INSERT INTO store_sponsorships (tenant_id, store_id, sponsor_entity_id) VALUES
-       ('00000000-0000-7000-8000-0000000031a2', '00000000-0000-7000-8000-0000000031b2',
-        '00000000-0000-7000-8000-0000000031e1')$q$,
-    1, 'T2 cria o seu pedido');
+       ('00000000-0000-7000-8000-0000000031a3', '00000000-0000-7000-8000-0000000031b2',
+        '00000000-0000-7000-8000-0000000031e3')$q$,
+    1, 'T3 cria o seu pedido');
 
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a1', true);
 SELECT pg_temp.expect_count(
@@ -438,11 +438,11 @@ SELECT pg_temp.expect_count(
 -- ---------------------------------------------------------------------------
 ALTER TABLE stores NO FORCE ROW LEVEL SECURITY;
 SELECT pg_temp.expect_error(
-    $q$UPDATE stores SET tenant_id = '00000000-0000-7000-8000-0000000031a2'
+    $q$UPDATE stores SET tenant_id = '00000000-0000-7000-8000-0000000031a3'
        WHERE id = '00000000-0000-7000-8000-0000000031b3'$q$,
     '23503', 'loja com patrocínio não muda de tenant (23503)');
 SELECT pg_temp.expect_rows(
-    $q$UPDATE stores SET tenant_id = '00000000-0000-7000-8000-0000000031a2'
+    $q$UPDATE stores SET tenant_id = '00000000-0000-7000-8000-0000000031a3'
        WHERE id = '00000000-0000-7000-8000-0000000031b4'$q$,
     1, 'loja sem patrocínios muda de tenant');
 ALTER TABLE stores FORCE ROW LEVEL SECURITY;

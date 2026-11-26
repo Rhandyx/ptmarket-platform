@@ -11,5 +11,7 @@ pub mod resolver;
 
 pub use db::{TenantId, TenantTx, begin_tenant_tx};
 pub use http::PlatformHost;
-pub use portal::{PortalReadTx, begin_portal_read_tx};
+pub use portal::{
+    PortalReadTx, PortalStore, ShippingScope, SponsorKind, StoreBadge, begin_portal_read_tx,
+};
 pub use resolver::{CountryCode, HostResolver, ResolvedHost, ResolvedTenant, TenantType};

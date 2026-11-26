@@ -279,8 +279,9 @@ RESET ROLE;
 -- ---------------------------------------------------------------------------
 -- 4. L1 (trigger de linhas): uma escrita de negócio nunca falha por causa da auditoria.
 -- ---------------------------------------------------------------------------
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-0000000014aa', 'mask-03d', 'mask-03d.teste.invalid', 'Mask 03d');
+-- Desde a 0033 as lojas só vivem em tenants national_portal.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type) VALUES
+    ('00000000-0000-7000-8000-0000000014aa', 'mask-03d', 'mask-03d.teste.invalid', 'Mask 03d', 'national_portal');
 SET ROLE ptmarket_app;
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000014aa', true);
 SELECT set_config('app.actor_type', 'merchant', true);

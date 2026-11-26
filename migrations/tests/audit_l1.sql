@@ -166,9 +166,10 @@ SELECT pg_temp.expect_value(
 -- ---------------------------------------------------------------------------
 -- 3. Dono sem ator: grava 'db' com o session_user; o label não se muda pelo contexto.
 -- ---------------------------------------------------------------------------
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-00000000c00a', 'l1-teste-a', 'l1-a.teste.invalid', 'L1 A'),
-    ('00000000-0000-7000-8000-00000000c00b', 'l1-teste-b', 'l1-b.teste.invalid', 'L1 B');
+-- Desde a 0033 as lojas só vivem em tenants national_portal: A = nacional PT, B = nacional ES.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
+    ('00000000-0000-7000-8000-00000000c00a', 'l1-teste-a', 'l1-a.teste.invalid', 'L1 A', 'national_portal', 'PT'),
+    ('00000000-0000-7000-8000-00000000c00b', 'l1-teste-b', 'l1-b.teste.invalid', 'L1 B', 'national_portal', 'ES');
 
 -- Contexto forjado pelo dono: ignorado (quem não é a app não escolhe o ator).
 SELECT set_config('app.actor_type', 'admin', true);

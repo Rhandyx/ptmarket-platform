@@ -2,7 +2,9 @@
 //!
 //! As pools da app fazem `SET ROLE ptmarket_app` em cada ligação nova: o dono das tabelas
 //! não prova nada. Os tenants semeiam-se como dono (tabela global, sem RLS); as lojas só
-//! podem ser criadas pela app dentro de `begin_tenant_tx`.
+//! podem ser criadas pela app dentro de `begin_tenant_tx`. Uma loja só vive num tenant
+//! `national_portal` (trinco da 0033, sem opt-in): os tenants A e B destes testes são dois canais
+//! nacionais, para provar o isolamento por `tenant_id` com lojas dos dois lados.
 //!
 //! Evento global numa `TenantTx`: impossível por tipo (`append_global` só aceita `PlatformTx`);
 //! a BD recusa-o também (42501), provado abaixo com SQL direto. Todas as transações levam `AuditCtx`.
@@ -70,11 +72,13 @@ async fn owner_pool(opts: &PoolOptions<Postgres>, conn: &PgConnectOptions) -> sq
         .await
 }
 
+/// Tenant `national_portal` (o único tipo que pode ter lojas, 0033).
 async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<TenantId> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.test.invalid");
     sqlx::query!(
-        "INSERT INTO tenants (id, slug, custom_domain, name) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type)
+         VALUES ($1, $2, $3, $4, 'national_portal')",
         id,
         slug,
         domain,
@@ -152,8 +156,8 @@ async fn tenant_sees_only_its_own_stores(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let b = seed_tenant(&owner, "camara-b").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
+    let b = seed_tenant(&owner, "nacional-b").await?;
     let app = app_pool(&opts, &conn, 2).await?;
     seed_store(&app, a, "a1").await?;
     seed_store(&app, a, "a2").await?;
@@ -182,8 +186,8 @@ async fn other_tenant_rows_are_rejected_inside_tenant_tx(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let b = seed_tenant(&owner, "camara-b").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
+    let b = seed_tenant(&owner, "nacional-b").await?;
     let app = app_pool(&opts, &conn, 2).await?;
     seed_store(&app, b, "b1").await?;
 
@@ -223,7 +227,7 @@ async fn tenant_context_does_not_leak_after_commit_or_rollback(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
     // Uma só ligação: a query seguinte reutiliza a ligação da transação anterior.
     let app = app_pool(&opts, &conn, 1).await?;
 
@@ -297,8 +301,8 @@ async fn outbox_append_respects_tenant_and_transaction(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "camara-a").await?;
-    let b = seed_tenant(&owner, "camara-b").await?;
+    let a = seed_tenant(&owner, "nacional-a").await?;
+    let b = seed_tenant(&owner, "nacional-b").await?;
     let app = app_pool(&opts, &conn, 2).await?;
     let worker = worker_pool(&opts, &conn).await?;
 

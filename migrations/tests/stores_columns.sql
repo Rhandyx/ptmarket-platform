@@ -49,8 +49,9 @@ INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version) VALUES
     ('960101', 'parish', '9601', 'Freguesia Teste 29-01', 'T'),
     ('9601FA', 'parish', '9601', 'Freguesia Teste 29-FA', 'T');
 
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-0000000029a0', 'stc-a', 'stc-a.teste.invalid', 'Tenant 29 A');
+-- Desde a 0033 as lojas só vivem em tenants national_portal.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type) VALUES
+    ('00000000-0000-7000-8000-0000000029a0', 'stc-a', 'stc-a.teste.invalid', 'Tenant 29 A', 'national_portal');
 
 -- ---------------------------------------------------------------------------
 -- 1. Grants por coluna (catálogo).

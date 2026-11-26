@@ -274,6 +274,11 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) V
     ('00000000-0000-7000-8000-0000000030a2', 'snc-mb', 'snc-mb.teste.invalid', 'Municipal B 30', 'municipal', 'PT'),
     ('00000000-0000-7000-8000-0000000030a3', 'snc-mes', 'snc-mes.teste.invalid', 'Municipal ES 30', 'municipal', 'ES');
 
+-- Desde a 0033 o trinco stores_national_tenant_guard recusa lojas em tenants que não sejam national_portal. Este teste
+-- reproduz o estado ANTERIOR à 0030 (lojas em tenants municipais), por isso o dono desliga SÓ esse trigger (nunca os
+-- zz_audit_*) durante a criação das lojas municipais e volta a ligá-lo (ALWAYS) logo a seguir, dentro desta transação.
+-- O movimento para o canal nacional (move_stores) corre sempre com o trinco ligado.
+ALTER TABLE stores DISABLE TRIGGER stores_national_tenant_guard;
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system');
 
@@ -313,6 +318,7 @@ INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VAL
 
 SELECT pg_temp.as_actor('');
 RESET ROLE;
+ALTER TABLE stores ENABLE ALWAYS TRIGGER stores_national_tenant_guard;
 
 SELECT pg_temp.force_rls(false);
 INSERT INTO users (id, email, password_hash, full_name, totp_secret_enc, totp_enabled, is_active) VALUES
@@ -385,6 +391,8 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) V
      'national_portal', 'ES');
 
 -- Slug repetido no canal PT (SA e SC, ambos 'padaria'); SES ('padaria', ES) não colide.
+-- SC nasce num tenant municipal: só o trinco da 0033 desligado, e só durante este INSERT (ver a secção 1).
+ALTER TABLE stores DISABLE TRIGGER stores_national_tenant_guard;
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000030a2', true);
@@ -393,6 +401,7 @@ INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VAL
      'Loja SC', 'padaria', 'Loja SC Lda', '500003009', 'PT50000000000000000003009', 'sc@teste.invalid');
 SELECT pg_temp.as_actor('');
 RESET ROLE;
+ALTER TABLE stores ENABLE ALWAYS TRIGGER stores_national_tenant_guard;
 SELECT pg_temp.expect_error('SELECT pg_temp.move_stores()', 'P0001',
     '%slugs repetidos%canal snc-npt, slug ''padaria'': loja 00000000-0000-7000-8000-0000000030b1 (tenant snc-ma), '
     || 'loja 00000000-0000-7000-8000-0000000030b9 (tenant snc-mb)', 'slug repetido no mesmo canal aborta e lista o par');
@@ -505,5 +514,20 @@ SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000030a1
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM stores$q$, 0, 'app no municipal A: já não tem lojas');
 RESET ROLE;
+
+-- O trinco da 0033 ficou ligado (ALWAYS) e os zz_audit_* de stores nunca foram tocados.
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM pg_trigger
+       WHERE tgrelid = 'stores'::regclass AND tgname = 'stores_national_tenant_guard' AND tgenabled = 'A'$q$,
+    1, 'trinco stores_national_tenant_guard ENABLED (ALWAYS) no fim');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM pg_trigger
+       WHERE tgrelid = 'stores'::regclass AND tgname LIKE 'zz_audit%' AND tgenabled <> 'A'$q$,
+    0, 'zz_audit_* de stores continuam ALWAYS');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO stores (tenant_id, name, slug, legal_name, nif, iban, email)
+       VALUES ('00000000-0000-7000-8000-0000000030a1', 'Loja Z', 'snc-z', 'Z Lda', '500003099',
+               'PT50000000000000000003099', 'z@teste.invalid')$q$,
+    '23514', '%national_portal%', 'trinco ativo: loja nova num tenant municipal recusada');
 
 ROLLBACK;

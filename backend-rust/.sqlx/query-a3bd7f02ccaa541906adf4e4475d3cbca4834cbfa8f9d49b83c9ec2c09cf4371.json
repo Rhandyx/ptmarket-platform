@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code,\n                                       channel_tenant_id, logo_key)\n         VALUES ($1, $2, 'PT', $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a3bd7f02ccaa541906adf4e4475d3cbca4834cbfa8f9d49b83c9ec2c09cf4371"
+}

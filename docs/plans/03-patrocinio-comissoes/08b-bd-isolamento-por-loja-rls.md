@@ -38,3 +38,8 @@ Sem tabelas novas (sem bloco L1). Nunca SET ROLE para papéis sem acesso a audit
 
 ## Re-provar (funcionalidades já aprovadas que partilham este código)
 - Dentro do par, `cargo test -p ptmarket-api` pode falhar onde o Rust ainda não põe o GUC: listar as falhas para o 14, que as fecha. O par só é entregue com `run.sh`, `cargo test -p ptmarket-api` e `go test -race ./...` verdes.
+
+## Adenda do supervisor (auditoria do par A, 26/11)
+- Na 0034, acrescentar `CREATE UNIQUE INDEX tenants_one_national_portal_per_country ON tenants (country_code) WHERE tenant_type = 'national_portal';` (sem isto, dois nacionais no mesmo país permitiam slugs de loja repetidos e o `tenancy::portal::store_by_slug` escolhia por `id`). Antes de criar o índice, abortar com uma mensagem clara se houver duplicados.
+- Testes SQL e Rust que criem dois tenants `national_portal` no mesmo país passam a usar PT e ES (o país é o que distingue os canais nacionais). Lista-os no relatório.
+- Com o índice, o `store_by_slug` passa a ser determinístico: o cartão 14 pode tirar o `ORDER BY s.id` e acrescentar um teste.

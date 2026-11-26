@@ -44,10 +44,11 @@ BEGIN
 END
 $$;
 
--- Tenants de teste (globais; só o dono das migrations escreve).
-INSERT INTO tenants (id, slug, custom_domain, name) VALUES
-    ('00000000-0000-7000-8000-00000000000a', 'rls-teste-a', 'rls-a.teste.invalid', 'Tenant A'),
-    ('00000000-0000-7000-8000-00000000000b', 'rls-teste-b', 'rls-b.teste.invalid', 'Tenant B');
+-- Tenants de teste (globais; só o dono das migrations escreve). Desde a 0033 as lojas só vivem em tenants
+-- national_portal: A = nacional PT, B = nacional ES.
+INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
+    ('00000000-0000-7000-8000-00000000000a', 'rls-teste-a', 'rls-a.teste.invalid', 'Tenant A', 'national_portal', 'PT'),
+    ('00000000-0000-7000-8000-00000000000b', 'rls-teste-b', 'rls-b.teste.invalid', 'Tenant B', 'national_portal', 'ES');
 
 -- ---------------------------------------------------------------------------
 -- Papéis: nenhum é superuser nem ignora RLS.
