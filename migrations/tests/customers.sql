@@ -211,9 +211,12 @@ SELECT pg_temp.expect_count(
          AND p.proconfig = ARRAY['search_path=pg_catalog, public']
          AND pg_get_function_result(p.oid) = 'TABLE(id uuid, password_hash text)'$q$,
     1, 'lookup: DEFINER, STABLE, dono ptmarket_identity, search_path fixo, só id + password_hash');
+-- 13: segunda função de lookup
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM pg_proc WHERE proowner = 'ptmarket_identity'::regrole$q$,
-    1, 'ptmarket_identity é dono de uma só função');
+    $q$SELECT count(*) FROM (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) AS fns
+                             FROM pg_proc p WHERE p.proowner = 'ptmarket_identity'::regrole) s
+       WHERE s.fns = ARRAY['identity_customer_credentials(text)', 'identity_user_credentials(text)']$q$,
+    1, 'ptmarket_identity é dono exatamente de {identity_customer_credentials, identity_user_credentials}');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_roles
        WHERE rolname = 'ptmarket_identity'
