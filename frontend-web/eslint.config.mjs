@@ -20,9 +20,56 @@ export const guardRules = {
   ...a11yRules,
 };
 
+// Proíbe importar lib/api/server em ficheiros "use client".
+const localPlugin = {
+  rules: {
+    "no-server-api-in-client": {
+      create(context) {
+        return {
+          Program(node) {
+            const isClient = node.body.some(
+              (n) => n.type === "ExpressionStatement" && n.directive === "use client",
+            );
+            if (!isClient) return;
+            for (const n of node.body) {
+              if (n.type === "ImportDeclaration" && /(^|\/)lib\/api\/server$|^\.\/server$/.test(n.source.value)) {
+                context.report({ node: n, message: "server.ts é só de servidor; não importar em código de cliente." });
+              }
+            }
+          },
+        };
+      },
+    },
+  },
+};
+
+const apiGuards = {
+  "no-restricted-syntax": [
+    "error",
+    {
+      selector: "CallExpression[callee.name='fetch'][arguments.0.value=/^\\/api\\//]",
+      message: "Chamadas a /api/ só via src/lib/api (cliente gerado).",
+    },
+    {
+      selector: "CallExpression[callee.name='fetch'] > TemplateLiteral.arguments:first-child[quasis.0.value.raw=/^\\/api\\//]",
+      message: "Chamadas a /api/ só via src/lib/api (cliente gerado).",
+    },
+    {
+      selector: "Literal[value=/^NEXT_PUBLIC_.*(TOKEN|SECRET)/]",
+      message: "Segredos nunca em NEXT_PUBLIC_*.",
+    },
+  ],
+};
+
 export default defineConfig([
   ...nextVitals,
   ...nextTs,
   { rules: guardRules },
-  globalIgnores([".next/**", "out/**", "build/**", "coverage/**", "next-env.d.ts"]),
+  { ignores: ["src/lib/api/**"], rules: apiGuards },
+  {
+    files: ["**/*.{ts,tsx,js,jsx}"],
+    plugins: { local: localPlugin },
+    rules: { "local/no-server-api-in-client": "error" },
+  },
+  globalIgnores(["src/lib/api/schema.d.ts", ".next/**", "out/**", "build/**", "coverage/**", "next-env.d.ts"]),
 ]);

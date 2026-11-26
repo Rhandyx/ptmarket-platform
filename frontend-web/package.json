@@ -13,13 +13,17 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && stylelint \"src/**/*.css\"",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run build",
-    "test:e2e": "playwright test"
+    "verify": "npm run check:api && npm run typecheck && npm run lint && npm run test && npm run build && node scripts/check-api.mjs --chunks",
+    "test:e2e": "playwright test",
+    "gen:api": "openapi-typescript ../backend-rust/openapi.json -o src/lib/api/schema.d.ts",
+    "check:api": "node scripts/check-api.mjs"
   },
   "dependencies": {
     "next": "16.4.6",
+    "openapi-fetch": "0.17.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "server-only": "0.0.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.1",
@@ -29,9 +33,15 @@
     "@types/react-dom": "19.3.0",
     "eslint": "10.15.0",
     "eslint-config-next": "16.4.6",
+    "openapi-typescript": "7.13.0",
     "stylelint": "18.1.0",
     "stylelint-config-standard": "41.1.0",
     "typescript": "6.0.3",
     "vitest": "5.1.2"
+  },
+  "overrides": {
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
   }
 }
