@@ -9,6 +9,64 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Termina a sessão do pedido: revoga-a, limpa o cookie e grava `auth.logout`. Sem sessão: 204 na\nmesma (idempotente).",
+        "operationId": "logout",
+        "parameters": [
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão (obrigatório com sessão)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Sessão terminada; cookie limpo"
+          },
+          "403": {
+            "description": "Token CSRF ou Origin inválidos"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Estado da sessão e token CSRF.",
+        "operationId": "session_status",
+        "responses": {
+          "200": {
+            "description": "Estado da sessão (anónimo incluído)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/tenant": {
       "get": {
         "tags": [
@@ -93,6 +151,34 @@
           "PT",
           "ES"
         ]
+      },
+      "SessionStatus": {
+        "type": "object",
+        "description": "Estado da sessão do pedido.",
+        "required": [
+          "authenticated",
+          "actor_type",
+          "csrf_token"
+        ],
+        "properties": {
+          "actor_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`customer`, `merchant`, `municipal` ou `admin`; `null` se anónimo."
+          },
+          "authenticated": {
+            "type": "boolean"
+          },
+          "csrf_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token a enviar em `X-CSRF-Token` (ou no campo `_csrf`) em todas as mutações; `null` se\nanónimo."
+          }
+        }
       },
       "Status": {
         "type": "object",

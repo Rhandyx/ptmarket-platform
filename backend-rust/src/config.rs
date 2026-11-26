@@ -13,6 +13,8 @@ const MIN_PROXY_PREFIX_V4: u8 = 8;
 const MIN_PROXY_PREFIX_V6: u8 = 16;
 /// Tamanho mínimo de `INTERNAL_PROXY_TOKEN`.
 pub const MIN_INTERNAL_TOKEN_BYTES: usize = 32;
+/// Tamanho mínimo de `CSRF_KEY`.
+pub const MIN_CSRF_KEY_BYTES: usize = crate::identity::csrf::MIN_KEY_BYTES;
 
 /// Erro de configuração legível; nunca contém valores de segredos.
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +41,10 @@ pub struct Config {
     /// `INTERNAL_PROXY_TOKEN` (≥ 32 bytes): só com ele o SSR do Next pode mandar
     /// `X-Forwarded-Host`. Ausente = `X-Forwarded-Host` sempre ignorado.
     pub internal_proxy_token: Option<SecretString>,
+    /// `CSRF_KEY` (≥ 32 bytes; ex.: `openssl rand -hex 32`): chave HMAC dos tokens CSRF das
+    /// sessões. Igual em todas as instâncias; mudá-la invalida os tokens em uso. Validada se
+    /// presente; obrigatória para servir sessões (`Config::require_csrf_key`).
+    pub csrf_key: Option<SecretString>,
 }
 
 fn platform_host(raw: Option<String>) -> Result<Option<String>, ConfigError> {
@@ -71,6 +77,23 @@ fn internal_token(raw: Option<String>) -> Result<Option<SecretString>, ConfigErr
         return Err(ConfigError::Invalid(KEY, "só caracteres visíveis"));
     }
     Ok(Some(token))
+}
+
+const CSRF_KEY: &str = "CSRF_KEY";
+
+fn csrf_key(raw: Option<String>) -> Result<Option<SecretString>, ConfigError> {
+    let Some(v) = raw.filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let key = SecretString::from(v);
+    let k = key.expose_secret();
+    if k.len() < MIN_CSRF_KEY_BYTES || k.trim() != k {
+        return Err(ConfigError::Invalid(
+            CSRF_KEY,
+            "mínimo 32 bytes, sem espaços nas pontas",
+        ));
+    }
+    Ok(Some(key))
 }
 
 fn trusted_proxies(raw: Option<String>) -> Result<Vec<IpNet>, ConfigError> {
@@ -115,6 +138,11 @@ impl Config {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// `CSRF_KEY` para servir sessões (`http::router_with_sessions`); ausente → erro de arranque.
+    pub fn require_csrf_key(&self) -> Result<SecretString, ConfigError> {
+        self.csrf_key.clone().ok_or(ConfigError::Missing(CSRF_KEY))
+    }
+
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let pg = ["postgres://", "postgresql://"];
         let bind = get("BIND_ADDR")
@@ -130,6 +158,7 @@ impl Config {
             trusted_proxy_cidrs: trusted_proxies(get("TRUSTED_PROXY_CIDRS"))?,
             platform_admin_host: platform_host(get("PLATFORM_ADMIN_HOST"))?,
             internal_proxy_token: internal_token(get("INTERNAL_PROXY_TOKEN"))?,
+            csrf_key: csrf_key(get("CSRF_KEY"))?,
         })
     }
 }
@@ -148,10 +177,11 @@ mod tests {
         move |k| m.get(k).cloned()
     }
 
-    const OK: [(&str, &str); 3] = [
+    const OK: [(&str, &str); 4] = [
         ("DATABASE_PRIMARY_URL", "postgres://u:segredo1@h/db"),
         ("DATABASE_REPLICA_URL", "postgres://u:segredo1@h/db"),
         ("REDIS_URL", "redis://h:6379"),
+        ("CSRF_KEY", "chave-csrf-segredo-com-32-bytes-ok"),
     ];
 
     #[test]
@@ -234,6 +264,40 @@ mod tests {
         let c = Config::from_lookup(env(&v));
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("segredo1") && !dbg.contains("segredo-interno"));
+        assert!(!dbg.contains("chave-csrf"));
+    }
+
+    #[test]
+    fn csrf_key_required_and_min_32_bytes() {
+        let v: Vec<_> = OK
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "CSRF_KEY")
+            .collect();
+        let c = Config::from_lookup(env(&v));
+        assert!(c.as_ref().is_ok_and(|c| c.csrf_key.is_none()));
+        let e = c
+            .ok()
+            .and_then(|c| c.require_csrf_key().err())
+            .map(|e| e.to_string());
+        assert_eq!(
+            e.as_deref(),
+            Some("variável de ambiente em falta: CSRF_KEY")
+        );
+        let full = Config::from_lookup(env(&OK));
+        assert!(full.is_ok_and(|c| c.require_csrf_key().is_ok()));
+        let short = "c".repeat(31);
+        let ok = "c".repeat(32);
+        let spaced = format!("{} ", "c".repeat(40));
+        for (val, good) in [(&short, false), (&ok, true), (&spaced, false)] {
+            let mut v = v.clone();
+            v.push(("CSRF_KEY", val.as_str()));
+            let c = Config::from_lookup(env(&v));
+            assert_eq!(c.is_ok(), good, "{}", val.len());
+            if let Err(e) = c {
+                assert!(!e.to_string().contains("cccc"));
+            }
+        }
     }
 
     #[test]

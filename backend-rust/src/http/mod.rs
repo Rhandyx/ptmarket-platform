@@ -12,7 +12,7 @@ use axum::{
     Extension, Router,
     body::Body,
     http::{HeaderName, Request, StatusCode},
-    routing::get,
+    routing::{get, post},
 };
 use tower::ServiceBuilder;
 use tower_http::{
@@ -29,6 +29,10 @@ use crate::{
         audit_layer::{AuditLayerState, MakeRequestUuidV7, audited, take_client_request_id},
         client_ip::TrustedProxies,
     },
+    identity::{
+        self, Sessions,
+        http::{with_csrf, with_request_host, with_sessions},
+    },
     state::AppState,
     tenancy,
 };
@@ -36,33 +40,65 @@ use crate::{
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Router sem proxies de confiança (`CF-Connecting-IP` nunca conta).
+/// Router sem proxies de confiança (`CF-Connecting-IP` nunca conta) e sem sessões.
 pub fn router(state: AppState) -> Router {
     router_with(state, TrustedProxies::none())
 }
 
-/// Router completo. As rotas da API entram em `api` e passam todas pela caixa negra
-/// (`audit_layer`); `/healthz` e `/readyz` ficam fora (sem utilizador). Para o IP do cliente,
-/// servir com `into_make_service_with_connect_info::<SocketAddr>()`.
+/// Router completo SEM sessões (todos os pedidos são anónimos; sem `/api/v1/auth/*`). As rotas da
+/// API entram em `api` e passam todas pela caixa negra (`audit_layer`); `/healthz` e `/readyz`
+/// ficam fora (sem utilizador). Para o IP do cliente, servir com
+/// `into_make_service_with_connect_info::<SocketAddr>()`.
 pub fn router_with(state: AppState, trusted: TrustedProxies) -> Router {
+    build(state, trusted, None)
+}
+
+/// Router completo COM sessões (cookie `__Host-`, CSRF e `/api/v1/auth/*`): o do binário.
+pub fn router_with_sessions(
+    state: AppState,
+    trusted: TrustedProxies,
+    sessions: Sessions,
+) -> Router {
+    build(state, trusted, Some(sessions))
+}
+
+fn build(state: AppState, trusted: TrustedProxies, sessions: Option<Sessions>) -> Router {
     let audit = AuditLayerState::new(state.db_primary.clone(), state.redis.clone(), trusted);
     let app = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
-        .merge(api(state.clone(), audit))
+        .merge(api(state.clone(), audit, sessions))
         .with_state(state);
     with_edge_layers(app)
 }
 
-/// Rotas da API, de fora para dentro: `resolve_host` (tenant pelo `Host`; nunca recusa) →
-/// `AuditClass` → caixa negra → handler (os extractores `ResolvedTenant`/`PlatformHost` recusam
-/// com 404 por dentro da caixa negra).
-pub fn api(state: AppState, audit: AuditLayerState) -> Router<AppState> {
+/// Rotas da API, de fora para dentro: `capture_host` (host efetivo para o CSRF; só com
+/// `sessions`) → `resolve_host` (tenant pelo `Host`; nunca recusa) →
+/// `authenticate` (sessão → `Actor`; só com `sessions`) → `AuditClass` → caixa negra →
+/// `csrf_guard` (mutações com sessão) → handler (os extractores `ResolvedTenant`/`PlatformHost`
+/// recusam com 404 por dentro da caixa negra).
+pub fn api(
+    state: AppState,
+    audit: AuditLayerState,
+    sessions: Option<Sessions>,
+) -> Router<AppState> {
     let read_async = Router::new().route("/api/v1/tenant", get(tenancy::http::tenant_info));
-    with_host_resolution(
-        Router::new().merge(audited(read_async, audit).layer(Extension(AuditClass::ReadAsync))),
-        state,
-    )
+    let Some(sessions) = sessions else {
+        return with_host_resolution(
+            Router::new().merge(audited(read_async, audit).layer(Extension(AuditClass::ReadAsync))),
+            state,
+        );
+    };
+    let read_sync = Router::new()
+        .route("/api/v1/auth/session", get(identity::http::session_status))
+        .route("/api/v1/auth/logout", post(identity::http::logout));
+    let read_async = with_csrf(read_async, sessions.clone());
+    let read_sync = with_csrf(read_sync, sessions.clone());
+    let routes = Router::new()
+        .merge(audited(read_async, audit.clone()).layer(Extension(AuditClass::ReadAsync)))
+        .merge(audited(read_sync, audit).layer(Extension(AuditClass::ReadSync)));
+    let routes = with_host_resolution(with_sessions(routes, sessions.clone()), state);
+    with_request_host(routes, sessions)
 }
 
 /// Aplica a resolução do tenant pelo `Host` (por fora da caixa negra) às rotas de `router`.

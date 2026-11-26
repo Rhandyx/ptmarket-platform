@@ -4,6 +4,43 @@
  */
 
 export interface paths {
+    "/api/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Termina a sessão do pedido: revoga-a, limpa o cookie e grava `auth.logout`. Sem sessão: 204 na
+         *     mesma (idempotente).
+         */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Estado da sessão e token CSRF. */
+        get: operations["session_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenant": {
         parameters: {
             query?: never;
@@ -62,6 +99,17 @@ export interface components {
          * @enum {string}
          */
         CountryCode: "PT" | "ES";
+        /** @description Estado da sessão do pedido. */
+        SessionStatus: {
+            /** @description `customer`, `merchant`, `municipal` ou `admin`; `null` se anónimo. */
+            actor_type: string | null;
+            authenticated: boolean;
+            /**
+             * @description Token a enviar em `X-CSRF-Token` (ou no campo `_csrf`) em todas as mutações; `null` se
+             *     anónimo.
+             */
+            csrf_token: string | null;
+        };
         Status: {
             status: string;
         };
@@ -96,6 +144,68 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    logout: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Token CSRF da sessão (obrigatório com sessão) */
+                "X-CSRF-Token"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sessão terminada; cookie limpo */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Token CSRF ou Origin inválidos */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    session_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Estado da sessão (anónimo incluído) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionStatus"];
+                };
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     tenant_info: {
         parameters: {
             query?: never;
