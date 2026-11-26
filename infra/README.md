@@ -60,8 +60,15 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   3. Só depois a migration: `SELECT audit_admin.audit_upgrade('<nome>'::text, '<sha256>'::text);` e, no fim,
      `SELECT audit_admin.audit_seal();`. Nome inexistente, sha256 diferente ou já aplicada nesta BD → erro e a
      migration é desfeita. O sqlx fixa o checksum da migration e o superuser fixa o texto: os dois têm de bater.
+  **Cadeia linear:** cada entrada indica a anterior (`INSERT … (name, requires, sql)`; `requires` NULL só na
+  primeira): `0011_db_user` → `0012_hardening` → `0013_ddl_owner_exec` → `0014_mask_limits`. O bootstrap recusa
+  `requires` que não seja uma alteração aprovada ou uma cadeia com ramos; `audit_upgrade` recusa uma alteração cuja
+  anterior não esteja em `sealed_changes_applied` nesta BD ("<nome> exige <anterior> aplicada antes").
   `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem
-  passa-os para owner/writer) e grava em `audit_admin.sealed_changes_applied`. Mudar o texto de uma alteração
+  passa-os para owner/writer) e grava em `audit_admin.sealed_changes_applied`.
+  `audit_seal`/`audit_upgrade` serializam-se com o advisory lock `hashtextextended('ptmarket:audit_seal', 0)`.
+  A chave é pública: qualquer sessão pode segurá-lo (`pg_advisory_lock`) e **atrasar migrations** (DoS). Não forja
+  nem altera nada e fica no pgaudit, por isso a chave não deriva de um segredo (decisão do cartão 03d). Mudar o texto de uma alteração
   já aplicada numa BD faz o bootstrap falhar (corrigir = nova alteração com outro nome). As tabelas
   `audit_admin.sealed_changes*` são do `postgres`, sem GRANT a ninguém.
   Na BD de dev (depois de mudar o bootstrap): reaplicar o bootstrap (comando acima) e só então
@@ -116,6 +123,32 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   - Volume: cada `audit_seal()` (fim de cada migration que mexe em `audit`) grava dezenas de `ddl.grant`/`ddl.revoke`
     (um por objeto de `audit.*`), na cadeia da plataforma. `ALTER TABLE … DETACH PARTITION` de uma tabela de
     `public` com L1 apaga os `zz_audit_*` clonados e é recusado (`PTA04`); hoje não há tabelas particionadas em `public`.
+- **Máscara e limites (0014, alteração aprovada `0014_mask_limits`, cartão 02/03d):**
+  - Chaves comparadas em minúsculas e sem acentos (`audit._redact_key`). Segredos (`"[redacted]"`) passam a
+    incluir `senha|palavra-passe|segredo|chave|pwd|passw|access_key|api-key|jwt|bearer|cookie|session|signature|
+    hmac|pin$|card_number|cartao|passport|passaporte`; `pan` só como token (`(^|[_-])pan($|[_-])`: `card_pan`
+    mascarado, `company_id`/`expand_id`/`japan` em claro). PII (`"[pii]"`) inclui `nome|apelido|telemovel|
+    contribuinte|nascimento|morada`. **Os segredos correm antes da exceção `*_id`** (`reset_token_id`,
+    `secret_id`, `api_key_id` → `"[redacted]"`); a exceção `*_id` só vale para a PII.
+  - Pares genéricos `{key|name|field, value}`: se a etiqueta for segredo/IBAN/PII, o `value` é mascarado.
+  - Por valor (`audit._redact_text`), em todas as strings (também sob chaves neutras e em arrays) e em `reason` e
+    `actor_label` (`target_id` não, é um id): e-mail → `"[pii]"`; JWT (`eyJ…` com três segmentos, ou três
+    segmentos base64url ≥ 16) e prefixos `sk_`, `pk_live_`, `rk_`, `ghp_`, `xoxb-`/`xoxp-`, `AKIA…` →
+    `"[redacted]"`; IBAN (ISO compacto ou em grupos de 4; `PT50` + 21 dígitos) → `****` + 4 últimos, no lugar.
+  - `_redact_walk(text, jsonb, text)` mantém a assinatura e chama `audit._redact_node(…, profundidade)`:
+    contentores abaixo da profundidade 16 → `"[depth]"`. A máscara é idempotente.
+  - Limites em `_chain_insert`, medidos antes da máscara: `octet_length(changes::text)` ≤ 65536, profundidade de
+    `changes` ≤ 16, `reason` ≤ 1024, `target_id` ≤ 256, `actor_label` ≤ 128 caracteres.
+    **Eventos da aplicação** (`audit_append` chamado diretamente, `audit_append_event` do worker) → `PTA02` com
+    mensagem fixa (nunca o valor) e nada gravado. **A auditoria nunca faz falhar uma escrita de negócio nem uma
+    migration:** com ator `db`, dentro de um trigger (L1, `pg_trigger_depth() > 0`) ou de um event trigger de DDL
+    (L2, pela pilha de chamadas) corta e marca: `target_id` → 180 caracteres + `…sha256:<hex>`; `reason`/
+    `actor_label` → cortados com `…[truncated]`; folhas string > 4096 → `{"truncated": true, "bytes": n,
+    "sha256": hex}` e, se ainda passar de 64 KiB, o `changes` inteiro fica esse marcador; profundidade → `"[depth]"`.
+  - **Desvio do cartão:** "chr(0) em reason/actor_label/target_id → PTA02" é impossível: o PostgreSQL recusa NUL
+    antes de a função correr (`chr(0)` → 54000, NUL no protocolo → 22021, `\u0000` em jsonb → 22P05). Não há
+    verificação no código (seria inatingível); `migrations/tests/audit_mask_limits.sql` prova a recusa nativa
+    nos quatro campos e que nada fica gravado.
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

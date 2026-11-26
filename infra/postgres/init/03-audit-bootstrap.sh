@@ -417,6 +417,8 @@ GRANT EXECUTE ON FUNCTION audit_admin.audit_seal() TO ptmarket_migrator;
 -- reaplica este ficheiro como superuser ANTES da migration; ver infra/README.md).
 --   sealed_changes(name, sql, sha256): dono postgres, sem GRANT a ninguém. sha256 calculado na BD
 --     (encode(sha256(convert_to(sql, 'UTF8')), 'hex')); é o valor que a migration passa a audit_upgrade.
+--   requires: nome da alteração anterior (NULL só na primeira). A cadeia é linear: audit_upgrade recusa se a
+--     anterior não estiver aplicada nesta BD; o bootstrap recusa requires que não seja uma alteração aprovada.
 --   sealed_changes_applied(name, applied_at, session_user_name): uma linha por alteração aplicada nesta BD.
 --   Mudar o texto de uma alteração já aplicada nesta BD = RAISE (a migration é imutável; corrigir = nova).
 --   O SQL aprovado usa sempre nomes qualificados e tipos exatos; corre como postgres com
@@ -427,6 +429,7 @@ CREATE TABLE IF NOT EXISTS audit_admin.sealed_changes (
     sql    text NOT NULL,
     sha256 text NOT NULL
 );
+ALTER TABLE audit_admin.sealed_changes ADD COLUMN IF NOT EXISTS requires text;
 ALTER TABLE audit_admin.sealed_changes OWNER TO postgres;
 REVOKE ALL ON audit_admin.sealed_changes FROM PUBLIC;
 
@@ -439,7 +442,7 @@ ALTER TABLE audit_admin.sealed_changes_applied OWNER TO postgres;
 REVOKE ALL ON audit_admin.sealed_changes_applied FROM PUBLIC;
 
 DROP TABLE IF EXISTS pg_temp.ptm_sealed_changes_new;
-CREATE TEMP TABLE ptm_sealed_changes_new (name text PRIMARY KEY, sql text NOT NULL);
+CREATE TEMP TABLE ptm_sealed_changes_new (name text PRIMARY KEY, requires text, sql text NOT NULL);
 
 -- ---------------------------------------------------------------------------
 -- APROVADA: 0011_db_user (cartão 02/03b). Disparada por migrations/0011_audit_db_user.sql.
@@ -448,7 +451,7 @@ CREATE TEMP TABLE ptm_sealed_changes_new (name text PRIMARY KEY, sql text NOT NU
 --   audit_append recusa app.actor_type fora da lista fechada, incluindo 'db' (só nasce em audit_append_db).
 --   audit._db_user_since_us(): instante (µs desde a época, UTC) a partir do qual db_user NULL é anomalia.
 -- ---------------------------------------------------------------------------
-INSERT INTO pg_temp.ptm_sealed_changes_new (name, sql) VALUES ('0011_db_user', $chg_0011$
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0011_db_user', NULL, $chg_0011$
 ALTER TABLE audit.audit_events ADD COLUMN db_user text;
 
 CREATE OR REPLACE FUNCTION audit._event_hash(e audit.audit_events)
@@ -621,7 +624,7 @@ $chg_0011$);
 --   audit_append_event: erros de conversão só com a chave e o SQLSTATE (nunca SQLERRM); lock_timeout 2s.
 --   audit_verify_chain: + bad_genesis, gap_before, head_mismatch (mesma assinatura; fórmula do hash igual).
 -- ---------------------------------------------------------------------------
-INSERT INTO pg_temp.ptm_sealed_changes_new (name, sql) VALUES ('0012_hardening', $chg_0012$
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0012_hardening', '0011_db_user', $chg_0012$
 CREATE FUNCTION audit._redact_walk(p_table text, p_value jsonb, p_level text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -992,9 +995,367 @@ $chg_0012$);
 --   (DEFINER, dono ptmarket_audit_owner) cria partições: sem este EXECUTE, a criação falhava (42501). O dono é
 --   NOLOGIN e sem membros (só código selado corre como ele).
 -- ---------------------------------------------------------------------------
-INSERT INTO pg_temp.ptm_sealed_changes_new (name, sql) VALUES ('0013_ddl_owner_exec', $chg_0013$
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0013_ddl_owner_exec', '0012_hardening', $chg_0013$
 GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_audit_owner;
 $chg_0013$);
+
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0014_mask_limits (cartão 02/03d). Disparada por migrations/0014_audit_mask_limits.sql. Exige 0013.
+--   Máscara (audit._redact_walk mantém a assinatura e passa a chamar audit._redact_node, com profundidade):
+--     chaves comparadas em minúsculas e sem acentos (audit._redact_key); SEGREDOS antes da exceção *_id
+--     (reset_token_id, secret_id, api_key_id → "[redacted]"); a exceção *_id só vale para a PII; pan só como
+--     token ((^|[_-])pan($|[_-]): company_id, expand_id em claro). Pares {key|name|field, value}: a etiqueta decide
+--     a máscara do value. Por valor (audit._redact_text, todas as strings, também reason e actor_label): e-mail →
+--     "[pii]"; JWT e prefixos de chave de API → "[redacted]"; IBAN → ****4 últimos. Contentores abaixo da
+--     profundidade 16 → "[depth]".
+--   Limites (_chain_insert, antes da máscara): changes ≤ 64 KiB (octet_length do texto), profundidade ≤ 16,
+--     reason ≤ 1024, target_id ≤ 256, actor_label ≤ 128 caracteres.
+--     Eventos da aplicação (audit_append direto, audit_append_event) → PTA02 com mensagem fixa, nada gravado.
+--     L1 (dentro de um trigger) e L2 (event trigger de DDL) e 'db' → nunca falham: target_id → 180 chars +
+--     '…sha256:<hex>'; reason/actor_label cortados com '…[truncated]'; folhas string > 4096 → marcador
+--     {"truncated","bytes","sha256"} e, se ainda passar de 64 KiB, changes inteiro → esse marcador.
+--   _event_content_hash: reason e actor_label pela máscara por valor (idempotente; dedupe estável).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0014_mask_limits', '0013_ddl_owner_exec', $chg_0014$
+CREATE FUNCTION audit._redact_key(p_key text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT CASE
+        WHEN n.k ~ '(password|passw|pwd|senha|palavra.?passe|segredo|secret|token|credential|passkey|split_key|api.?key|access.?key|chave|private|otp|totp|cvv|cvc|(^|[_-])pan($|[_-])|authorization|bearer|jwt|cookie|session|signature|hmac|pin$|card.?number|cartao|passport|passaporte|_enc$|_hash$)'
+            THEN 'secret'
+        WHEN n.k ~ 'iban'
+            THEN 'iban'
+        WHEN n.k ~ '_id$'
+            THEN 'id'
+        WHEN n.k ~ '(email|phone|telefone|telemovel|nif|nipc|vat_number|contribuinte|name$|full_name|first_name|last_name|nome|apelido|address|morada|street|postal|zip|birth|nascimento|ip$)'
+            THEN 'pii'
+    END
+    FROM (SELECT lower(translate(p_key,
+                 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇáàâãäéèêëíìîïóòôõöúùûüç',
+                 'AAAAAEEEEIIIIOOOOOUUUUCaaaaaeeeeiiiiooooouuuuc')) AS k) AS n
+$body$;
+REVOKE ALL ON FUNCTION audit._redact_key(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._redact_key(text)
+    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer;
+
+CREATE FUNCTION audit._redact_text(p_value text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_out text := p_value;
+    v_m   text;
+BEGIN
+    IF p_value IS NULL OR p_value IN ('[redacted]', '[pii]', '[depth]') THEN
+        RETURN p_value;
+    END IF;
+    -- JWT (três segmentos base64url), prefixos de chaves de API.
+    IF p_value ~ '\meyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\.'
+       OR p_value ~ '[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}'
+       OR p_value ~ '\m(sk_|rk_|ghp_|pk_live_|xox[bp]-)[A-Za-z0-9]'
+       OR p_value ~ '\mAKIA[0-9A-Z]{16}' THEN
+        RETURN '[redacted]';
+    END IF;
+    IF p_value ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}' THEN
+        RETURN '[pii]';
+    END IF;
+    -- IBAN ISO (compacto ou em grupos de 4) e PT50 + 21 dígitos (qualquer caixa, espaços opcionais) → ****4 últimos.
+    FOR v_m IN
+        SELECT m[1]
+        FROM regexp_matches(p_value,
+            '\m((?:[A-Z]{2}[0-9]{2}(?:[A-Z0-9]{11,30}|(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,4})?)|[Pp][Tt]50(?: ?[0-9]){21}))\M',
+            'g') AS m
+    LOOP
+        v_out := replace(v_out, v_m, '****' || right(replace(v_m, ' ', ''), 4));
+    END LOOP;
+    RETURN v_out;
+END
+$body$;
+REVOKE ALL ON FUNCTION audit._redact_text(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._redact_text(text)
+    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer;
+
+-- p_level: 'root' (chaves de changes), 'columns' (chaves de changes.before/after), 'nested' (o resto).
+-- p_depth: profundidade deste contentor (raiz = 1); abaixo de 16 → "[depth]".
+CREATE FUNCTION audit._redact_node(p_table text, p_value jsonb, p_level text, p_depth integer)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_pair text;
+BEGIN
+    CASE jsonb_typeof(p_value)
+    WHEN 'string' THEN
+        RETURN to_jsonb(audit._redact_text(p_value #>> '{}'));
+    WHEN 'array' THEN
+        IF p_depth > 16 THEN
+            RETURN '"[depth]"'::jsonb;
+        END IF;
+        RETURN (SELECT COALESCE(jsonb_agg(audit._redact_node(p_table, a.value, 'nested'::text, (p_depth + 1)::integer)
+                                          ORDER BY a.n), '[]'::jsonb)
+                FROM jsonb_array_elements(p_value) WITH ORDINALITY AS a(value, n));
+    WHEN 'object' THEN
+        IF p_depth > 16 THEN
+            RETURN '"[depth]"'::jsonb;
+        END IF;
+        -- Par genérico {key|name|field, value}: a etiqueta decide a máscara do value.
+        IF p_value ? 'value' THEN
+            SELECT CASE WHEN bool_or(x.cls = 'secret') THEN 'secret'
+                        WHEN bool_or(x.cls = 'iban') THEN 'iban'
+                        WHEN bool_or(x.cls = 'pii') THEN 'pii' END
+              INTO v_pair
+              FROM (SELECT audit._redact_key(p_value ->> l.k) AS cls
+                    FROM unnest(ARRAY['key', 'name', 'field']) AS l(k)
+                    WHERE jsonb_typeof(p_value -> l.k) = 'string') AS x;
+        END IF;
+        RETURN (
+            SELECT COALESCE(jsonb_object_agg(c.key, CASE
+                WHEN c.value = 'null'::jsonb THEN c.value
+                WHEN k.cls = 'secret' THEN '"[redacted]"'::jsonb
+                WHEN k.cls = 'iban' THEN CASE
+                    WHEN jsonb_typeof(c.value) = 'string' AND (c.value #>> '{}') ~ '^\[(redacted|pii|depth)\]$'
+                        THEN c.value
+                    WHEN jsonb_typeof(c.value) = 'string'
+                        THEN to_jsonb('****' || right(c.value #>> '{}', 4))
+                    ELSE '"[redacted]"'::jsonb END
+                WHEN k.cls = 'pii'
+                     AND NOT (p_level IN ('root', 'columns')
+                              AND p_table IN ('tenants', 'categories', 'products')
+                              AND c.key IN ('name', 'legal_name'))
+                    THEN '"[pii]"'::jsonb
+                ELSE audit._redact_node(p_table, c.value,
+                         CASE WHEN p_level = 'root' AND c.key IN ('before', 'after')
+                              THEN 'columns' ELSE 'nested' END::text,
+                         (p_depth + 1)::integer)
+            END), '{}'::jsonb)
+            FROM jsonb_each(p_value) AS c
+            CROSS JOIN LATERAL (
+                SELECT CASE WHEN c.key = 'value' AND v_pair IS NOT NULL THEN v_pair
+                            ELSE audit._redact_key(c.key::text) END AS cls) AS k);
+    ELSE
+        RETURN p_value;
+    END CASE;
+END
+$body$;
+REVOKE ALL ON FUNCTION audit._redact_node(text, jsonb, text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._redact_node(text, jsonb, text, integer)
+    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer;
+
+-- Mesma assinatura (audit_redact e os GRANTs não mudam); a recursão passa para _redact_node.
+CREATE OR REPLACE FUNCTION audit._redact_walk(p_table text, p_value jsonb, p_level text)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+BEGIN
+    RETURN audit._redact_node(p_table, p_value, p_level, 1::integer);
+END
+$body$;
+
+-- L1/L2: folhas string com mais de 4096 caracteres → {"truncated": true, "bytes": n, "sha256": hex}.
+CREATE FUNCTION audit._truncate_leaves(p_value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_s text;
+BEGIN
+    CASE jsonb_typeof(p_value)
+    WHEN 'string' THEN
+        v_s := p_value #>> '{}';
+        IF char_length(v_s) > 4096 THEN
+            RETURN jsonb_build_object('truncated', true, 'bytes', octet_length(v_s),
+                                      'sha256', encode(sha256(convert_to(v_s, 'UTF8')), 'hex'));
+        END IF;
+        RETURN p_value;
+    WHEN 'array' THEN
+        RETURN (SELECT COALESCE(jsonb_agg(audit._truncate_leaves(a.value) ORDER BY a.n), '[]'::jsonb)
+                FROM jsonb_array_elements(p_value) WITH ORDINALITY AS a(value, n));
+    WHEN 'object' THEN
+        RETURN (SELECT COALESCE(jsonb_object_agg(c.key, audit._truncate_leaves(c.value)), '{}'::jsonb)
+                FROM jsonb_each(p_value) AS c);
+    ELSE
+        RETURN p_value;
+    END CASE;
+END
+$body$;
+REVOKE ALL ON FUNCTION audit._truncate_leaves(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._truncate_leaves(jsonb) TO ptmarket_audit_writer;
+
+CREATE OR REPLACE FUNCTION audit._event_content_hash(e audit.audit_events)
+RETURNS bytea
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT sha256(convert_to(jsonb_build_array(
+        e.id, e.tenant_id, e.store_id, e.actor_type, e.actor_id, audit._redact_text(e.actor_label::text),
+        e.impersonator_id, e.action, e.target_type, e.target_id, e.outcome, audit._redact_text(e.reason::text),
+        audit.audit_redact(e.target_type::text, e.changes), e.request_id,
+        e.ip::text, encode(e.user_agent_hash, 'hex'),
+        (extract(epoch FROM e.occurred_at) * 1000000)::bigint
+    )::text, 'UTF8'))
+$body$;
+
+CREATE OR REPLACE FUNCTION audit._chain_insert(p_row audit.audit_events, p_dedupe boolean)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row     audit.audit_events := p_row;
+    v_content bytea;
+    v_found   bigint;
+    v_same    bigint;
+    v_size    bigint;
+    v_deep    boolean;
+    v_over    boolean;
+    v_ctx     text;
+    v_text    text;
+BEGIN
+    -- Quem está ligado (LOGIN), não o papel assumido: ignora o que vier em p_row.
+    v_row.db_user := session_user;
+
+    -- Limites, medidos ANTES da máscara. NUL nunca chega aqui: o PostgreSQL recusa chr(0) em text e \u0000 em jsonb.
+    v_size := COALESCE(octet_length(v_row.changes::text), 0);
+    v_deep := v_row.changes IS NOT NULL AND jsonb_path_exists(v_row.changes,
+                  'strict $.**{16} ? (@.type() == "object" || @.type() == "array")'::jsonpath);
+    v_over := v_size > 65536 OR v_deep
+              OR COALESCE(char_length(v_row.reason), 0) > 1024
+              OR COALESCE(char_length(v_row.target_id), 0) > 256
+              OR COALESCE(char_length(v_row.actor_label), 0) > 128;
+    IF v_over THEN
+        -- A auditoria nunca faz falhar uma escrita de negócio nem uma migration: 'db', L1 (dentro de um trigger)
+        -- e L2 (event trigger de DDL) seguem e são cortados abaixo. Eventos da aplicação → PTA02, nada gravado.
+        GET DIAGNOSTICS v_ctx = PG_CONTEXT;
+        IF NOT (v_row.actor_type = 'db' OR pg_trigger_depth() > 0
+                OR v_ctx ~ 'PL/pgSQL function audit\.audit_ddl_(end|drop)\(\) line [0-9]+ at PERFORM') THEN
+            IF v_size > 65536 THEN
+                RAISE EXCEPTION '_chain_insert: changes acima de 64 KiB' USING ERRCODE = 'PTA02';
+            END IF;
+            IF v_deep THEN
+                RAISE EXCEPTION '_chain_insert: changes com profundidade acima de 16' USING ERRCODE = 'PTA02';
+            END IF;
+            IF char_length(v_row.reason) > 1024 THEN
+                RAISE EXCEPTION '_chain_insert: reason acima de 1024 caracteres' USING ERRCODE = 'PTA02';
+            END IF;
+            IF char_length(v_row.target_id) > 256 THEN
+                RAISE EXCEPTION '_chain_insert: target_id acima de 256 caracteres' USING ERRCODE = 'PTA02';
+            END IF;
+            RAISE EXCEPTION '_chain_insert: actor_label acima de 128 caracteres' USING ERRCODE = 'PTA02';
+        END IF;
+    END IF;
+
+    -- Máscara em todos os caminhos (app, worker, db); idempotente. reason e actor_label: máscara por valor.
+    v_row.changes     := audit.audit_redact(v_row.target_type::text, v_row.changes);
+    v_row.reason      := audit._redact_text(v_row.reason::text);
+    v_row.actor_label := audit._redact_text(v_row.actor_label::text);
+
+    -- Só no caminho tolerante (L1/L2/db): cortar e marcar, nunca falhar.
+    IF v_over THEN
+        IF char_length(v_row.target_id) > 256 THEN
+            v_row.target_id := left(v_row.target_id, 180) || '…sha256:'
+                               || encode(sha256(convert_to(v_row.target_id, 'UTF8')), 'hex');
+        END IF;
+        IF char_length(v_row.reason) > 1024 THEN
+            v_row.reason := left(v_row.reason, 1012) || '…[truncated]';
+        END IF;
+        IF char_length(v_row.actor_label) > 128 THEN
+            v_row.actor_label := left(v_row.actor_label, 116) || '…[truncated]';
+        END IF;
+        IF octet_length(v_row.changes::text) > 65536 THEN
+            v_row.changes := audit._truncate_leaves(v_row.changes);
+            v_text := v_row.changes::text;
+            IF octet_length(v_text) > 65536 THEN
+                v_row.changes := jsonb_build_object('truncated', true, 'bytes', octet_length(v_text),
+                                     'sha256', encode(sha256(convert_to(v_text, 'UTF8')), 'hex'));
+            END IF;
+        END IF;
+    END IF;
+
+    v_row.chain_key       := COALESCE(v_row.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid);
+    v_row.retention_class := audit.audit_retention_class(v_row.action::text, v_row.outcome::text);
+
+    INSERT INTO audit.audit_chain_heads (chain_key, retention_class, last_seq, last_hash)
+    VALUES (v_row.chain_key, v_row.retention_class, 0, decode(repeat('00', 32), 'hex'))
+    ON CONFLICT DO NOTHING;
+
+    SELECT h.last_seq + 1, h.last_hash INTO STRICT v_row.chain_seq, v_row.prev_hash
+    FROM audit.audit_chain_heads h
+    WHERE h.chain_key = v_row.chain_key
+      AND h.retention_class = v_row.retention_class
+    FOR UPDATE;
+
+    -- Reentrega (mesmo conteúdo) → NULL; id reutilizado com outro conteúdo → PTA03 (nunca em silêncio).
+    IF p_dedupe THEN
+        v_content := audit._event_content_hash(v_row);
+        SELECT count(*), count(*) FILTER (WHERE audit._event_content_hash(e) = v_content)
+          INTO v_found, v_same
+          FROM audit.audit_events e
+         WHERE e.id = v_row.id
+           AND e.created_at >= v_row.occurred_at - interval '1 day';
+        IF v_same > 0 THEN
+            RETURN NULL;
+        END IF;
+        IF v_found > 0 THEN
+            RAISE EXCEPTION '_chain_insert: id já gravado com conteúdo diferente'
+                USING ERRCODE = 'PTA03';
+        END IF;
+    END IF;
+
+    v_row.created_at  := clock_timestamp();
+    v_row.occurred_at := COALESCE(v_row.occurred_at, v_row.created_at);
+    v_row.id          := COALESCE(v_row.id, uuidv7());
+    v_row.hash        := audit._event_hash(v_row);
+
+    INSERT INTO audit.audit_events (
+        id, tenant_id, chain_key, store_id, actor_type, actor_id, actor_label, impersonator_id,
+        action, target_type, target_id, outcome, reason, changes, request_id, ip, user_agent_hash,
+        retention_class, occurred_at, created_at, chain_seq, prev_hash, hash, db_user
+    ) VALUES (
+        v_row.id, v_row.tenant_id, v_row.chain_key, v_row.store_id, v_row.actor_type, v_row.actor_id,
+        v_row.actor_label, v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id,
+        v_row.outcome, v_row.reason, v_row.changes, v_row.request_id, v_row.ip, v_row.user_agent_hash,
+        v_row.retention_class, v_row.occurred_at, v_row.created_at, v_row.chain_seq, v_row.prev_hash,
+        v_row.hash, v_row.db_user
+    );
+
+    UPDATE audit.audit_chain_heads
+       SET last_seq = v_row.chain_seq, last_hash = v_row.hash
+     WHERE chain_key = v_row.chain_key
+       AND retention_class = v_row.retention_class;
+
+    IF v_row.actor_type = 'admin' OR v_row.impersonator_id IS NOT NULL THEN
+        INSERT INTO audit.audit_alerts (id, created_at, event_type, payload)
+        VALUES (
+            v_row.id, v_row.created_at, 'audit.superadmin_action',
+            to_jsonb(v_row) || jsonb_build_object(
+                'prev_hash', encode(v_row.prev_hash, 'hex'),
+                'hash', encode(v_row.hash, 'hex'),
+                'user_agent_hash', encode(v_row.user_agent_hash, 'hex'))
+        );
+    END IF;
+
+    RETURN v_row.id;
+END
+$body$;
+$chg_0014$);
 
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
@@ -1009,10 +1370,20 @@ BEGIN
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION '03-audit-bootstrap: texto de alteração selada já aplicada nesta BD mudou: % (corrigir = nova alteração)', v_bad;
     END IF;
-    INSERT INTO audit_admin.sealed_changes (name, sql, sha256)
-    SELECT n.name, n.sql, encode(sha256(convert_to(n.sql, 'UTF8')), 'hex')
+    -- Cadeia linear: requires aponta para uma alteração aprovada (NULL só numa) e nenhuma tem duas sucessoras.
+    SELECT string_agg(n.name, ', ') INTO v_bad
     FROM pg_temp.ptm_sealed_changes_new n
-    ON CONFLICT (name) DO UPDATE SET sql = EXCLUDED.sql, sha256 = EXCLUDED.sha256;
+    WHERE n.requires IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM pg_temp.ptm_sealed_changes_new p WHERE p.name = n.requires);
+    IF v_bad IS NOT NULL
+       OR (SELECT count(*) FROM pg_temp.ptm_sealed_changes_new WHERE requires IS NULL) <> 1
+       OR EXISTS (SELECT 1 FROM pg_temp.ptm_sealed_changes_new GROUP BY requires HAVING count(*) > 1) THEN
+        RAISE EXCEPTION '03-audit-bootstrap: requires das alterações seladas não forma uma cadeia linear (%)', v_bad;
+    END IF;
+    INSERT INTO audit_admin.sealed_changes (name, requires, sql, sha256)
+    SELECT n.name, n.requires, n.sql, encode(sha256(convert_to(n.sql, 'UTF8')), 'hex')
+    FROM pg_temp.ptm_sealed_changes_new n
+    ON CONFLICT (name) DO UPDATE SET requires = EXCLUDED.requires, sql = EXCLUDED.sql, sha256 = EXCLUDED.sha256;
 END
 $$;
 DROP TABLE pg_temp.ptm_sealed_changes_new;
@@ -1032,17 +1403,22 @@ AS $fn$
 DECLARE
     v_sql text;
     v_sha text;
+    v_req text;
 BEGIN
     IF p_name IS NULL OR p_sha256 IS NULL THEN
         RAISE EXCEPTION 'audit_upgrade: nome e sha256 obrigatórios';
     END IF;
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('ptmarket:audit_seal', 0));
 
-    SELECT c.sql, c.sha256 INTO v_sql, v_sha
+    SELECT c.sql, c.sha256, c.requires INTO v_sql, v_sha, v_req
     FROM audit_admin.sealed_changes c
     WHERE c.name = p_name;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'audit_upgrade: alteração % não aprovada no bootstrap', p_name;
+    END IF;
+    IF v_req IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM audit_admin.sealed_changes_applied a WHERE a.name = v_req) THEN
+        RAISE EXCEPTION 'audit_upgrade: % exige % aplicada antes nesta BD', p_name, v_req;
     END IF;
     IF v_sha IS DISTINCT FROM pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(v_sql, 'UTF8')), 'hex') THEN
         RAISE EXCEPTION 'audit_upgrade: sealed_changes incoerente para % (reaplicar o bootstrap)', p_name;

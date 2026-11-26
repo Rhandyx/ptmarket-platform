@@ -155,8 +155,9 @@ INSERT INTO redact_cases VALUES
     ('products.title, products.name, categories via *_id → em claro', 'products',
      '{"after": {"title": "Queijo", "name": "Queijo da Serra", "category_id": "00000000-0000-7000-8000-0000000012c1",
                  "store_id": "00000000-0000-7000-8000-0000000012c2", "company_id": "c1", "api_key_id": "k1"}}',
+     -- 03d: segredos antes da exceção *_id (api_key_id → "[redacted]")
      '{"after": {"title": "Queijo", "name": "Queijo da Serra", "category_id": "00000000-0000-7000-8000-0000000012c1",
-                 "store_id": "00000000-0000-7000-8000-0000000012c2", "company_id": "c1", "api_key_id": "k1"}}'),
+                 "store_id": "00000000-0000-7000-8000-0000000012c2", "company_id": "c1", "api_key_id": "[redacted]"}}'),
     ('categories.name → em claro', 'categories',
      '{"before": {"name": "Queijos"}, "after": {"name": "Queijos e enchidos"}}',
      '{"before": {"name": "Queijos"}, "after": {"name": "Queijos e enchidos"}}'),
