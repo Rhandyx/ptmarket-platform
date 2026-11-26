@@ -47,9 +47,9 @@ Os templates, o `theme_config` e a PWA mantêm-se integralmente. Acrescenta-se:
 
 ---
 
-## 3. Acessibilidade Obrigatória no Setor Público (WCAG 2.1 AA / DL 83/2018)
+## 3. Acessibilidade Obrigatória no Setor Público (WCAG 2.2 AA / DL 83/2018)
 
-**Diferencial competitivo decisivo:** Em Portugal, todos os portais financiados ou detidos por Câmaras Municipais são **legalmente obrigados** (Decreto-Lei n.º 83/2018) a cumprir o nível **WCAG 2.1 AA** e a publicar uma Declaração de Acessibilidade (`acessibilidade.gov.pt`). A maioria das agências WordPress falha esta auditoria.
+**Diferencial competitivo decisivo:** Em Portugal, todos os portais financiados ou detidos por Câmaras Municipais são **legalmente obrigados** (Decreto-Lei n.º 83/2018) a cumprir o nível **WCAG 2.1 AA** (o projeto aplica a **WCAG 2.2 AA**, que a inclui) e a publicar uma Declaração de Acessibilidade (`acessibilidade.gov.pt`). A maioria das agências WordPress falha esta auditoria.
 
 Todos os 3 templates construídos em **Next.js + Tailwind + `shadcn/ui` (Radix Primitives)** nascem conformes desde o dia 1:
 1. **Contraste Garantido:** Validador automático no Backoffice da Câmara que avisa se a cor primária escolhida não atinge rácio de contraste mínimo de `4.5:1`.

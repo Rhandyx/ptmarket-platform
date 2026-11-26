@@ -42,7 +42,7 @@
 - **Relatórios deduplicados (spec 14 §7):** por entidade (`active_sponsor_ids @> ARRAY[:entity]`) ou multi-entidade, com totais sobre `sub_orders` únicas; **sem dados pessoais dos compradores** (só agregados por loja, data, canal e DICOFRE).
 - **Tema/template do canal** (só se a entidade tiver domínio próprio): os campos de Identidade & Acessibilidade abaixo.
 - **Governação & KYC (DSA):** Aprovar pedidos de adesão de comerciantes do concelho após validar NIF e morada local; suspender lojas em incumprimento.
-- **Identidade & Acessibilidade:** Carregar logótipo/brasão, definir cores (com validador automático de contraste WCAG 2.1 AA), escolher entre os **3 Templates** (`bairro`, `editorial`, `catalogo`) e gerir banners de campanhas municipais.
+- **Identidade & Acessibilidade:** Carregar logótipo/brasão, definir cores (com validador automático de contraste WCAG 2.2 AA), escolher entre os **3 Templates** (`bairro`, `editorial`, `catalogo`) e gerir banners de campanhas municipais.
 - **Observatório do Comércio Local (Relatórios PRR / Portugal 2030):** Dashboards exportáveis (PDF/Excel) com volume de vendas do concelho, nº de lojas ativas, adesão ao Cartão da Cidade e setores mais dinâmicos — sem acesso a dados bancários privados nem credenciais fiscais dos lojistas.
 - **Portabilidade (Cláusula de Saída):** Exportação completa dos dados públicos/estatísticos do município em formato aberto (CSV/JSON).
 

@@ -13,7 +13,7 @@
 | Tema Crítico | O Problema Real (Que Quase Todos Esquecem) | Solução Já Incorporada na Arquitetura |
 | :--- | :--- | :--- |
 | **1. Diretiva Omnibus — Histórico de Preços 30 Dias (DL 70/2007)** | Em Portugal/UE, é ilegal mostrar um "desconto" sem apresentar o **preço mais baixo praticado nos últimos 30 dias**. A ASAE aplica coimas pesadas. | Tabela `product_price_history` + coluna `lowest_price_30d_cents` atualizada automaticamente em cada alteração de preço. |
-| **2. Acessibilidade Obrigatória no Setor Público (WCAG 2.1 AA / DL 83/2018)** | Portais de Câmaras Municipais são legalmente obrigados a cumprir WCAG 2.1 AA e exibir a Declaração de Acessibilidade (`acessibilidade.gov.pt`). | Templates `shadcn/ui` (Radix) acessíveis por teclado/leitor de ecrã + validador de contraste no Backoffice + página `/acessibilidade` automática por município. |
+| **2. Acessibilidade Obrigatória no Setor Público (WCAG 2.2 AA / DL 83/2018)** | Portais de Câmaras Municipais são legalmente obrigados a cumprir WCAG 2.1 AA (o projeto aplica a 2.2 AA, que a inclui) e exibir a Declaração de Acessibilidade (`acessibilidade.gov.pt`). | Templates `shadcn/ui` (Radix) acessíveis por teclado/leitor de ecrã + validador de contraste no Backoffice + página `/acessibilidade` automática por município. |
 | **3. RGPD + DPA com Câmaras vs. 10 Anos Fiscais da AT** | Câmaras exigem um **DPA (Acordo de Subcontratação de Dados)** e servidores estritamente na UE. Além disso, se um cliente pedir o "direito ao esquecimento", **não podes apagar a encomenda** porque a AT obriga a guardar registos fiscais por 10 anos! | Alojamento exclusivo na UE (Alemanha/França/Portugal) + botão de **Anonimização RGPD** (`customer_anonymized = true` que substitui nome/email/telefone por hash anónimo na tabela `orders`, mantendo intactos os totais e registos fiscais do lojista). |
 | **4. Digital Services Act (DSA — UE)** | Marketplaces online são obrigados a validar a identidade comercial do vendedor (KYC: denominação social, NIF, morada, contacto) e disponibilizar um botão de *"Denunciar conteúdo/produto ilegal"*. | Campos `legal_name`, `nif`, `kyc_verified` na tabela `stores` + formulário simples de denúncia no rodapé da ficha de produto. |
 | **5. Livro de Reclamações Eletrónico e RAL (DL 74/2017)** | Obrigatório no rodapé de qualquer loja online em Portugal, juntamente com a indicação da entidade de Resolução Alternativa de Litígios (ex: CNIACC / CICAP). | Campos configuráveis em `tenants.legal_config` exibidos automaticamente no rodapé de todos os portais. |
@@ -67,10 +67,10 @@
 
 ### Fase B — Construção do Núcleo Técnico (Semanas 2 a 6)
 - [ ] Inicializar o monorepo `ptmarket-platform` com os ficheiros `/docs`, `CLAUDE.md`, `.claude/agents/` e `.agent/`.
-- [ ] Correr `migrations` PostgreSQL 17 (RLS, tabelas base, Omnibus, RBAC, auditoria) + `seed_taxonomy`.
+- [ ] Correr `migrations` PostgreSQL 18 (RLS, tabelas base, Omnibus, RBAC, auditoria) + `seed_taxonomy`.
 - [ ] Implementar API Core em **Rust (`Axum`)**: Auth JWT+2FA, gestão de *tenants*, catálogo, carrinho multi-loja, cálculo de *split* + IVA (PT/ES/Art. 53.º), stock atómico e `LocalDiskStorage`.
 - [ ] Implementar Workers em **Go (`Asynq`)**: Webhooks Eupago/Stripe, conector Moloni/InvoiceXpress (sandbox), enriquecimento IA de produtos e importador WooCommerce/CSV.
-- [ ] Construir Frontend **Next.js**: 3 templates White-Label (WCAG 2.1 AA), PWA, Backoffice do Lojista, Backoffice da Câmara e **Data Studio** com Dry-Run.
+- [ ] Construir Frontend **Next.js**: 3 templates White-Label (WCAG 2.2 AA), PWA, Backoffice do Lojista, Backoffice da Câmara e **Data Studio** com Dry-Run.
 
 ### Fase C — Demo Comercial e Primeiras Reuniões (Semanas 7 e 8)
 - [ ] Executar `seed_demo` no servidor e colocar `demo.ptmarket.pt` online com HTTPS automático (Caddy).
