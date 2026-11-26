@@ -132,12 +132,14 @@ DECLARE
         'audit.audit_chains()',
         'audit.audit_default_partition_rows()',
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
-        'audit.audit_verify_actors(uuid,text,timestamp with time zone,timestamp with time zone)'
+        'audit.audit_verify_actors(uuid,text,timestamp with time zone,timestamp with time zone)',
+        'audit.audit_guc_defaults()'
     ];
     v_allow_owner text[] := ARRAY[
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_owner',  -- cria partições: tem de ser dono das tabelas
+        'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
         'ptmarket_audit_writer',
@@ -609,6 +611,380 @@ $do$;
 REVOKE ALL ON FUNCTION audit._db_user_since_us() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION audit._db_user_since_us() TO ptmarket_audit_writer;
 $chg_0011$);
+
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0012_hardening (cartão 02/03c). Disparada por migrations/0012_audit_hardening.sql.
+--   Máscara (audit_redact → audit._redact_walk, recursiva): segredos → "[redacted]", PII → "[pii]" em qualquer
+--     tabela, IBAN → 4 últimos; chaves *_id em claro; name/legal_name de tenants/categories/products em claro só
+--     ao nível das colunas (raiz de changes ou changes.before/after). _chain_insert aplica-a em todos os caminhos.
+--   Dedupe: id repetido com o mesmo conteúdo (audit._event_content_hash) → NULL; conteúdo diferente → PTA03.
+--   audit_append_event: erros de conversão só com a chave e o SQLSTATE (nunca SQLERRM); lock_timeout 2s.
+--   audit_verify_chain: + bad_genesis, gap_before, head_mismatch (mesma assinatura; fórmula do hash igual).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, sql) VALUES ('0012_hardening', $chg_0012$
+CREATE FUNCTION audit._redact_walk(p_table text, p_value jsonb, p_level text)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+BEGIN
+    -- p_level: 'root' (chaves de changes), 'columns' (chaves de changes.before/after), 'nested' (o resto).
+    IF jsonb_typeof(p_value) = 'array' THEN
+        RETURN (SELECT COALESCE(jsonb_agg(audit._redact_walk(p_table, a.value, 'nested'::text) ORDER BY a.n),
+                                '[]'::jsonb)
+                FROM jsonb_array_elements(p_value) WITH ORDINALITY AS a(value, n));
+    END IF;
+    IF jsonb_typeof(p_value) IS DISTINCT FROM 'object' THEN
+        RETURN p_value;
+    END IF;
+    RETURN (
+        SELECT COALESCE(jsonb_object_agg(c.key, CASE
+            WHEN c.value = 'null'::jsonb THEN c.value
+            WHEN c.key ~* '_id$'
+                THEN audit._redact_walk(p_table, c.value, 'nested'::text)
+            WHEN c.key ~* '(password|secret|token|credential|passkey|split_key|api_?key|private|otp|totp|cvv|cvc|pan|authorization|_enc$|_hash$)'
+                THEN '"[redacted]"'::jsonb
+            WHEN c.key ~* 'iban'
+                THEN CASE WHEN jsonb_typeof(c.value) = 'string'
+                          THEN to_jsonb('****' || right(c.value #>> '{}', 4))
+                          ELSE '"[redacted]"'::jsonb END
+            WHEN c.key ~* '(email|phone|telefone|nif|nipc|vat_number|name$|full_name|first_name|last_name|address|morada|street|postal|zip|birth|ip$)'
+                 AND NOT (p_level IN ('root', 'columns')
+                          AND p_table IN ('tenants', 'categories', 'products')
+                          AND c.key IN ('name', 'legal_name'))
+                THEN '"[pii]"'::jsonb
+            ELSE audit._redact_walk(p_table, c.value,
+                     CASE WHEN p_level = 'root' AND c.key IN ('before', 'after')
+                          THEN 'columns' ELSE 'nested' END::text)
+        END), '{}'::jsonb)
+        FROM jsonb_each(p_value) AS c);
+END
+$body$;
+REVOKE ALL ON FUNCTION audit._redact_walk(text, jsonb, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._redact_walk(text, jsonb, text)
+    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer;
+
+CREATE OR REPLACE FUNCTION audit.audit_redact(p_table text, p_changes jsonb)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT audit._redact_walk(p_table, p_changes, 'root'::text)
+$body$;
+
+-- Conteúdo do evento para a deduplicação: os campos do produtor, sem chain_seq/prev_hash/hash/created_at
+-- (nem os derivados chain_key/retention_class/db_user); changes mascarado (idempotente).
+CREATE FUNCTION audit._event_content_hash(e audit.audit_events)
+RETURNS bytea
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT sha256(convert_to(jsonb_build_array(
+        e.id, e.tenant_id, e.store_id, e.actor_type, e.actor_id, e.actor_label, e.impersonator_id,
+        e.action, e.target_type, e.target_id, e.outcome, e.reason,
+        audit.audit_redact(e.target_type::text, e.changes), e.request_id,
+        e.ip::text, encode(e.user_agent_hash, 'hex'),
+        (extract(epoch FROM e.occurred_at) * 1000000)::bigint
+    )::text, 'UTF8'))
+$body$;
+REVOKE ALL ON FUNCTION audit._event_content_hash(audit.audit_events) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit._event_content_hash(audit.audit_events) TO ptmarket_audit_writer;
+
+CREATE OR REPLACE FUNCTION audit._chain_insert(p_row audit.audit_events, p_dedupe boolean)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row     audit.audit_events := p_row;
+    v_content bytea;
+    v_found   bigint;
+    v_same    bigint;
+BEGIN
+    -- Quem está ligado (LOGIN), não o papel assumido: ignora o que vier em p_row.
+    v_row.db_user         := session_user;
+    -- Máscara em todos os caminhos (app, worker, db); idempotente.
+    v_row.changes         := audit.audit_redact(v_row.target_type::text, v_row.changes);
+    v_row.chain_key       := COALESCE(v_row.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid);
+    v_row.retention_class := audit.audit_retention_class(v_row.action::text, v_row.outcome::text);
+
+    INSERT INTO audit.audit_chain_heads (chain_key, retention_class, last_seq, last_hash)
+    VALUES (v_row.chain_key, v_row.retention_class, 0, decode(repeat('00', 32), 'hex'))
+    ON CONFLICT DO NOTHING;
+
+    SELECT h.last_seq + 1, h.last_hash INTO STRICT v_row.chain_seq, v_row.prev_hash
+    FROM audit.audit_chain_heads h
+    WHERE h.chain_key = v_row.chain_key
+      AND h.retention_class = v_row.retention_class
+    FOR UPDATE;
+
+    -- Reentrega (mesmo conteúdo) → NULL; id reutilizado com outro conteúdo → PTA03 (nunca em silêncio).
+    IF p_dedupe THEN
+        v_content := audit._event_content_hash(v_row);
+        SELECT count(*), count(*) FILTER (WHERE audit._event_content_hash(e) = v_content)
+          INTO v_found, v_same
+          FROM audit.audit_events e
+         WHERE e.id = v_row.id
+           AND e.created_at >= v_row.occurred_at - interval '1 day';
+        IF v_same > 0 THEN
+            RETURN NULL;
+        END IF;
+        IF v_found > 0 THEN
+            RAISE EXCEPTION '_chain_insert: id já gravado com conteúdo diferente'
+                USING ERRCODE = 'PTA03';
+        END IF;
+    END IF;
+
+    v_row.created_at  := clock_timestamp();
+    v_row.occurred_at := COALESCE(v_row.occurred_at, v_row.created_at);
+    v_row.id          := COALESCE(v_row.id, uuidv7());
+    v_row.hash        := audit._event_hash(v_row);
+
+    INSERT INTO audit.audit_events (
+        id, tenant_id, chain_key, store_id, actor_type, actor_id, actor_label, impersonator_id,
+        action, target_type, target_id, outcome, reason, changes, request_id, ip, user_agent_hash,
+        retention_class, occurred_at, created_at, chain_seq, prev_hash, hash, db_user
+    ) VALUES (
+        v_row.id, v_row.tenant_id, v_row.chain_key, v_row.store_id, v_row.actor_type, v_row.actor_id,
+        v_row.actor_label, v_row.impersonator_id, v_row.action, v_row.target_type, v_row.target_id,
+        v_row.outcome, v_row.reason, v_row.changes, v_row.request_id, v_row.ip, v_row.user_agent_hash,
+        v_row.retention_class, v_row.occurred_at, v_row.created_at, v_row.chain_seq, v_row.prev_hash,
+        v_row.hash, v_row.db_user
+    );
+
+    UPDATE audit.audit_chain_heads
+       SET last_seq = v_row.chain_seq, last_hash = v_row.hash
+     WHERE chain_key = v_row.chain_key
+       AND retention_class = v_row.retention_class;
+
+    IF v_row.actor_type = 'admin' OR v_row.impersonator_id IS NOT NULL THEN
+        INSERT INTO audit.audit_alerts (id, created_at, event_type, payload)
+        VALUES (
+            v_row.id, v_row.created_at, 'audit.superadmin_action',
+            to_jsonb(v_row) || jsonb_build_object(
+                'prev_hash', encode(v_row.prev_hash, 'hex'),
+                'hash', encode(v_row.hash, 'hex'),
+                'user_agent_hash', encode(v_row.user_agent_hash, 'hex'))
+        );
+    END IF;
+
+    RETURN v_row.id;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_append_event(p_event jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+DECLARE
+    v_row      audit.audit_events;
+    v_bad      text;
+    v_key      text;
+    v_occurred text;
+    v_ua       text;
+    v_lock     text;
+    v_ok       boolean;
+BEGIN
+    IF p_event IS NULL OR jsonb_typeof(p_event) <> 'object' THEN
+        RAISE EXCEPTION 'audit_append_event: o evento tem de ser um objeto JSON'
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM jsonb_object_keys(p_event) AS k
+    WHERE k <> ALL (ARRAY[
+        'id', 'tenant_id', 'store_id', 'actor_type', 'actor_id', 'actor_label', 'impersonator_id',
+        'action', 'target_type', 'target_id', 'outcome', 'reason', 'changes', 'request_id', 'ip',
+        'user_agent_hash', 'occurred_at']);
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: chave(s) desconhecida(s): %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM unnest(ARRAY['id', 'actor_type', 'action', 'outcome', 'request_id', 'occurred_at']) AS k
+    WHERE jsonb_typeof(p_event -> k) IS DISTINCT FROM 'string';
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: campo(s) obrigatório(s) em falta ou não texto: %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    SELECT string_agg(k, ', ' ORDER BY k) INTO v_bad
+    FROM unnest(ARRAY[
+        'tenant_id', 'store_id', 'actor_id', 'actor_label', 'impersonator_id', 'target_type',
+        'target_id', 'reason', 'ip', 'user_agent_hash']) AS k
+    WHERE jsonb_typeof(p_event -> k) NOT IN ('string', 'null');
+    IF jsonb_typeof(p_event -> 'changes') NOT IN ('object', 'null') THEN
+        v_bad := concat_ws(', ', v_bad, 'changes');
+    END IF;
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'audit_append_event: campo(s) com tipo errado: %', v_bad
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    -- Conversões: qualquer erro de dados (22xxx) passa a PTA02 com a chave e o SQLSTATE, nunca o SQLERRM
+    -- (os erros de conversão citam o valor, que pode ser pessoal).
+    BEGIN
+        v_key := 'id';              v_row.id              := (p_event ->> 'id')::uuid;
+        v_key := 'tenant_id';       v_row.tenant_id       := (p_event ->> 'tenant_id')::uuid;
+        v_key := 'store_id';        v_row.store_id        := (p_event ->> 'store_id')::uuid;
+        v_key := 'actor_type';      v_row.actor_type      := p_event ->> 'actor_type';
+        v_key := 'actor_id';        v_row.actor_id        := (p_event ->> 'actor_id')::uuid;
+        v_key := 'actor_label';     v_row.actor_label     := p_event ->> 'actor_label';
+        v_key := 'impersonator_id'; v_row.impersonator_id := (p_event ->> 'impersonator_id')::uuid;
+        v_key := 'action';          v_row.action          := p_event ->> 'action';
+        v_key := 'target_type';     v_row.target_type     := p_event ->> 'target_type';
+        v_key := 'target_id';       v_row.target_id       := p_event ->> 'target_id';
+        v_key := 'outcome';         v_row.outcome         := p_event ->> 'outcome';
+        v_key := 'reason';          v_row.reason          := p_event ->> 'reason';
+        v_key := 'changes';         v_row.changes         := CASE WHEN jsonb_typeof(p_event -> 'changes') = 'object'
+                                                                  THEN p_event -> 'changes' END;
+        v_key := 'request_id';      v_row.request_id      := (p_event ->> 'request_id')::uuid;
+        v_key := 'ip';              v_row.ip              := (p_event ->> 'ip')::inet;
+
+        v_key := 'user_agent_hash';
+        v_ua := p_event ->> 'user_agent_hash';
+        IF v_ua IS NOT NULL THEN
+            IF v_ua !~ '^([0-9a-fA-F]{2})+$' THEN
+                RAISE EXCEPTION 'user_agent_hash não é hexadecimal' USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+            v_row.user_agent_hash := decode(lower(v_ua), 'hex');
+        END IF;
+
+        v_key := 'occurred_at';
+        v_occurred := p_event ->> 'occurred_at';
+        IF v_occurred !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})$' THEN
+            RAISE EXCEPTION 'occurred_at não é RFC 3339' USING ERRCODE = 'invalid_datetime_format';
+        END IF;
+        v_row.occurred_at := v_occurred::timestamptz;
+    EXCEPTION WHEN data_exception THEN
+        RAISE EXCEPTION 'audit_append_event: valor inválido no contrato (chave %, SQLSTATE %)', v_key, SQLSTATE
+            USING ERRCODE = 'PTA02';
+    END;
+
+    IF uuid_extract_version(v_row.id) IS DISTINCT FROM 7 THEN
+        RAISE EXCEPTION 'audit_append_event: id tem de ser uuidv7' USING ERRCODE = 'PTA02';
+    END IF;
+    -- 'db' é exclusivo do trigger genérico (mutação na própria BD); nunca vem do stream.
+    IF v_row.actor_type NOT IN ('customer', 'merchant', 'municipal', 'admin', 'api_key', 'anonymous', 'system') THEN
+        RAISE EXCEPTION 'audit_append_event: actor_type inválido' USING ERRCODE = 'PTA02';
+    END IF;
+    IF v_row.outcome NOT IN ('success', 'denied', 'error') THEN
+        RAISE EXCEPTION 'audit_append_event: outcome inválido' USING ERRCODE = 'PTA02';
+    END IF;
+    IF char_length(v_row.action) NOT BETWEEN 1 AND 96 THEN
+        RAISE EXCEPTION 'audit_append_event: action vazia ou com mais de 96 caracteres' USING ERRCODE = 'PTA02';
+    END IF;
+    IF char_length(v_row.target_type) > 64 THEN
+        RAISE EXCEPTION 'audit_append_event: target_type com mais de 64 caracteres' USING ERRCODE = 'PTA02';
+    END IF;
+    IF v_row.occurred_at > now() + interval '5 minutes' OR v_row.occurred_at < now() - interval '7 days' THEN
+        RAISE EXCEPTION 'audit_append_event: occurred_at fora de [now() - 7 dias, now() + 5 min]'
+            USING ERRCODE = 'PTA02';
+    END IF;
+
+    -- lock_timeout 2s só durante a escrita (como audit_append). No corpo e não em SET da função: o efeito é o
+    -- mesmo (repõe-se no fim; num erro a (sub)transação desfaz o set_config local).
+    v_lock := current_setting('lock_timeout');
+    PERFORM set_config('lock_timeout', '2s', true);
+    -- Cadeia, hash, máscara, idempotência (mesmo conteúdo ⇒ NULL; outro ⇒ PTA03) e alerta: _chain_insert.
+    v_ok := audit._chain_insert(v_row, true) IS NOT NULL;
+    PERFORM set_config('lock_timeout', v_lock, true);
+    RETURN v_ok;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION audit.audit_verify_chain(p_chain_key uuid, p_class text, p_from timestamptz, p_to timestamptz)
+RETURNS TABLE (broken_id uuid, broken_seq bigint, problem text)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $body$
+#variable_conflict use_column
+DECLARE
+    v_zero bytea := decode(repeat('00', 32), 'hex');
+BEGIN
+    IF p_chain_key IS NULL OR p_from IS NULL OR p_to IS NULL OR p_from >= p_to THEN
+        RAISE EXCEPTION 'audit_verify_chain: parâmetros obrigatórios e p_from < p_to'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_class IS NULL OR p_class NOT IN ('fiscal', 'standard', 'security') THEN
+        RAISE EXCEPTION 'audit_verify_chain: classe inválida' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Janela [p_from, p_to): hash, bad_genesis (seq 1 sem prev_hash a zeros), gap_before (a 1.ª linha não
+    -- continua a última linha anterior à janela, se existir), gap e link.
+    RETURN QUERY
+    WITH win AS (
+        SELECT e.id, e.chain_seq, e.prev_hash, e.hash,
+               audit._event_hash(e) AS recomputed,
+               lag(e.hash) OVER w      AS prior_hash,
+               lag(e.chain_seq) OVER w AS prior_seq,
+               row_number() OVER w     AS rn
+        FROM audit.audit_events e
+        WHERE e.chain_key = p_chain_key
+          AND e.retention_class = p_class
+          AND e.created_at >= p_from
+          AND e.created_at < p_to
+        WINDOW w AS (ORDER BY e.chain_seq, e.created_at, e.id)
+    ), anchor AS (
+        SELECT b.chain_seq AS anchor_seq, b.hash AS anchor_hash
+        FROM audit.audit_events b
+        WHERE b.chain_key = p_chain_key
+          AND b.retention_class = p_class
+          AND b.created_at < p_from
+        ORDER BY b.chain_seq DESC, b.created_at DESC, b.id DESC
+        LIMIT 1
+    )
+    SELECT x.id, x.chain_seq, q.problem
+    FROM win x
+    LEFT JOIN anchor a ON x.rn = 1
+    CROSS JOIN LATERAL (VALUES
+        (1, 'hash'::text,        x.hash IS DISTINCT FROM x.recomputed),
+        (2, 'bad_genesis'::text, x.chain_seq = 1 AND x.prev_hash IS DISTINCT FROM v_zero),
+        (3, 'gap_before'::text,  x.rn = 1 AND a.anchor_seq IS NOT NULL
+                                 AND (x.chain_seq <> a.anchor_seq + 1
+                                      OR x.prev_hash IS DISTINCT FROM a.anchor_hash)),
+        (4, 'gap'::text,         x.prior_seq IS NOT NULL AND x.chain_seq <> x.prior_seq + 1),
+        (5, 'link'::text,        x.prior_seq IS NOT NULL AND x.chain_seq = x.prior_seq + 1
+                                 AND x.prev_hash IS DISTINCT FROM x.prior_hash)
+    ) AS q(ord, problem, broken)
+    WHERE q.broken
+    ORDER BY x.chain_seq, q.ord;
+
+    -- Janela até ao presente: a última linha da cadeia tem de ser a cabeça (corte no fim da cadeia).
+    -- Cabeça (0, zeros) sem linhas = coerente.
+    IF p_to > now() THEN
+        RETURN QUERY
+        SELECT l.id, COALESCE(l.chain_seq, h.last_seq), 'head_mismatch'::text
+        FROM (SELECT 1) AS one(x)
+        LEFT JOIN audit.audit_chain_heads h
+               ON h.chain_key = p_chain_key AND h.retention_class = p_class
+        LEFT JOIN LATERAL (
+            SELECT e.id, e.chain_seq, e.hash
+            FROM audit.audit_events e
+            WHERE e.chain_key = p_chain_key
+              AND e.retention_class = p_class
+            ORDER BY e.chain_seq DESC, e.created_at DESC, e.id DESC
+            LIMIT 1
+        ) l ON true
+        WHERE (h.chain_key IS NOT NULL OR l.id IS NOT NULL)
+          AND (h.chain_key IS NULL
+               OR h.last_seq IS DISTINCT FROM COALESCE(l.chain_seq, 0)
+               OR h.last_hash IS DISTINCT FROM COALESCE(l.hash, v_zero));
+    END IF;
+END
+$body$;
+$chg_0012$);
 
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$

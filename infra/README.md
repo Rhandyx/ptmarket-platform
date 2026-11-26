@@ -75,6 +75,26 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   `db_label_mismatch` e `db_user_missing`. Em dev/CI os testes ligam como migrator e fazem `SET ROLE
   ptmarket_app`: esses eventos SÃO assinalados (o verify corre só na BD real). `audit_append` recusa
   `app.actor_type = 'db'` e qualquer valor fora da lista (PTA01): `'db'` só nasce em `audit_append_db`.
+- **Endurecimento (0012, alteração aprovada `0012_hardening`):**
+  - Máscara recursiva em **todos** os caminhos (`_chain_insert` aplica `audit_redact` a app, worker e db;
+    idempotente): segredos (`password|secret|token|credential|passkey|split_key|api_?key|private|otp|totp|cvv|cvc|
+    pan|authorization|_enc$|_hash$`) → `"[redacted]"`; PII em qualquer tabela (`email|phone|telefone|nif|nipc|
+    vat_number|name$|full_name|first_name|last_name|address|morada|street|postal|zip|birth|ip$`) → `"[pii]"`;
+    IBAN → 4 últimos. Em claro: chaves `*_id` e `name`/`legal_name` de `tenants`, `categories` e `products` ao
+    nível das colunas (raiz de `changes` ou `changes.before/after`; aninhado volta a ser PII). O valor inteiro de
+    uma chave mascarada é substituído (ex.: `address: {...}` → `"[pii]"`).
+  - Dedupe do worker: id repetido com o mesmo conteúdo (`audit._event_content_hash`: campos do produtor, sem
+    `chain_seq/prev_hash/hash/created_at`) → `false`; com conteúdo diferente (incluindo `occurred_at`) →
+    **SQLSTATE `PTA03`** e nada gravado (o worker trata-o como veneno + alerta).
+  - `audit_append_event`: erros de conversão → PTA02 com a chave e o SQLSTATE, nunca o valor; `lock_timeout` 2s
+    durante a escrita (no corpo, reposto no fim).
+  - `audit_verify_chain` (mesma assinatura) assinala também `bad_genesis` (seq 1 sem `prev_hash` a zeros),
+    `gap_before` (a 1.ª linha da janela não continua a última anterior à janela, se existir) e `head_mismatch`
+    (com `p_to > now()`: última linha da cadeia ≠ `audit_chain_heads`).
+  - Defaults de `app.*` fora da transação (`ALTER DATABASE/ROLE … SET app.actor_type`) satisfazem o PTA01 em
+    todas as sessões. O `pg_settings` não mostra GUCs personalizados (passo 0, provado no PG 18), por isso a BD
+    não os recusa na escrita: `audit.audit_guc_defaults()` (worker) lista-os de `pg_db_role_setting`; o verify
+    do cartão 09 alerta se devolver linhas.
 - Chamadas entre funções de `audit.*` passam argumentos com o tipo exato da assinatura (ex.: `::text`), para
   que uma sobrecarga plantada com o CREATE nunca ganhe a resolução.
 - Regra: nenhuma função SECURITY DEFINER de `audit.*` lê ou escreve objetos cujo dono tenha LOGIN (o dono

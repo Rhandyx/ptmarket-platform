@@ -55,7 +55,7 @@ RETURNS jsonb LANGUAGE sql AS $$
         'id', p_id, 'tenant_id', p_tenant, 'store_id', NULL, 'actor_type', p_actor_type,
         'actor_id', '00000000-0000-7000-8000-00000000b0a1', 'actor_label', NULL, 'impersonator_id', NULL,
         'action', p_action, 'target_type', 'store', 'target_id', 's1', 'outcome', p_outcome,
-        'reason', NULL, 'changes', jsonb_build_object('name', jsonb_build_array('x', 'y')),
+        'reason', NULL, 'changes', jsonb_build_object('status', jsonb_build_array('x', 'y')),
         'request_id', '00000000-0000-7000-8000-00000000b0f1', 'ip', '198.51.100.9',
         'user_agent_hash', 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
         'occurred_at', to_char((now() - p_age) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
@@ -170,11 +170,11 @@ SELECT pg_temp.expect_value(
     format($q$SELECT audit.audit_append_event(pg_temp.ev(%L, '00000000-0000-7000-8000-00000000a00a', 'merchant', 'stores.update'))::int$q$,
         :'ev1'),
     0, 'mesmo id ⇒ false');
-SELECT pg_temp.expect_value(
+SELECT pg_temp.expect_error(
     format($q$SELECT audit.audit_append_event(pg_temp.ev(%L, '00000000-0000-7000-8000-00000000a00a', 'merchant', 'stores.update',
                                                    'success', interval '2 days'))::int$q$,
         :'ev1'),
-    0, 'mesmo id com occurred_at mais antigo (dentro da janela) ⇒ false');
+    'PTA03', 'mesmo id com occurred_at diferente (conteúdo diferente) ⇒ PTA03 (cartão 03c)');
 RESET ROLE;
 
 -- audit_append (app, contexto do tenant A) na mesma cadeia: continua a sequência.
@@ -224,7 +224,7 @@ SELECT pg_temp.expect_value(
     format($q$SELECT count(*) FROM audit.audit_events WHERE id = %L
        AND actor_type = 'merchant' AND actor_id = '00000000-0000-7000-8000-00000000b0a1'
        AND request_id = '00000000-0000-7000-8000-00000000b0f1' AND host(ip) = '198.51.100.9'
-       AND octet_length(user_agent_hash) = 32 AND changes = '{"name":["x","y"]}'
+       AND octet_length(user_agent_hash) = 32 AND changes = '{"status":["x","y"]}'
        AND occurred_at < created_at AND tenant_id = chain_key$q$, :'ev1'),
     1, 'ator, pedido, IP, UA, changes e occurred_at vêm do JSON');
 SELECT pg_temp.expect_value(
