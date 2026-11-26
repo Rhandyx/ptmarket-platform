@@ -10,6 +10,10 @@
 #     membro deles (nem o migrator, nem com ADMIN): quem tiver membership é cortado aqui.
 #   ptmarket_app / _worker / _price_writer: com os atributos de 0001/0007 se ainda não existirem (no dev o
 #     01-roles.sh já criou app/worker com LOGIN); o migrator recebe SET (sem INHERIT, sem ADMIN).
+#   ptmarket_bootstrap (cartão 02/20b): NOLOGIN, sem SUPERUSER/BYPASSRLS/CREATEDB/CREATEROLE/REPLICATION; dono da
+#     DEFINER public.identity_create_superadmin (0024). Os seus INSERT passam pela L1 (INVOKER) → precisa de USAGE em
+#     audit e de EXECUTE em audit.audit_append_db (allowlist de grants da audit_seal; ator 'db' + session_user).
+#     O migrator recebe SET (sem INHERIT, sem ADMIN), para o ALTER FUNCTION … OWNER TO da 0024.
 # Schemas (por BD):
 #   audit: dono ptmarket_audit_owner. USAGE para app, worker, price_writer e writer. O migrator tem USAGE + CREATE
 #     (cria objetos novos nas migrations; CREATE não dá poder sobre objetos selados, que não são dele).
@@ -49,6 +53,18 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- ptmarket_bootstrap (0024): só com os atributos mínimos; outros atributos = recusa (não os corrige em silêncio).
+    IF to_regrole('ptmarket_bootstrap') IS NULL THEN
+        CREATE ROLE ptmarket_bootstrap NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ptmarket_bootstrap'
+               AND (rolsuper OR rolbypassrls OR rolcanlogin OR rolcreatedb OR rolcreaterole OR rolreplication)) THEN
+        RAISE EXCEPTION '03-audit-bootstrap: ptmarket_bootstrap tem LOGIN, SUPERUSER, BYPASSRLS, CREATEDB, CREATEROLE ou REPLICATION; recusado';
+    END IF;
+    IF NOT pg_has_role('ptmarket_migrator', 'ptmarket_bootstrap', 'SET') THEN
+        GRANT ptmarket_bootstrap TO ptmarket_migrator WITH INHERIT FALSE, SET TRUE;
+    END IF;
+
     FOREACH r IN ARRAY ARRAY['ptmarket_audit_owner', 'ptmarket_audit_writer', 'ptmarket_audit_retention'] LOOP
         IF to_regrole(r) IS NULL THEN
             EXECUTE format(
@@ -77,8 +93,18 @@ CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION ptmarket_audit_owner;
 ALTER SCHEMA audit OWNER TO ptmarket_audit_owner;
 REVOKE ALL ON SCHEMA audit FROM PUBLIC;
 GRANT USAGE ON SCHEMA audit
-    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer, ptmarket_migrator;
+    TO ptmarket_app, ptmarket_worker, ptmarket_price_writer, ptmarket_audit_writer, ptmarket_migrator,
+       ptmarket_bootstrap;
 GRANT CREATE ON SCHEMA audit TO ptmarket_migrator;
+-- ptmarket_bootstrap: EXECUTE em audit_append_db (allowlist de grants da audit_seal). Numa BD já migrada (≥ 0010) é
+-- dado já aqui; numa BD nova, cada audit_seal() das migrations volta a concedê-lo. A 0024 recusa correr sem ele.
+DO $$
+BEGIN
+    IF to_regprocedure('audit.audit_append_db(text,text,text,jsonb,uuid,uuid)') IS NOT NULL THEN
+        GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_bootstrap;
+    END IF;
+END
+$$;
 
 CREATE SCHEMA IF NOT EXISTS audit_admin AUTHORIZATION postgres;
 ALTER SCHEMA audit_admin OWNER TO postgres;
@@ -98,7 +124,9 @@ GRANT USAGE ON SCHEMA audit_admin TO ptmarket_migrator;
 --   ALLOWLIST DE GRANTS: lista fixa (assinatura, papel) que a selagem volta a conceder e aceita na verificação;
 --     qualquer outro privilégio de quem migra em audit.* = RAISE. Hoje: EXECUTE do migrator em
 --     audit.audit_append_db (as suas mutações ficam como 'db' com o session_user; app/worker/price_writer sem
---     EXECUTE) e em audit.audit_row_trigger (só para CREATE TRIGGER em tabelas novas; não se chama diretamente). O migrator mantém USAGE + CREATE no schema: pode criar
+--     EXECUTE) e em audit.audit_row_trigger (só para CREATE TRIGGER em tabelas novas; não se chama diretamente); EXECUTE de
+--     ptmarket_bootstrap (NOLOGIN) em audit.audit_append_db (L1 dos INSERT da DEFINER da 0024, ator 'db' +
+--     session_user). O migrator mantém USAGE + CREATE no schema: pode criar
 --     objetos novos, mas depois da selagem não são dele e não lhes mexe.
 --   search_path = pg_catalog, pg_temp e catálogos qualificados: com o pg_temp fora da lista, o PostgreSQL
 --     pesquisa-o PRIMEIRO para relações e tipos, e quem migra (CREATE TEMP TABLE pg_proc/pg_class/...) faria a
@@ -155,11 +183,13 @@ DECLARE
     -- ALLOWLIST DE GRANTS: EXECUTE (assinatura regprocedure, papel) mantido pela selagem.
     v_grant_sig   text[] := ARRAY[
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',
-        'audit.audit_row_trigger()'
+        'audit.audit_row_trigger()',
+        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)'  -- 0024: L1 dos INSERT da DEFINER de bootstrap
     ];
     v_grant_role  text[] := ARRAY[
         'ptmarket_migrator',
-        'ptmarket_migrator'
+        'ptmarket_migrator',
+        'ptmarket_bootstrap'
     ];
     v_callers oid[];
     v_c       oid;

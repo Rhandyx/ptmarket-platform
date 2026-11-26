@@ -202,6 +202,23 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   (erro "is not unique" → as escritas da caixa negra falham, fechado; não forja nada). Fica no pgaudit (DDL) e a
   `audit_seal()` seguinte recusa-a. O resto fica no pgaudit.
 
+## Criar o 1.º super_admin (migration 0024, cartão 02/20b)
+Sem DDL, sem BYPASSRLS e sem desligar o FORCE RLS: uma chamada atómica a
+`public.identity_create_superadmin(id uuid, email text, nome text, phc text, totp_secret_enc text, recovery_hashes bytea[])`
+(DEFINER, dono `ptmarket_bootstrap`), que cria a conta ativa com TOTP ligado, o papel `super_admin` global e os 10
+códigos de recuperação. Só `ptmarket_operator` tem EXECUTE. O CLI liga como migrator e faz, numa transação:
+`BEGIN; SET LOCAL ROLE ptmarket_operator; SELECT public.identity_create_superadmin($1, $2, $3, $4, $5, $6); COMMIT;`
+- Argumentos: email já em minúsculas e sem espaços nas pontas (3–255, com `@`); nome 1–255; PHC `$argon2id$…`;
+  segredo `v1:<kid>:…`; exatamente 10 hashes HMAC de 32 bytes, distintos. Erro de validação = 22023; email
+  (sem distinção de maiúsculas) ou id já existentes = 23505. As mensagens nunca ecoam os valores.
+- Os eventos L1 ficam com ator `db` e `actor_label` = o login que ligou (o `SET ROLE` não o muda).
+- Pré-requisito: o bootstrap da caixa negra cria `ptmarket_bootstrap` (com USAGE em `audit` e EXECUTE em
+  `audit.audit_append_db`, na allowlist de grants da `audit_seal`). Num cluster existente: reaplicar o bootstrap
+  (comando da secção anterior) **antes** da 0024; sem isso a 0024 recusa-se a correr.
+- Produção: o owner pode criar um login próprio, membro de `ptmarket_operator` (`WITH INHERIT FALSE, SET TRUE`),
+  depois de aplicada a 0024. Em dev, não acrescentar membros: as BDs do `sqlx::test` voltam a correr a 0024 e
+  a guarda de memberships recusa-os.
+
 ## pgaudit (spec 13 §0 L3)
 Imagem própria (`postgres/Dockerfile`): `postgres:18.1` + `postgresql-18-pgaudit` com versão fixada.
 - Global: `pgaudit.log='ddl,role'` (inclui `ptmarket_app`/`ptmarket_worker`; o resto é a L1, triggers),
