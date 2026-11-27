@@ -21,8 +21,12 @@ export function createServerApi(incoming: HeaderSource, opts: ServerApiOptions =
   const token = opts.internalToken ?? process.env.INTERNAL_PROXY_TOKEN;
   if (!baseUrl) throw new Error("API_INTERNAL_URL não configurada");
   if (!token) throw new Error("INTERNAL_PROXY_TOKEN não configurado");
-  const host = incoming.get("host");
+  const host = incoming.get("host")?.trim().toLowerCase();
   if (!host) throw new Error("Pedido sem Host");
+  // Só `nome[:porta]` ou `[ipv6][:porta]`: nada mais segue para o backend como X-Forwarded-Host.
+  if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\.?|\[[0-9a-f:.]+\])(?::\d{1,5})?$/.test(host)) {
+    throw new Error("Host inválido");
+  }
 
   const headers: Record<string, string> = {
     "X-Forwarded-Host": host,

@@ -16,6 +16,33 @@ describe("cabeçalhos de segurança em /", () => {
     expect(csp).toContain("frame-ancestors 'none'");
   });
 
+  it("Turnstile: só frame-src https://challenges.cloudflare.com; script-src sem hosts nem unsafe-inline", () => {
+    const csp = h.get("content-security-policy") ?? "";
+    const directives = Object.fromEntries(
+      csp.split(";").map((d) => {
+        const [name = "", ...values] = d.trim().split(/\s+/);
+        return [name, values.join(" ")];
+      }),
+    );
+    expect(directives["frame-src"]).toBe("https://challenges.cloudflare.com");
+    expect(directives["script-src"]).toMatch(/^'self' 'nonce-[^']+' 'strict-dynamic'$/);
+    expect(csp).not.toContain("unsafe-inline");
+    expect(Object.keys(directives).sort()).toEqual(
+      [
+        "default-src",
+        "script-src",
+        "style-src",
+        "img-src",
+        "font-src",
+        "frame-src",
+        "object-src",
+        "base-uri",
+        "form-action",
+        "frame-ancestors",
+      ].sort(),
+    );
+  });
+
   it("HSTS sem includeSubDomains nem preload", () => {
     const hsts = h.get("strict-transport-security") ?? "";
     expect(hsts).toBe("max-age=31536000");

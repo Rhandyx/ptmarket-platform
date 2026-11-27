@@ -8,6 +8,8 @@ export function buildCsp(nonce: string, isDev: boolean): string {
     `style-src 'self' 'nonce-${nonce}'`,
     "img-src 'self' blob: data:",
     "font-src 'self'",
+    // Cloudflare Turnstile (só no login de staff quando a API pede captcha; o script entra pelo nonce).
+    "frame-src https://challenges.cloudflare.com",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
