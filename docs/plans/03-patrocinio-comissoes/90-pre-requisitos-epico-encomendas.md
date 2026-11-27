@@ -4,7 +4,7 @@
 
 ## O que o épico 03 entrega e os próximos usam
 - `payments::commission::effective_commission_bps(tx, store_id, at, store_monthly_gmv_cents, subtotal)` → `CommissionSnapshot` (cartão 18), com os campos a congelar. O checkout chama-a uma vez por `sub_order`, dentro da transação do checkout, e grava o resultado tal como vem.
-- `money::effective_commission` e `money::monthly_fee_for` (cartão 12): toda a aritmética e todo o arredondamento. Nenhuma conta de comissão fora de `money`.
+- `money::effective_commission`, `money::monthly_fee_for` e `money::monthly_fee_due` (cartão 12): toda a aritmética e todo o arredondamento. Nenhuma conta de comissão fora de `money`.
 - Isolamento por loja na BD (cartões 08b e 14): GUC `app.store_id` + policies RESTRICTIVE. Kinds críticos e eventos de patrocínio (cartões 11, 19, 20).
 
 ## Colunas do snapshot em `sub_orders` (congelado no checkout, nunca recalculado)
@@ -26,7 +26,7 @@
 9. **Art. 53.º e IVA:** a base da comissão é o PVP com IVA; numa loja em Art. 53.º (IVA 0%) a base é o mesmo subtotal. `platform_fee_cents` é sem IVA; o IVA de 23% do serviço é faturado pela Segjar na fatura mensal (pendente de confirmação do contabilista).
 
 ## Para o épico de pagamentos
-- Mensalidade = `money::monthly_fee_for(tiers, volume do mês fechado)`; cobrança recorrente, fatura mensal e incumprimento ficam lá.
+- Mensalidade a cobrar = `money::monthly_fee_due(tiers, volume do mês fechado, has_active_sponsorship)`: 0 € com patrocínio `active`, mesmo com `tiered_subscription` guardado (spec 14 §3, 27/11). **A decidir nesse épico:** em que momento do mês se avalia `has_active_sponsorship` (patrocínio que começa ou acaba a meio do mês). Cobrança recorrente, fatura mensal e incumprimento ficam lá.
 - Edição de `platform_settings`, `billing_plan_tiers` e `stores.custom_commission_bps` pelo super_admin: função `identity_*` com 2FA + evento `store.commission_override` (o kind crítico já existe).
 
 ## Para o épico de onboarding (spec 05)

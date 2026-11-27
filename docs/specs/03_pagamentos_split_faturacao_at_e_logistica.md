@@ -11,13 +11,15 @@
 | Custo / Serviço | Quem Suporta? | Como Funciona na Prática |
 | :--- | :--- | :--- |
 | **Taxas Eupago (MB WAY / Multibanco) ou Stripe Connect** | **O Lojista** (deduzido automaticamente no *split*). | O gateway desconta a taxa transacional da parcela do comerciante antes de liquidar o valor líquido no IBAN da loja. Custo **0€** para a Segjar. |
-| **Comissão da Plataforma (`commission_bps`)** | **Loja patrocinada: 0%** (em qualquer canal). **Loja independente: plano de faturação** (`commission_payg` 8% / 6% acima de 20.000 €/mês, ou `tiered_subscription`). | Calculada no Rust por `sub_order`, por precedência: patrocínio ativo → exceção `custom_commission_bps` → plano (ver spec 14 §3 e §4). Independe do domínio da compra. Escalões em `billing_plan_tiers`, nunca hardcoded. `sponsored_discount_cents` regista a poupança face à referência. A cobrança das mensalidades fica para o épico de pagamentos. |
+| **Comissão da Plataforma (`commission_bps`)** | **Loja patrocinada: 0%** (em qualquer canal). **Loja independente: plano de faturação** (`commission_payg` 8% / 6% acima de 20.000 €/mês, ou `tiered_subscription`: só mensalidade fixa de 5 € a 500 €/mês por escalão de volume, 0% de comissão). | Calculada no Rust por `sub_order`, por precedência: patrocínio ativo → exceção `custom_commission_bps` → plano (ver spec 14 §3 e §4). Independe do domínio da compra. Escalões em `billing_plan_tiers`, nunca hardcoded. `sponsored_discount_cents` regista a poupança face à referência. A cobrança das mensalidades fica para o épico de pagamentos. |
 | **Software de Faturação AT (Moloni, InvoiceXpress, Vendus)** | **O Lojista** (*BYOK — Bring Your Own Key*). | O lojista já paga o seu programa de faturação na loja física (API incluída). Só insere a chave API no painel. Custo **0€** para a Segjar. |
 | **Portes e Guias de Transporte (CTT, DPD, Sendcloud)** | **Comprador** (no checkout) ou **Lojista**. | A etiqueta é gerada via API usando o contrato do próprio lojista ou conta agregadora. |
 | **Emails Transacionais (AWS SES / Resend)** | **Segjar Soluções** (coberto pela avença anual). | Custo residual (~5€/mês para 50.000 emails de encomendas e faturas PDF). |
 
 
 **Nota (spec 14 §3):** `sub_orders` guarda `sponsored_discount_cents = round(subtotal × reference_bps) − platform_fee_cents` (nunca negativo; 0 sem patrocínio). **IVA sobre a comissão: pendente de contabilista**; por defeito `platform_fee_cents` é sem IVA e o IVA de 23% do serviço é faturado pela Segjar na fatura mensal ao lojista.
+
+**Regra de dinheiro (todo o cálculo financeiro):** BD e APIs externas usam sempre cêntimos `BIGINT`/`i64`. Em Rust, comissões, `sponsored_discount_cents`, escalões marginais, IVA e rateios calculam-se em `rust_decimal::Decimal`, **nunca** `f32`/`f64`. A passagem de `Decimal` para cêntimos faz-se só pelo helper único `money::half_up` (`RoundingStrategy::MidpointAwayFromZero`, half-up comercial/AT); proibido chamar `.round_dp()`/`.round()` soltos (arredondamento bancário).
 
 ---
 

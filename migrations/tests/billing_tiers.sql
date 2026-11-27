@@ -1,4 +1,5 @@
--- Teste 0032 platform_settings + billing_plan_tiers: seed (1 + 2 + 5 linhas; continuidade só com inteiros), CHECKs,
+-- Teste 0032 + 0034 platform_settings + billing_plan_tiers: seed (1 + 2 + 7 linhas; tiered_subscription só mensalidade
+-- fixa, 0 bps em todos os escalões, mensalidade a crescer com o volume), CHECKs,
 -- sobreposição (23P01), constraint trigger diferido (buraco, sem escalão aberto, 1.º fora de 0, plano vazio → 23514
 -- no COMMIT; reorganização em vários comandos passa), RLS/grants (app só lê, sem tenant), caixa negra L1.
 -- Corre como o migrator (policy migrator_all). "Erro no COMMIT" = SET CONSTRAINTS … IMMEDIATE (mesmo disparo do
@@ -96,7 +97,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM platform_settings WHERE id AND base_commission_bps = 800 AND updated_by IS NULL$q$,
     1, 'platform_settings: uma linha, base 800 bps');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM billing_plan_tiers$q$, 7, 'billing_plan_tiers: 2 + 5 linhas');
+    $q$SELECT count(*) FROM billing_plan_tiers$q$, 9, 'billing_plan_tiers: 2 + 7 linhas');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM billing_plan_tiers b
        JOIN (VALUES ('commission_payg', 0::bigint, 2000000::bigint, 0::bigint, 800),
@@ -104,21 +105,29 @@ SELECT pg_temp.expect_count(
                     ('tiered_subscription', 0, 100000, 500, 0),
                     ('tiered_subscription', 100000, 500000, 1000, 0),
                     ('tiered_subscription', 500000, 1000000, 5000, 0),
-                    ('tiered_subscription', 1000000, 2000000, 5000, 800),
-                    ('tiered_subscription', 2000000, NULL, 85000, 600)) AS e(plan, f, t, fee, bps)
+                    ('tiered_subscription', 1000000, 2500000, 10000, 0),
+                    ('tiered_subscription', 2500000, 5000000, 17500, 0),
+                    ('tiered_subscription', 5000000, 10000000, 30000, 0),
+                    ('tiered_subscription', 10000000, NULL, 50000, 0)) AS e(plan, f, t, fee, bps)
          ON b.plan_code = e.plan AND b.gmv_from_cents = e.f AND b.gmv_to_cents IS NOT DISTINCT FROM e.t
         AND b.monthly_fee_cents = e.fee AND b.marginal_commission_bps = e.bps$q$,
-    7, 'seed com os valores da spec 14 §4');
--- Sem saltos: mensalidade do último = mensalidade do anterior + bps × largura ÷ 10000 (exato, só inteiros).
+    9, 'seed com os valores da spec 14 §4 (0034)');
+-- tiered_subscription (0034): 0% de comissão em todos os escalões; a mensalidade sobe estritamente com o volume.
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM billing_plan_tiers p
-       JOIN billing_plan_tiers n ON n.plan_code = p.plan_code AND n.gmv_from_cents = p.gmv_to_cents
-       WHERE p.plan_code = 'tiered_subscription' AND p.gmv_from_cents = 1000000 AND n.gmv_to_cents IS NULL
-         AND (p.marginal_commission_bps::bigint * (p.gmv_to_cents - p.gmv_from_cents)) % 10000 = 0
-         AND n.monthly_fee_cents
-             = p.monthly_fee_cents + p.marginal_commission_bps::bigint * (p.gmv_to_cents - p.gmv_from_cents) / 10000
-         AND n.monthly_fee_cents = 85000$q$,
-    1, 'continuidade: 85000 = 5000 + 800 bps × 1.000.000 (inteiros)');
+    $q$SELECT count(*) FROM billing_plan_tiers
+       WHERE plan_code = 'tiered_subscription' AND marginal_commission_bps <> 0$q$,
+    0, 'tiered_subscription: 0 bps em todos os escalões');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM (
+         SELECT monthly_fee_cents,
+                lag(monthly_fee_cents) OVER (ORDER BY gmv_from_cents) AS prev_fee
+           FROM billing_plan_tiers WHERE plan_code = 'tiered_subscription') AS t
+       WHERE t.prev_fee IS NOT NULL AND t.monthly_fee_cents <= t.prev_fee$q$,
+    0, 'tiered_subscription: mensalidade estritamente crescente');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM billing_plan_tiers
+       WHERE plan_code = 'commission_payg' AND monthly_fee_cents <> 0$q$,
+    0, 'commission_payg: sem mensalidade (inalterado)');
 
 -- ---------------------------------------------------------------------------
 -- 2. CHECKs e sobreposição (imediatos).
@@ -191,7 +200,7 @@ SELECT pg_temp.expect_deferred(
        WHERE plan_code = 'commission_payg' AND gmv_from_cents = 0$q$,
     'escalão que não fecha no from do seguinte → 23514 no COMMIT');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM billing_plan_tiers$q$, 7, 'os casos recusados não deixaram alterações');
+    $q$SELECT count(*) FROM billing_plan_tiers$q$, 9, 'os casos recusados não deixaram alterações');
 
 -- Reorganização válida em dois comandos (estado intermédio com buraco) passa no COMMIT.
 SAVEPOINT reorganiza;
@@ -244,7 +253,7 @@ SET ROLE ptmarket_app;
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM platform_settings WHERE base_commission_bps = 800$q$, 1, 'app lê platform_settings sem tenant');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM billing_plan_tiers$q$, 7, 'app lê os 7 escalões sem tenant');
+    $q$SELECT count(*) FROM billing_plan_tiers$q$, 9, 'app lê os 9 escalões sem tenant');
 SELECT pg_temp.expect_error(
     'INSERT INTO platform_settings DEFAULT VALUES', '42501', 'app não insere em platform_settings');
 SELECT pg_temp.expect_error(

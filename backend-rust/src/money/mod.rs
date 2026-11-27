@@ -19,11 +19,13 @@ use crate::error::{AppError, FieldError};
 pub mod commission;
 pub use commission::{
     CommissionInput, CommissionQuote, CommissionRule, PlanTier, effective_commission,
-    monthly_fee_for,
+    monthly_fee_due, monthly_fee_for,
 };
 
 #[cfg(test)]
 mod no_float;
+#[cfg(test)]
+mod no_loose_round;
 #[cfg(test)]
 mod tests;
 

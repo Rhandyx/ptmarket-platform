@@ -4,7 +4,7 @@
 > Mantido pelo supervisor (sessão principal, Opus). Secções recentes no topo. Máx. ~40 linhas: o histórico está no git.
 
 ## 26/11/2026 — Épico 03 EM CURSO (`docs/plans/03-patrocinio-comissoes/`, ordem no `00-INDICE.md`)
-- **Feito e commitado:** 01, 02, 12, 03, 04, 13, 05, 06, 07 e par A (08 + 16). A BD de dev está na **0033** e tem o DICOFRE carregado (CAOP 2025, 3596 linhas).
+- **Feito e commitado:** 01, 02, 12, 03, 04, 13, 05, 06, 07 e par A (08 + 16). A BD de dev está na **0034** e tem o DICOFRE carregado (CAOP 2025, 3596 linhas).
 - **Próximo:** par B [08b → 14]: ler a **adenda no fim do cartão 08b** (índice de um `national_portal` por país; testes com dois nacionais passam a PT + ES). Depois 09 → 10 → 11 → 15 → 17 …; o Go 24 entra depois do 11.
 - **Como correu:** db-architect/rust-core em série no checkout principal, sem commits dos agentes; o supervisor revê, corre as suites, aplica em dev e commita. A auditoria pode correr em paralelo com o executor seguinte (só lê). Quando um executor pára no limite de turnos, retomá-lo com SendMessage. Corrigir uma migration aplicada em dev mas ainda não commitada: CREATE OR REPLACE em dev + `UPDATE _sqlx_migrations SET checksum = decode(sha384 do ficheiro,'hex')`.
 - **CAOP:** `infra/data/geo/dicofre_caop2025.csv` + `infra/scripts/caop-to-dicofre-csv.py` (README "Seed DICOFRE"). Os códigos DTMNFR de 2025 têm 18 freguesias com letras (ex.: `0302FA`): validar sempre com `length()` + FK, nunca com regex só de algarismos.
@@ -13,6 +13,8 @@
   - `stores` tem grants por coluna (0029): uma coluna nova precisa de `GRANT INSERT/UPDATE (col)` à app.
   - Tabelas de referência levam a policy `migrator_all`.
   - Rotas de dinheiro/IBAN usam `RequireStoreOwner` (2FA), nunca `RequireStoreRole`.
+  - Arredondamento: Decimal → cêntimos só via `money::half_up` (half-up); `money/no_loose_round.rs` chumba `round_dp`/`round`/`round_sf` soltos em todo o `src/` (27/11).
+  - 0034 (27/11, aplicada em dev): `tiered_subscription` = só mensalidade, 0 bps. Com patrocínio `active` o plano não entra: desconto contra a âncora (800 ou exceção) e mensalidade 0 (`money::monthly_fee_due`; a cobrança usa esta, nunca `monthly_fee_for`).
 - **Dívida:** a sessão absoluta de staff/sponsor_admin fica em 8 h, e não nas 12 h, por causa do CHECK `sessions_max_lifetime` da 0019 (precisa de uma migration nova). O `RequireTenantAdmin` dá 403 a quem não tem o papel e 404 a quem o tem noutro tenant (aceite). Mudar o `tenant_type` de um tenant que já tem lojas ou é canal não é revalidado (trigger em `tenants` futuro). `portal::with_badges` faz O(n·m) (≤100): trocar por HashMap.
 
 ## 26/11/2026 — Fase 2 CONCLUÍDA (épico `02-identidade-tenancy`, cartões em `docs/plans/02-identidade-tenancy/`)
@@ -50,7 +52,7 @@
 4. 429: o 1.º por chave/minuto é gravado de forma síncrona; os restantes contam-se e saem num resumo; Redis em baixo → 503 (vale também para o travão de Hosts fora da cache; a cache, mesmo expirada, continua a ser servida). Sessões: cliente 7 dias no máximo; staff 12 h/30 min; plataforma 8 h/15 min.
 6. **Modelo comercial (26/11, spec 14 canónica):**
    - **Canais e catálogo:** `tenants` = canais com domínio (`custom_domain` continua NOT NULL) e `sponsor_entities` = Câmara, Junta ou Associação (N:N com as lojas por `store_sponsorships`: pending/active/rejected/expired/revoked). Catálogo universal em `lojaportugal.pt`, sem opt-out (`shipping_scope` controla a entrega); `stores.tenant_id` = canal nacional do país.
-   - **Comissão:** patrocínio ativo → `MIN(commission_override_bps)` (0); senão `custom_commission_bps` (só super_admin); senão o plano (`commission_payg` 8%/6% marginal por defeito, ou `tiered_subscription`), com escalões em `billing_plan_tiers` (nunca hardcoded). `sponsored_discount_cents` = (referência 8% ou exceção) − fee, sobre o subtotal sem portes, half-up. A cobrança das mensalidades fica para o épico de pagamentos.
+   - **Comissão:** patrocínio ativo → `MIN(commission_override_bps)` (0); senão `custom_commission_bps` (só super_admin); senão o plano (`commission_payg` 8%/6% marginal por defeito, ou `tiered_subscription` = só mensalidade de 5 € a 500 €/mês, 0% de comissão: 0034, 27/11), com escalões em `billing_plan_tiers` (nunca hardcoded). `sponsored_discount_cents` = (referência 8% ou exceção) − fee, sobre o subtotal sem portes, half-up. A cobrança das mensalidades fica para o épico de pagamentos.
    - **Painel e preços:** painel único `admin.ptmarket.pt` (âmbito pelo papel; `sponsor_admin`). Preço único por tipo de entidade, com ou sem domínio próprio. O domínio white-label (3 templates + PWA) é uma opção incluída a 0 €, que se ativa no arranque ou mais tarde (correção do owner, 26/11). Os valores:
      - Câmara: 12.500–14.500 € no Ano 1 + 2.700–3.600 €/ano (o triénio CCP do doc 01 §3.2 mantém-se).
      - Junta/Associação: 750–1.500 € + 1.200–1.800 €/ano. Pode operar só com selos e página dedicada ou ativar o domínio.

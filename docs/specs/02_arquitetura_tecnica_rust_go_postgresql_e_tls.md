@@ -182,7 +182,7 @@ CREATE INDEX idx_stores_national ON stores(publish_to_national_portal) WHERE pub
 -- store_sponsorships   : N:N loja <-> entidade; status, valid_from/valid_to, commission_override_bps; EXCLUDE gist anti-sobreposição (§2)
 -- geo_dicofre          : referência CAOP/DGT (distrito DD, concelho DDCC, freguesia DDCCFF, caop_version), carga por seed (§5)
 -- platform_settings    : base_commission_bps (800), configurável, auditada (§3)
--- billing_plan_tiers   : escalões dos planos (plan_code, gmv_from/to_cents, monthly_fee_cents, marginal_commission_bps); só super_admin (§4)
+-- billing_plan_tiers   : escalões dos planos (plan_code, gmv_from/to_cents, monthly_fee_cents, marginal_commission_bps); só super_admin (§4). tiered_subscription = só mensalidade, 0 bps (0034; spec 14 §4)
 -- store_verifications  : NIF/documentos (kind, sha256, storage_key privado, status, delete_after) (§6)
 
 -- 4. PRODUTOS (Multi-idioma, Variantes JSONB, Perecíveis e Diretiva Omnibus)

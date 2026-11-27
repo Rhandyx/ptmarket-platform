@@ -6,7 +6,10 @@
 //! 2. Senão a **exceção negociada** `stores.custom_commission_bps`.
 //! 3. Senão o **plano**, com o volume mensal já acumulado da loja.
 //!
-//! `reference_bps = COALESCE(custom_commission_bps, base_commission_bps)`.
+//! `reference_bps = COALESCE(custom_commission_bps, base_commission_bps)`, também quando a loja patrocinada tem
+//! `billing_plan_code = tiered_subscription`: o plano só entra em vigor sem patrocínio ativo, e a poupança mede-se
+//! sempre contra a âncora `~~8%~~ 0%` (relatórios uniformes para as entidades patrocinadoras). Com patrocínio
+//! ativo também não há mensalidade ([`monthly_fee_due`]).
 //!
 //! Base de cálculo: subtotal dos produtos (PVP com IVA), **sem** portes.
 //! `platform_fee = half_up(subtotal × applied)`;
@@ -133,6 +136,22 @@ pub fn monthly_fee_for(tiers: &[PlanTier], gmv_month_total: Cents) -> Result<Cen
         .find(|t| t.gmv_from < gmv_month_total && t.gmv_to.is_none_or(|to| gmv_month_total <= to))
         .map(|t| t.monthly_fee)
         .ok_or(INVALID_TIERS)
+}
+
+/// Mensalidade **a cobrar** à loja no mês fechado: `0` com ≥ 1 patrocínio `active` (o plano de faturação só vale
+/// sem patrocínio, mesmo que `billing_plan_code` seja `tiered_subscription`); senão [`monthly_fee_for`]. Os
+/// escalões são validados sempre (fail closed). É esta a função que a cobrança usa; `monthly_fee_for` serve
+/// para mostrar a tabela do plano.
+pub fn monthly_fee_due(
+    tiers: &[PlanTier],
+    gmv_month_total: Cents,
+    has_active_sponsorship: bool,
+) -> Result<Cents, MoneyError> {
+    let fee = monthly_fee_for(tiers, gmv_month_total)?;
+    if has_active_sponsorship {
+        return Ok(Cents::ZERO);
+    }
+    Ok(fee)
 }
 
 /// Começa em 0, contíguos, cada escalão não vazio, só o último aberto, lista não vazia.

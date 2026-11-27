@@ -46,6 +46,7 @@ Precedência, avaliada no checkout para cada `sub_order`:
 3. Senão, **plano de faturação** da loja (`stores.billing_plan_code`, §4), com o volume mensal já acumulado.
 
 - **Comissão de referência** (a "âncora" `~~8%~~`): `reference_bps = COALESCE(stores.custom_commission_bps, platform_settings.base_commission_bps)`. A base é 800 bps e configurável, nunca hardcoded.
+- **Patrocínio ativo prevalece sobre o plano (decisão do owner, 27/11/2026):** o `billing_plan_code` (`commission_payg` ou `tiered_subscription`) só entra em vigor quando a loja **não** tem patrocínio `active`. Com ≥ 1 patrocínio ativo, a poupança (`sponsored_discount_cents`) mede-se sempre contra `reference_bps` acima, mesmo que o plano guardado seja `tiered_subscription` (coerência com a âncora `~~8%~~ 0%` e relatórios uniformes para as entidades patrocinadoras), e a loja **não paga mensalidade** (0 €): `money::monthly_fee_due`.
 - **Base de cálculo:** subtotal dos produtos (PVP com IVA), **sem portes**.
 - **Arredondamento:** half-up, só no módulo `money`.
 - **Fórmulas:**
@@ -64,14 +65,17 @@ Precedência, avaliada no checkout para cada `sub_order`:
 |---|---|---|---|
 | `commission_payg` (default; âncora `~~8%~~ 0%`) | 0 € – 20.000 € | 0 € | 8% (800 bps) |
 | | > 20.000 € | — | 6% (600 bps) só sobre o excedente |
-| `tiered_subscription` | ≤ 1.000 € | 5 € | 0% |
+| `tiered_subscription` (100% mensalidade fixa, 0% comissão) | ≤ 1.000 € | 5 € | 0% |
 | | 1.000,01 € – 5.000 € | 10 € | 0% |
 | | 5.000,01 € – 10.000 € | 50 € | 0% |
-| | 10.000,01 € – 20.000 € | 50 € | 8% só sobre o excedente acima de 10.000 € |
-| | > 20.000 € | 850 € | 6% só sobre o excedente acima de 20.000 € |
+| | 10.000,01 € – 25.000 € | 100 € | 0% |
+| | 25.000,01 € – 50.000 € | 175 € | 0% |
+| | 50.000,01 € – 100.000 € | 300 € | 0% |
+| | > 100.000 € | 500 € | 0% |
 
-- **Continuidade:** 850 € = 50 € + 8% × 10.000 €, por isso não há saltos.
-- **Mensalidade:** a do escalão atingido no fim do mês.
+- **`tiered_subscription` (decisão do owner, 27/11/2026; migration 0034):** só mensalidade fixa por escalão, 0% de comissão em todos, para proteger o retalho de margem curta (informática, eletrodomésticos). Há degraus de mensalidade entre escalões, por desenho. Loja neste plano sem patrocínio ativo: `platform_fee_cents = 0`, `applied_commission_bps = 0`, `sponsored_discount_cents = 0`.
+- **Cálculo marginal:** continua em `money::effective_commission` para o `commission_payg` (8% → 6%) e para qualquer plano híbrido (mensalidade + bps) que o `super_admin` configure.
+- **Mensalidade:** a do escalão atingido no fim do mês (`money::monthly_fee_for`). A cobrança usa `money::monthly_fee_due`: 0 € se a loja tiver patrocínio `active` (§3), mesmo com `billing_plan_code = tiered_subscription` (ex.: loja independente que passou a patrocinada).
 - **Épico 03:** modelo de dados (`billing_plan_code` com default `commission_payg`, `billing_plan_tiers`) e a função `effective_commission_bps(store, at, store_monthly_gmv_cents)`.
 - **Épico de pagamentos:** cobrança recorrente das mensalidades (Stripe Billing / fatura mensal da Segjar / incumprimento).
 

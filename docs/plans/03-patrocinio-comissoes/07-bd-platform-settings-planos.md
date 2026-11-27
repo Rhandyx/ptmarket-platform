@@ -22,6 +22,7 @@ CREATE TABLE billing_plan_tiers (id UUID PRIMARY KEY DEFAULT uuidv7(), plan_code
     EXCLUDE USING gist (plan_code WITH =, int8range(gmv_from_cents, gmv_to_cents, '(]') WITH &&));   -- btree_gist já existe (cartão 06)
 CONSTRAINT TRIGGER DEFERRABLE INITIALLY DEFERRED, por plano: o 1.º escalão começa em 0, cada from = to do anterior (sem buracos), só o último tem to NULL, e existe pelo menos um.
 Seed (from, to, mensalidade, bps) — commission_payg: (0, 2000000, 0, 800) · (2000000, NULL, 0, 600)
+  [SUBSTITUÍDO pela 0034 (27/11/2026): tiered_subscription passa a só mensalidade, 0 bps, 7 escalões até > 100.000 € = 500 €/mês; ver spec 14 §4.]
   tiered_subscription: (0, 100000, 500, 0) · (100000, 500000, 1000, 0) · (500000, 1000000, 5000, 0) · (1000000, 2000000, 5000, 800) · (2000000, NULL, 85000, 600)
   Leitura: até 1.000 € paga 5 €; 1.000,01–5.000 € 10 €; 5.000,01–10.000 € 50 €; 10.000,01–20.000 € 50 € + 8% só do excedente acima de 10.000 €; acima de 20.000 € 850 € + 6% só do excedente (850 € = 50 € + 8% × 10.000 €: sem saltos).
 RLS ENABLE + FORCE nas duas: SELECT para ptmarket_app USING (true), GRANT SELECT. Nenhuma escrita para app nem worker (a edição pelo super_admin é do épico de backoffice, por função identity_* com 2FA).

@@ -30,7 +30,32 @@ fn payg() -> Vec<PlanTier> {
     ]
 }
 
+/// `tiered_subscription` (0034): só mensalidade fixa por escalão, 0 % de comissão em todos.
 fn tiered() -> Vec<PlanTier> {
+    vec![
+        tier(0, Some(100_000), 500, 0),
+        tier(100_000, Some(500_000), 1_000, 0),
+        tier(500_000, Some(1_000_000), 5_000, 0),
+        tier(1_000_000, Some(2_500_000), 10_000, 0),
+        tier(2_500_000, Some(5_000_000), 17_500, 0),
+        tier(5_000_000, Some(10_000_000), 30_000, 0),
+        tier(10_000_000, None, 50_000, 0),
+    ]
+}
+
+/// Limites do `tiered_subscription` e mensalidades de cada lado: `(limite, abaixo, acima)`.
+const TIERED_LIMITS: [(i64, i64, i64); 6] = [
+    (100_000, 500, 1_000),
+    (500_000, 1_000, 5_000),
+    (1_000_000, 5_000, 10_000),
+    (2_500_000, 10_000, 17_500),
+    (5_000_000, 17_500, 30_000),
+    (10_000_000, 30_000, 50_000),
+];
+
+/// Plano híbrido (mensalidade + comissão marginal), como o super_admin pode configurar: prova que o cálculo
+/// marginal continua operacional além do `commission_payg` (era o seed da 0032).
+fn hybrid() -> Vec<PlanTier> {
     vec![
         tier(0, Some(100_000), 500, 0),
         tier(100_000, Some(500_000), 1000, 0),
@@ -90,6 +115,36 @@ fn table_payg() {
 #[test]
 fn table_tiered() {
     let t = tiered();
+    assert_eq!(plan(&t, 0, 1_000_000), (0, 0));
+    assert_eq!(plan(&t, 990_000, 20_000), (0, 0));
+    assert_eq!(plan(&t, 900_000, 12_000_000), (0, 0)); // atravessa 5 limites
+    assert_eq!(plan(&t, 50_000_000, 12_345), (0, 0));
+}
+
+/// Loja em `tiered_subscription` sem patrocínio: fee 0, applied 0 e nunca poupança de patrocínio.
+#[test]
+fn tiered_without_sponsorship_is_zero_everywhere() {
+    let t = tiered();
+    for before in [
+        0, 1, 99_999, 100_000, 1_500_000, 2_500_001, 9_999_999, 10_000_000, 99_000_000,
+    ] {
+        for subtotal in [0, 1, 25, 12_345, 1_000_000, 20_000_000] {
+            let q = quote_full(subtotal, &[], None, &t, before).unwrap();
+            assert_eq!(q.rule, CommissionRule::Plan);
+            assert_eq!(
+                q.platform_fee,
+                Cents::ZERO,
+                "before {before}, subtotal {subtotal}"
+            );
+            assert_eq!(q.applied_commission_bps, Bps::ZERO);
+            assert_eq!(q.sponsored_discount, Cents::ZERO);
+        }
+    }
+}
+
+#[test]
+fn table_hybrid() {
+    let t = hybrid();
     assert_eq!(fee_of(&t, 0, 1_000_000), 0);
     assert_eq!(fee_of(&t, 990_000, 20_000), 800);
     assert_eq!(fee_of(&t, 900_000, 1_200_000), 86_000); // 3 escalões
@@ -100,9 +155,18 @@ fn table_monthly_fee() {
     let t = tiered();
     assert_eq!(monthly(&t, 0), 500);
     assert_eq!(monthly(&t, 100_000), 500);
-    assert_eq!(monthly(&t, 100_001), 1000);
-    assert_eq!(monthly(&t, 1_000_001), 5000);
-    assert_eq!(monthly(&t, 2_000_001), 85_000);
+    assert_eq!(monthly(&t, 100_001), 1_000);
+    assert_eq!(monthly(&t, 500_000), 1_000);
+    assert_eq!(monthly(&t, 500_001), 5_000);
+    assert_eq!(monthly(&t, 1_000_001), 10_000);
+    assert_eq!(monthly(&t, 2_500_001), 17_500);
+    assert_eq!(monthly(&t, 5_000_001), 30_000);
+    assert_eq!(monthly(&t, 10_000_000), 30_000);
+    assert_eq!(monthly(&t, 10_000_001), 50_000);
+    assert_eq!(monthly(&t, i64::MAX), 50_000);
+    let h = hybrid();
+    assert_eq!(monthly(&h, 1_000_001), 5000);
+    assert_eq!(monthly(&h, 2_000_001), 85_000);
     let p = payg();
     for total in [0, 1, 1_999_999, 2_000_000, 2_000_001, i64::MAX] {
         assert_eq!(monthly(&p, total), 0);
@@ -193,6 +257,19 @@ fn boundaries_payg() {
 #[test]
 fn boundaries_tiered() {
     let t = tiered();
+    for (l, below, above) in TIERED_LIMITS {
+        check_boundary(&t, l, 0, 0, (below, above));
+    }
+    // Limite 0.
+    assert_eq!(plan(&t, 0, 0), (0, 0));
+    assert_eq!(plan(&t, 0, 1), (0, 0));
+    assert_eq!(monthly(&t, 0), 500);
+    assert_eq!(monthly(&t, 1), 500);
+}
+
+#[test]
+fn boundaries_hybrid() {
+    let t = hybrid();
     check_boundary(&t, 100_000, 0, 0, (500, 1000));
     check_boundary(&t, 500_000, 0, 0, (1000, 5000));
     check_boundary(&t, 1_000_000, 0, 800, (5000, 5000));
@@ -212,6 +289,55 @@ fn split_sale_applied_is_informative() {
     assert_eq!(plan(&payg(), 1_999_999, 3), (0, 667));
 }
 
+// ---------- Patrocínio ativo sobre o plano (decisão do owner, 27/11) ----------
+
+/// Loja patrocinada com `tiered_subscription` guardado: o plano não entra; a poupança mede-se contra a âncora
+/// (`COALESCE(custom, base)`), não contra os 0 % do plano.
+#[test]
+fn sponsored_tiered_store_discount_uses_anchor() {
+    let t = tiered();
+    for before in [0, 1_500_000, 50_000_000] {
+        let q = quote_full(12_345, &[0], None, &t, before).unwrap();
+        assert_eq!(q.rule, CommissionRule::Sponsored);
+        assert_eq!(q.base_commission_bps, b(BASE));
+        assert_eq!(q.platform_fee, c(0));
+        assert_eq!(q.sponsored_discount, c(988));
+
+        let q = quote_full(12_345, &[0], Some(500), &t, before).unwrap();
+        assert_eq!(q.sponsored_discount, c(617));
+    }
+}
+
+/// Com ≥ 1 patrocínio ativo não há mensalidade, qualquer que seja o plano guardado e o volume.
+#[test]
+fn monthly_fee_due_is_zero_when_sponsored() {
+    for t in [tiered(), hybrid(), payg()] {
+        for total in [0, 1, 100_000, 100_001, 1_000_001, 10_000_001, i64::MAX] {
+            assert_eq!(monthly_fee_due(&t, c(total), true).unwrap(), Cents::ZERO);
+            assert_eq!(
+                monthly_fee_due(&t, c(total), false).unwrap(),
+                monthly_fee_for(&t, c(total)).unwrap()
+            );
+        }
+    }
+    assert_eq!(
+        monthly_fee_due(&tiered(), c(10_000_001), false).unwrap(),
+        c(50_000)
+    );
+}
+
+/// Fail closed: escalões inválidos dão erro mesmo com patrocínio (nunca 0 € por engano de configuração).
+#[test]
+fn monthly_fee_due_validates_tiers_even_when_sponsored() {
+    let bad = vec![tier(0, Some(100), 0, 800), tier(101, None, 0, 600)];
+    for sponsored in [true, false] {
+        assert_eq!(
+            monthly_fee_due(&bad, c(0), sponsored),
+            Err(MoneyError::InvalidPlanTiers)
+        );
+    }
+}
+
 // ---------- Precedência ----------
 
 #[test]
@@ -226,12 +352,12 @@ fn all_three_rules_present_sponsorship_wins() {
 
 #[test]
 fn empty_override_list_is_not_sponsored() {
-    let q = quote_full(10_000, &[], None, &tiered(), 1_500_000).unwrap();
+    let q = quote_full(10_000, &[], None, &hybrid(), 1_500_000).unwrap();
     assert_eq!(q.rule, CommissionRule::Plan);
     assert_eq!(q.platform_fee, c(800));
     assert_eq!(q.sponsored_discount, c(0));
 
-    let q = quote_full(10_000, &[], Some(500), &tiered(), 1_500_000).unwrap();
+    let q = quote_full(10_000, &[], Some(500), &hybrid(), 1_500_000).unwrap();
     assert_eq!(q.rule, CommissionRule::Custom);
     assert_eq!(q.platform_fee, c(500));
 }
@@ -314,7 +440,7 @@ fn single_open_tier_is_valid() {
 
 #[test]
 fn overflow_is_err_not_panic() {
-    for t in [payg(), tiered()] {
+    for t in [payg(), tiered(), hybrid()] {
         assert_eq!(
             quote_full(1, &[], None, &t, i64::MAX),
             Err(MoneyError::Overflow)
@@ -334,15 +460,17 @@ fn overflow_is_err_not_panic() {
 // ---------- Propriedades ----------
 
 fn plans() -> impl Strategy<Value = Vec<PlanTier>> {
-    prop_oneof![Just(payg()), Just(tiered())]
+    prop_oneof![Just(payg()), Just(tiered()), Just(hybrid())]
 }
 
 /// Volumes concentrados perto dos limites e espalhados.
 fn volume() -> impl Strategy<Value = i64> {
     prop_oneof![
         0i64..3_000_000,
-        prop::sample::select(vec![100_000i64, 500_000, 1_000_000, 2_000_000])
-            .prop_flat_map(|l| (l - 50)..(l + 50)),
+        prop::sample::select(vec![
+            100_000i64, 500_000, 1_000_000, 2_000_000, 2_500_000, 5_000_000, 10_000_000
+        ])
+        .prop_flat_map(|l| (l - 50)..(l + 50)),
         0i64..(i64::MAX / 4),
     ]
 }
