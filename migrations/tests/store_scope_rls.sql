@@ -122,13 +122,12 @@ SELECT pg_temp.expect_count(
     3, 'app_store_id/app_sponsor_entity_id/app_is_platform_admin: INVOKER, STABLE, search_path fixo, EXECUTE só da app');
 
 -- Toda a tabela de public com store_id ou FK para stores/products/product_variants tem as 4 policies RESTRICTIVE
--- (SELECT, INSERT, UPDATE, DELETE) para ptmarket_app. Exceções: user_roles (só own_select) e store_verifications
--- (nasce no cartão 09 com a sua policy).
+-- (SELECT, INSERT, UPDATE, DELETE) para ptmarket_app. Exceção: user_roles (só own_select).
 CREATE TEMP TABLE ssr_store_tables AS
     SELECT DISTINCT c.oid::regclass AS t
     FROM pg_class c
     WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')
-      AND c.relname NOT IN ('user_roles', 'store_verifications')
+      AND c.relname NOT IN ('user_roles')
       AND (EXISTS (SELECT 1 FROM pg_attribute a
                    WHERE a.attrelid = c.oid AND a.attname = 'store_id' AND NOT a.attisdropped AND a.attnum > 0)
            -- Fecho transitivo das FKs a partir de stores (ex.: order_items → orders → stores), não só as diretas.
@@ -137,12 +136,14 @@ CREATE TEMP TABLE ssr_store_tables AS
                             UNION
                             SELECT k.conrelid FROM pg_constraint k JOIN r ON k.confrelid = r.t
                             WHERE k.contype = 'f' AND k.conrelid <> r.t
-                              AND k.conrelid::regclass::text NOT IN ('user_roles', 'store_verifications'))
+                              AND k.conrelid::regclass::text NOT IN ('user_roles'))
                         SELECT t FROM r));
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM ssr_store_tables
-       WHERE t::text IN ('stores', 'products', 'product_variants', 'product_price_history', 'store_sponsorships')$q$,
-    5, 'tabelas de loja: stores, products, product_variants, product_price_history, store_sponsorships');
+       WHERE t::text IN ('stores', 'products', 'product_variants', 'product_price_history', 'store_sponsorships',
+                         'store_verifications')$q$,
+    6, 'tabelas de loja: stores, products, product_variants, product_price_history, store_sponsorships, '
+       'store_verifications');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM ssr_store_tables s
        WHERE (SELECT count(DISTINCT p.polcmd) FROM pg_policy p
