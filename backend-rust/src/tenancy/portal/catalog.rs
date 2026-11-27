@@ -28,6 +28,15 @@ use crate::{
 /// Máximo de produtos por página de `products_page` (o `limit` é limitado a 1..=48).
 pub const MAX_PAGE_LIMIT: i64 = 48;
 
+/// Máximo de caracteres do texto de `search_products` (depois do `trim`; caracteres, não bytes).
+pub const MAX_SEARCH_CHARS: usize = 200;
+
+/// Máximo de termos (com 2 ou mais caracteres) do texto de `search_products`.
+pub const MAX_SEARCH_TERMS: usize = 8;
+
+/// Termos com menos caracteres do que isto são ignorados na pesquisa.
+const MIN_TERM_CHARS: usize = 2;
+
 /// Máximo de categorias no filtro de `products_page` (a categoria e as descendentes).
 pub const MAX_FILTER_CATEGORIES: usize = 200;
 
@@ -290,6 +299,59 @@ const VARIANTS_OF: &str = concat!(
      ORDER BY v.price_cents, v.id"
 );
 
+/// Ids da pesquisa (0040: `portal_search_product_ids`, DEFINER, só ids visíveis no canal do
+/// contexto). Mesma exceção à regra `query!` das views: SQL estático e casts exatos. `$1` texto,
+/// `$2` cursor (ou NULL), `$3` limite.
+const SEARCH_IDS: &str = "SELECT r.id::uuid AS id
+     FROM portal_search_product_ids($1::text, $2::uuid, $3::int4) AS r(id)
+     ORDER BY r.id DESC";
+
+fn invalid_query(message: String) -> AppError {
+    AppError::Validation(vec![FieldError {
+        field: "q".to_owned(),
+        message,
+    }])
+}
+
+/// Texto da pesquisa normalizado antes da BD: `trim`; caracteres de controlo (`\0`, `\n`, …)
+/// no meio → `Validation`; vazio ou mais de 200 caracteres →
+/// `Validation`; termos (por espaços) com menos de 2 caracteres ignorados; mais de 8 termos →
+/// `Validation`; nenhum termo → `None` (página vazia, sem BD). Os termos ficam unidos por um
+/// espaço.
+fn search_terms(q: &str) -> Result<Option<String>, AppError> {
+    let q = q.trim();
+    if q.chars().any(char::is_control) {
+        return Err(invalid_query("caracteres de controlo".to_owned()));
+    }
+    let chars = q.chars().count();
+    if chars == 0 || chars > MAX_SEARCH_CHARS {
+        return Err(invalid_query(format!(
+            "entre 1 e {MAX_SEARCH_CHARS} caracteres"
+        )));
+    }
+    let terms: Vec<&str> = q
+        .split_whitespace()
+        .filter(|t| t.chars().count() >= MIN_TERM_CHARS)
+        .collect();
+    if terms.len() > MAX_SEARCH_TERMS {
+        return Err(invalid_query(format!("máximo {MAX_SEARCH_TERMS} termos")));
+    }
+    Ok((!terms.is_empty()).then(|| terms.join(" ")))
+}
+
+/// `statement_timeout` (SQLSTATE 57014) → `Busy` (503 + `Retry-After`), sem o texto da BD; os
+/// outros erros ficam iguais.
+pub(super) fn busy_on_timeout(e: AppError) -> AppError {
+    let timed_out = match &e {
+        AppError::Internal(inner) => matches!(
+            inner.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        ),
+        _ => false,
+    };
+    if timed_out { AppError::Busy } else { e }
+}
+
 fn too_many(field: &str, max: usize, what: &str) -> AppError {
     AppError::Validation(vec![FieldError {
         field: field.to_owned(),
@@ -423,6 +485,57 @@ impl PortalReadTx {
             None
         };
         let items = self.cards(rows).await?;
+        Ok(ProductPage { items, next })
+    }
+
+    /// Pesquisa de produtos visíveis neste canal pelo título (pt/es, sem acentos: "pao" encontra
+    /// "Pão"), mais recentes primeiro (`id DESC`); `after` = `next` da página anterior.
+    ///
+    /// Texto (`search_terms`, antes da BD): `trim`; vazio ou mais de 200 caracteres →
+    /// `Validation`; termos (separados por espaços) com menos de 2 caracteres são ignorados; mais
+    /// de 8 termos → `Validation`; se não sobrar nenhum, página vazia sem ir à BD. Aspas e
+    /// operadores são só texto (`websearch_to_tsquery`, sem erro).
+    ///
+    /// `limit` limitado a 1..=48; pede `limit + 1` ids. Antes da chamada faz
+    /// `SET LOCAL statement_timeout = '2s'` (fica até ao fim desta transação); um timeout
+    /// (57014) → `Busy` (503 + `Retry-After`). Os cartões vêm de `products_by_ids` (volta a
+    /// filtrar pelas views: dupla verificação; mantém a ordem). 2 consultas (timeout + ids) + as 4
+    /// de `products_by_ids` (nenhuma destas se não houver resultados).
+    pub async fn search_products(
+        &mut self,
+        q: &str,
+        after: Option<Uuid>,
+        limit: i64,
+    ) -> Result<ProductPage, AppError> {
+        let empty = ProductPage {
+            items: Vec::new(),
+            next: None,
+        };
+        let Some(text) = search_terms(q)? else {
+            return Ok(empty);
+        };
+        let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+        // `limit + 1` ≤ 49 = máximo da função.
+        let fetch = i32::try_from(limit + 1)
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("limite da pesquisa")))?;
+        sqlx::query!("SET LOCAL statement_timeout = '2s'")
+            .execute(&mut *self.tx)
+            .await
+            .map_err(db_error)?;
+        let mut ids: Vec<Uuid> = sqlx::query_scalar(SEARCH_IDS)
+            .bind(text)
+            .bind(after)
+            .bind(fetch)
+            .fetch_all(&mut *self.tx)
+            .await
+            .map_err(|e| busy_on_timeout(db_error(e)))?;
+        let next = if ids.len() as i64 > limit {
+            ids.truncate(limit as usize);
+            ids.last().copied()
+        } else {
+            None
+        };
+        let items = self.products_by_ids(&ids).await.map_err(busy_on_timeout)?;
         Ok(ProductPage { items, next })
     }
 
@@ -607,6 +720,48 @@ mod tests {
             Value::Array(a) => a.iter().for_each(|x| all_keys(x, out)),
             _ => {}
         }
+    }
+
+    #[test]
+    fn search_terms_limits() -> Result<(), AppError> {
+        assert_eq!(
+            search_terms("  Pão  de   ló ")?,
+            Some("Pão de ló".to_owned())
+        );
+        // Termos de 1 carácter ignorados; se não sobrar nada, sem BD.
+        assert_eq!(search_terms("a b c")?, None);
+        assert_eq!(search_terms("pão a")?, Some("pão".to_owned()));
+        // 200 caracteres (não bytes): "ã" tem 2 bytes.
+        assert!(search_terms(&"ã".repeat(200))?.is_some());
+        for bad in [
+            String::new(),
+            "   ".to_owned(),
+            "ã".repeat(201),
+            "aa ".repeat(9),
+            "pão\0".to_owned(),
+            "pão\nbolo".to_owned(),
+            "pão\u{7f}".to_owned(),
+        ] {
+            assert!(
+                matches!(search_terms(&bad), Err(AppError::Validation(_))),
+                "{bad:?}"
+            );
+        }
+        // Espaços à volta (incluindo `\n`) saem no `trim`.
+        assert_eq!(search_terms("\tpão\n")?, Some("pão".to_owned()));
+        // 8 termos passam; os curtos não contam para o máximo.
+        assert!(search_terms(&format!("{} x y z", "aa ".repeat(8)))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn non_timeout_errors_are_kept() {
+        assert!(matches!(
+            busy_on_timeout(AppError::Conflict),
+            AppError::Conflict
+        ));
+        let e = busy_on_timeout(AppError::Internal(anyhow::anyhow!("x")));
+        assert!(matches!(e, AppError::Internal(_)));
     }
 
     #[test]

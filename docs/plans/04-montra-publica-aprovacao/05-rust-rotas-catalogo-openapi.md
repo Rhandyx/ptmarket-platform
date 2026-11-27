@@ -14,7 +14,7 @@ A montra tem a sua API: cinco rotas GET anónimas, por canal (`Host`), documenta
 ## Contexto exato (cartões 02 e 04; spec 11 §3; spec 12 §3)
 ```
 Todas GET, anónimas, extractor ResolvedTenant (Host desconhecido → 404), classe AuditClass::ReadAsync, state.db_replica, begin_portal_read_tx + finish(). Query DTOs com deny_unknown_fields. limit: 1..=48, por defeito 24. cursor opaco (base64url; inválido → 422). Nunca 500 por input.
-Slugs de query/path (`category`, `store`, `entity`): validar no handler, ≤64 caracteres em `[a-z0-9-]`, senão 400 (auditoria do 02). `categories()` tem teto de 2000 linhas: cache curta (Cache-Control/ETag) no handler.
+Pesquisa (`q`): rate-limit por IP/64 com o `throttle` existente (auditoria da 0040: DoS/canal lateral por latência); 429 com Retry-After. Cursores: o de produtos ≤128 caracteres; o de lojas leva o nome (até 255) + id, por isso ≤320; acima disso 400. Slugs de query/path (`category`, `store`, `entity`): validar no handler, ≤64 caracteres em `[a-z0-9-]`, senão 400 (auditoria do 02). `categories()` tem teto de 2000 linhas: cache curta (Cache-Control/ETag) no handler.
 GET /api/v1/catalog/categories → [{"id","parent_id","slug","name","has_products"}] (árvore plana, por sort_order).
 GET /api/v1/catalog/products?category=<slug>&store=<slug>&entity=<slug>&q=<1..200>&cursor=&limit= → {"items":[ProductCard],"next_cursor": string|null}
   category inclui os descendentes (ids resolvidos em memória a partir de categories(); máx. 200). category/store desconhecidos NESTE canal → 404. Com q: search_products e os outros filtros são recusados com 422 (v1).

@@ -270,3 +270,8 @@ nunca apaga linhas. Fonte: DGT — CAOP 2025.
   com saída `infra/data/geo/dicofre_caop2025.csv`.
 - Prova: `infra/scripts/tests/seed-dicofre-test.sh` (postgres:18 descartável, removido no fim). Os ficheiros
   `infra/scripts/tests/fixtures/dicofre_v*.csv` são dados **fictícios** de teste, não uma amostra oficial.
+
+## Pesquisa de produtos (migration 0040, épico 04/03)
+- O índice `products_search_idx` é de expressão sobre `public.f_unaccent(...)`, marcada IMMUTABLE mas dependente do ficheiro `unaccent.rules` da extensão. **Depois de cada upgrade do PostgreSQL ou da extensão `unaccent`**: `REINDEX INDEX CONCURRENTLY public.products_search_idx;` (senão o índice pode ficar inconsistente em silêncio).
+- A função `portal_search_product_ids` é DEFINER do papel `ptmarket_search` (NOLOGIN, sem membros além do ADMIN do migrator). Não dar este papel a ninguém.
+- O Rust limita o texto (200 carateres, 8 termos) e corre a chamada com `statement_timeout` de 2 s; a rota tem rate-limit por IP (cartão 04/05).

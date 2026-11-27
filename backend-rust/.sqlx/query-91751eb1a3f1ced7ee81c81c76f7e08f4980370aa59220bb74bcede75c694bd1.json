@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET geo_lat = 41.14961, geo_lng = -8.61099, storefront_address = $2,\n                               supports_click_collect = $3\n             WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "91751eb1a3f1ced7ee81c81c76f7e08f4980370aa59220bb74bcede75c694bd1"
+}

@@ -14,7 +14,8 @@ pub use db::{TenantId, TenantTx, begin_tenant_tx};
 pub use http::PlatformHost;
 pub use portal::{
     NationalPortal, PortalCategory, PortalProduct, PortalProductCard, PortalReadTx, PortalStore,
-    PortalVariant, ProductFilter, ProductPage, ShippingScope, SponsorKind, StoreBadge,
-    begin_national_read_tx, begin_portal_read_tx, national_portal_for_country,
+    PortalStoreProfile, PortalVariant, ProductFilter, ProductPage, ShippingScope, SponsorKind,
+    StoreBadge, StorePage, begin_national_read_tx, begin_portal_read_tx,
+    national_portal_for_country,
 };
 pub use resolver::{CountryCode, HostResolver, ResolvedHost, ResolvedTenant, TenantType};

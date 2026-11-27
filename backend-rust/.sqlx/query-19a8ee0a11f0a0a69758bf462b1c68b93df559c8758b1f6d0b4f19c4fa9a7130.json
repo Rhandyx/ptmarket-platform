@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET phone = '+351210000000', geo_lat = 38.7223, geo_lng = -9.1393,\n                           vacation_message = 'Voltamos já'\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "19a8ee0a11f0a0a69758bf462b1c68b93df559c8758b1f6d0b4f19c4fa9a7130"
+}

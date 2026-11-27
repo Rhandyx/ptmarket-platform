@@ -535,8 +535,11 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a
        WHERE c.oid IN ('public.portal_products'::regclass, 'public.portal_product_variants'::regclass,
                        'public.portal_categories'::regclass)
-         AND a.grantee NOT IN ('ptmarket_app'::regrole, 'ptmarket_portal'::regrole)$q$,
-    0, 'views: nenhum privilégio para PUBLIC nem outros papéis');
+         AND a.grantee NOT IN ('ptmarket_app'::regrole, 'ptmarket_portal'::regrole)
+         -- 0040: a dona da pesquisa (ptmarket_search) lê portal_products (EXISTS da visibilidade final).
+         AND NOT (c.oid = 'public.portal_products'::regclass AND a.grantee = 'ptmarket_search'::regrole
+                  AND a.privilege_type = 'SELECT')$q$,
+    0, 'views: nenhum privilégio para PUBLIC nem outros papéis (exceto SELECT de ptmarket_search em portal_products)');
 SELECT pg_temp.expect_text(
     $q$SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = 'products'

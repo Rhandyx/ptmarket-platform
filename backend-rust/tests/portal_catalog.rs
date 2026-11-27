@@ -668,3 +668,412 @@ async fn omnibus_previous_lowest_and_art53_zero_vat(
     tx.finish().await?;
     Ok(())
 }
+
+/// Loja com nome próprio (o `seed_store` usa o slug como nome).
+async fn seed_named_store(
+    app: &PgPool,
+    t: &ResolvedTenant,
+    name: &str,
+    slug: &str,
+) -> anyhow::Result<StoreScope> {
+    let scope = StoreScope::for_tests(t.id(), Uuid::now_v7());
+    let mut tx = begin_store_tx(app, &scope, &merchant()).await?;
+    sqlx::query!(
+        "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
+         VALUES ($1, $2, $3, $4, $3, '500000000', $5, 'loja@test.invalid')",
+        scope.store_id(),
+        t.id().as_uuid(),
+        name,
+        slug,
+        IBAN
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(scope)
+}
+
+async fn statement_timeout(tx: &mut PortalReadTx) -> anyhow::Result<String> {
+    Ok(
+        sqlx::query_scalar("SELECT current_setting('statement_timeout')::text")
+            .fetch_one(tx.conn_for_tests())
+            .await?,
+    )
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn search_finds_unaccented_titles_per_channel_with_cursor_and_limits(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let w = world(&opts, &conn).await?;
+    let [s1, s2, s3] = &w.s;
+    let (pao_a, _) = seed_product(&w.app, s1, "Pão caseiro", None, true, &[(300, 1, true)]).await?;
+    let (pao_b, _) =
+        seed_product(&w.app, s2, "Pão de Mafra", None, true, &[(400, 1, true)]).await?;
+    let (_, _) = seed_product(&w.app, s1, "Pão rascunho", None, false, &[(1, 1, true)]).await?;
+    let mut many = Vec::new();
+    for n in 0..30 {
+        let (id, _) = seed_product(
+            &w.app,
+            s3,
+            &format!("Pão nº {n}"),
+            None,
+            true,
+            &[(100, 1, true)],
+        )
+        .await?;
+        many.push(id);
+    }
+
+    // Canal A: só o pão da loja patrocinada pela Câmara A; sem acentos encontra "Pão".
+    let mut tx = open(&w.app, &w.ca).await?;
+    // Só termos de 1 carácter: página vazia sem ir à BD (o timeout nem chega a ser posto).
+    let before = statement_timeout(&mut tx).await?;
+    assert_ne!(before, "2s");
+    let page = tx.search_products("a b c", None, 24).await?;
+    assert!(page.items.is_empty() && page.next.is_none());
+    assert_eq!(statement_timeout(&mut tx).await?, before);
+    let page = tx.search_products("  pao ", None, 24).await?;
+    assert_eq!(ids(&page.items), vec![pao_a]);
+    assert_eq!(page.next, None);
+    // O timeout fica ativo nesta transação.
+    assert_eq!(statement_timeout(&mut tx).await?, "2s");
+    assert!(
+        tx.search_products("mafra", None, 24)
+            .await?
+            .items
+            .is_empty()
+    );
+    // Comprimentos: slug da entidade > 128 e nome do cursor > 255 → Validation.
+    let long_slug = "e".repeat(129);
+    assert!(matches!(
+        tx.stores_page(Some(&long_slug), None, 24).await,
+        Err(AppError::Validation(_))
+    ));
+    assert!(
+        tx.stores_page(Some(&"e".repeat(128)), None, 24)
+            .await?
+            .items
+            .is_empty()
+    );
+    assert!(matches!(
+        tx.stores_page(None, Some(("n".repeat(256), Uuid::nil())), 24)
+            .await,
+        Err(AppError::Validation(_))
+    ));
+    // Nome de 255 (o máximo da coluna) é um cursor válido.
+    tx.stores_page(None, Some(("n".repeat(255), Uuid::nil())), 24)
+        .await?;
+    // O timeout fica ativo nesta transação.
+    assert_eq!(statement_timeout(&mut tx).await?, "2s");
+    tx.finish().await?;
+
+    // Canal B: só o de B.
+    let mut tx = open(&w.app, &w.cb).await?;
+    assert_eq!(
+        ids(&tx.search_products("PÃO", None, 24).await?.items),
+        vec![pao_b]
+    );
+    tx.finish().await?;
+
+    // Nacional: 32 pães publicados, em páginas de 12, sem repetidos nem saltos.
+    let mut tx = open(&w.app, &w.np).await?;
+    let mut seen = Vec::new();
+    let mut sizes = Vec::new();
+    let mut after = None;
+    loop {
+        let page = tx.search_products("pao", after, 12).await?;
+        sizes.push(page.items.len());
+        seen.extend(ids(&page.items));
+        match page.next {
+            Some(n) => after = Some(n),
+            None => break,
+        }
+    }
+    assert_eq!(sizes, [12, 12, 8]);
+    let mut expected = many.clone();
+    expected.extend([pao_a, pao_b]);
+    expected.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(seen, expected);
+    // Limites: 0 → 1; 100 → 48 (há só 32).
+    let p = tx.search_products("pao", None, 0).await?;
+    assert_eq!((p.items.len(), p.next), (1, Some(expected[0])));
+    assert_eq!(tx.search_products("pao", None, 100).await?.items.len(), 32);
+    // Texto inválido → Validation: vazio, 201 caracteres (não bytes), 9 termos.
+    for bad in [
+        String::new(),
+        "   ".to_owned(),
+        "ã".repeat(201),
+        "pao ".repeat(9),
+        "pao\0".to_owned(),
+        "pao\u{1b}[0m".to_owned(),
+        "pao\r\ncaseiro".to_owned(),
+    ] {
+        assert!(
+            matches!(
+                tx.search_products(&bad, None, 24).await,
+                Err(AppError::Validation(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert!(
+        tx.search_products(&"ã".repeat(200), None, 24)
+            .await?
+            .items
+            .is_empty()
+    );
+    // Aspas, operadores e pontuação: só texto, nunca erro.
+    for q in [
+        "\"pão caseiro\"",
+        "pao -caseiro OR mafra",
+        "'; DROP TABLE products; --",
+        "&& || !! :: ** ((",
+        "pão:* & !x",
+    ] {
+        tx.search_products(q, None, 24).await?;
+    }
+    assert_eq!(
+        ids(&tx.search_products("\"pão caseiro\"", None, 24).await?.items),
+        vec![pao_a]
+    );
+    tx.finish().await?;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn stores_page_by_name_and_id_with_entity_filter(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let w = world(&opts, &conn).await?;
+    // 3 do mundo + 57 = 60 lojas no nacional; duas com o mesmo nome.
+    let mut all: Vec<Uuid> = w.s.iter().map(|s| s.store_id()).collect();
+    let twin_a = seed_named_store(&w.app, &w.np, "Igual", "igual-1").await?;
+    let twin_b = seed_named_store(&w.app, &w.np, "Igual", "igual-2").await?;
+    all.extend([twin_a.store_id(), twin_b.store_id()]);
+    for n in 0..55 {
+        let s = seed_named_store(&w.app, &w.np, &format!("Loja {n:02}"), &format!("l{n}")).await?;
+        all.push(s.store_id());
+    }
+
+    let mut tx = open(&w.app, &w.np).await?;
+    let mut seen = Vec::new();
+    let mut sizes = Vec::new();
+    let mut after = None;
+    loop {
+        let page = tx.stores_page(None, after, 24).await?;
+        sizes.push(page.items.len());
+        seen.extend(page.items.iter().map(|s| s.id));
+        match page.next {
+            Some(n) => after = Some(n),
+            None => break,
+        }
+    }
+    assert_eq!(sizes, [24, 24, 12]);
+    let mut unique = seen.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), 60, "sem repetidos");
+    all.sort_unstable();
+    assert_eq!(unique, all, "sem saltos");
+    // As duas "Igual" seguidas, por id; o cursor parte entre elas sem perder nenhuma.
+    let first = tx.stores_page(None, None, 1).await?;
+    let mut cursor = first.next;
+    let mut names = vec![first.items[0].name.clone()];
+    while let Some(c) = cursor {
+        let page = tx.stores_page(None, Some(c), 1).await?;
+        names.extend(page.items.iter().map(|s| s.name.clone()));
+        cursor = page.next;
+    }
+    assert_eq!(names.len(), 60);
+    assert_eq!(names.iter().filter(|n| *n == "Igual").count(), 2);
+    // Cursor no meio das gémeas (nome igual, id da primeira) → a segunda vem a seguir.
+    let (lo, hi) = if twin_a.store_id() < twin_b.store_id() {
+        (twin_a.store_id(), twin_b.store_id())
+    } else {
+        (twin_b.store_id(), twin_a.store_id())
+    };
+    let page = tx
+        .stores_page(None, Some(("Igual".to_owned(), lo)), 1)
+        .await?;
+    assert_eq!(page.items.first().map(|s| s.id), Some(hi));
+    // Limites: 0 → 1; 100 → 48.
+    assert_eq!(tx.stores_page(None, None, 0).await?.items.len(), 1);
+    assert_eq!(tx.stores_page(None, None, 100).await?.items.len(), 48);
+    // Por entidade: só s1, uma vez, com os 2 selos pela ordem fixa.
+    for slug in ["junta-j", "camara-a"] {
+        let page = tx.stores_page(Some(slug), None, 48).await?;
+        assert_eq!(
+            page.items.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![w.s[0].store_id()],
+            "{slug}"
+        );
+        let badges: Vec<Uuid> = page.items[0]
+            .badges
+            .iter()
+            .map(|b| b.sponsor_entity_id)
+            .collect();
+        assert_eq!(badges, vec![w.camara_a, w.junta_j]);
+        assert_eq!(page.next, None);
+    }
+    assert!(
+        tx.stores_page(Some("nao-existe"), None, 48)
+            .await?
+            .items
+            .is_empty()
+    );
+    tx.finish().await?;
+
+    // Canal A: só s1 (co-patrocinada sai uma vez); entidade do canal B → vazio.
+    let mut tx = open(&w.app, &w.ca).await?;
+    let page = tx.stores_page(None, None, 48).await?;
+    assert_eq!(
+        page.items.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![w.s[0].store_id()]
+    );
+    assert!(
+        tx.stores_page(Some("camara-b"), None, 48)
+            .await?
+            .items
+            .is_empty()
+    );
+    tx.finish().await?;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "../migrations")]
+async fn store_profile_only_in_its_channel_with_exactly_the_public_keys(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let w = world(&opts, &conn).await?;
+    let s1 = &w.s[0];
+    let mut tx = begin_store_tx(&w.app, s1, &merchant()).await?;
+    sqlx::query!(
+        "UPDATE stores SET phone = '+351210000000', geo_lat = 38.7223, geo_lng = -9.1393,
+                           vacation_message = 'Voltamos já'
+         WHERE id = $1",
+        s1.store_id()
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    // s2: sem loja física (sem morada de loja nem click & collect) → sem coordenadas.
+    // s3: com morada de loja e sem click & collect → coordenadas arredondadas.
+    for (scope, storefront, click_collect) in [
+        (&w.s[1], json!({}), false),
+        (
+            &w.s[2],
+            json!({"street": "Rua A, 1", "postal_code": "1000-001"}),
+            false,
+        ),
+    ] {
+        let mut tx = begin_store_tx(&w.app, scope, &merchant()).await?;
+        let r = sqlx::query!(
+            "UPDATE stores SET geo_lat = 41.14961, geo_lng = -8.61099, storefront_address = $2,
+                               supports_click_collect = $3
+             WHERE id = $1",
+            scope.store_id(),
+            storefront,
+            click_collect
+        )
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(r.rows_affected() == 1, "loja não mudou");
+        tx.commit().await?;
+    }
+
+    // Canal B: s1 só é visível no A → None; inexistente → None; slug > 128 → Validation.
+    let mut tx = open(&w.app, &w.cb).await?;
+    assert_eq!(tx.store_profile_by_slug("s1").await?, None);
+    assert_eq!(tx.store_profile_by_slug("nao-existe").await?, None);
+    assert_eq!(tx.store_profile_by_slug(&"s".repeat(128)).await?, None);
+    assert!(matches!(
+        tx.store_profile_by_slug(&"s".repeat(129)).await,
+        Err(AppError::Validation(_))
+    ));
+    let p2 = tx
+        .store_profile_by_slug("s2")
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("s2 fora do canal B"))?;
+    assert_eq!((p2.geo_lat, p2.geo_lng), (None, None), "sem loja física");
+    tx.finish().await?;
+    let mut tx = open(&w.app, &w.np).await?;
+    let p3 = tx
+        .store_profile_by_slug("s3")
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("s3 fora do nacional"))?;
+    tx.finish().await?;
+    assert_eq!(
+        (p3.geo_lat.as_deref(), p3.geo_lng.as_deref()),
+        (Some("41.150"), Some("-8.611")),
+        "morada de loja: 3 casas"
+    );
+
+    let mut tx = open(&w.app, &w.ca).await?;
+    assert_eq!(tx.store_profile_by_slug("s2").await?, None);
+    let p = tx
+        .store_profile_by_slug("s1")
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("s1 fora do canal A"))?;
+    tx.finish().await?;
+    assert_eq!(p.store.id, s1.store_id());
+    assert_eq!(p.store.nif, "500000000");
+    assert_eq!(p.email, "loja@test.invalid");
+    assert_eq!(p.phone.as_deref(), Some("+351210000000"));
+    assert_eq!(
+        (p.geo_lat.as_deref(), p.geo_lng.as_deref()),
+        (Some("38.722"), Some("-9.139"))
+    );
+    let badges: Vec<Uuid> = p.store.badges.iter().map(|b| b.sponsor_entity_id).collect();
+    assert_eq!(badges, vec![w.camara_a, w.junta_j]);
+
+    let json = serde_json::to_value(&p)?;
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "address_json",
+            "badges",
+            "business_hours",
+            "email",
+            "geo_lat",
+            "geo_lng",
+            "id",
+            "is_vacation_mode",
+            "legal_name",
+            "name",
+            "nif",
+            "phone",
+            "shipping_scope",
+            "slug",
+            "storefront_address",
+            "storefront_dicofre",
+            "supports_click_collect",
+            "supports_local_courier",
+            "supports_national_shipping",
+            "tenant_id",
+            "vacation_message",
+            "vat_exempt_art53",
+        ]
+    );
+    let text = json.to_string();
+    for bad in [
+        "iban",
+        "_enc",
+        "commission",
+        "kyc",
+        "billing",
+        "terms",
+        IBAN,
+    ] {
+        assert!(!text.contains(bad), "{bad}");
+    }
+    Ok(())
+}

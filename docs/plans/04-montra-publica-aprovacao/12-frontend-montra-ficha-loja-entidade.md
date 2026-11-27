@@ -11,6 +11,8 @@ Cada produto, cada loja e cada entidade patrocinadora têm a sua página públic
 ## Não tocar
 - `backend-rust/`, `openapi.json`, `src/lib/api/**` (se faltar um campo, PARAR e reportar); o resto de `src/components/storefront/**`, `src/app/(montra)/layout.tsx`, `src/lib/**`, `src/styles/**` (do cartão 10: usar); as pastas do cartão 11; `src/app/painel/`; `src/proxy.ts`. Sem dependências novas (sem biblioteca de Markdown). Nunca ler `.env`.
 
+> Nota do supervisor (auditoria do 04/04): `vacation_message`, `address_json` e `business_hours` são texto/JSON livres do lojista: renderizar só como texto (nunca HTML), validar a forma do JSON antes de usar e tolerar campos em falta.
+
 ## Contexto exato (cartão 05; spec 11 §5; spec 12 §3; spec 14 §1.1)
 ```
 API: GET /api/v1/catalog/products/{id} → Product = ProductCard + {"description","attributes","is_perishable","images":[{"thumb","card","full"}],"category","breadcrumb":[{"slug","name"}],"variants":[{"id","ean","attributes","price_cents","in_stock","previous_lowest_cents"}],"store": StoreCard} · 404

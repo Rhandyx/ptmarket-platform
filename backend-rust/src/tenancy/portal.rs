@@ -40,15 +40,20 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
+
 use serde::Serialize;
+use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod catalog;
 
+use catalog::busy_on_timeout;
+
 pub use catalog::{
-    MAX_FILTER_CATEGORIES, MAX_PAGE_LIMIT, PortalCategory, PortalProduct, PortalProductCard,
-    PortalVariant, ProductFilter, ProductPage,
+    MAX_FILTER_CATEGORIES, MAX_PAGE_LIMIT, MAX_SEARCH_CHARS, MAX_SEARCH_TERMS, PortalCategory,
+    PortalProduct, PortalProductCard, PortalVariant, ProductFilter, ProductPage,
 };
 
 use crate::{
@@ -77,6 +82,24 @@ pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 11] = [
     "catalog_item_id",
     "ai_enriched",
 ];
+
+/// Máximo de caracteres de um slug recebido (loja ou entidade; as colunas têm 120).
+pub const MAX_SLUG_CHARS: usize = 128;
+
+/// Máximo de caracteres do nome no cursor de `stores_page` (= `stores.name VARCHAR(255)`: um
+/// limite menor partiria a paginação em lojas com nomes longos).
+pub const MAX_CURSOR_NAME_CHARS: usize = 255;
+
+/// `value` com mais de `max` caracteres (não bytes) → `Validation` em `field`.
+fn check_len(field: &str, value: &str, max: usize) -> Result<(), AppError> {
+    if value.chars().count() > max {
+        return Err(AppError::Validation(vec![FieldError {
+            field: field.to_owned(),
+            message: format!("máximo {max} caracteres"),
+        }]));
+    }
+    Ok(())
+}
 
 /// Máximo de linhas por consulta do portal (e de ids em `stores_by_ids`).
 pub const MAX_PORTAL_ROWS: i64 = 100;
@@ -167,6 +190,57 @@ struct StoreRow {
     vat_exempt_art53: bool,
 }
 
+/// Página de lojas; `next` = cursor `(name, id)` da seguinte (`None` no fim).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorePage {
+    pub items: Vec<PortalStore>,
+    pub next: Option<(String, Uuid)>,
+}
+
+/// Ficha pública da loja: `PortalStore` + identificação e contacto do comerciante, de exibição
+/// obrigatória (DSA art. 30.º; DL 7/2004 art. 10.º; ES Ley 34/2002 art. 10: nome/firma, NIF,
+/// morada, contacto). Só colunas de `portal_stores`: nunca IBAN, chaves, comissões, KYC,
+/// verificações, plano nem termos.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PortalStoreProfile {
+    #[serde(flatten)]
+    pub store: PortalStore,
+    pub email: String,
+    pub phone: Option<String>,
+    pub address_json: Value,
+    pub storefront_address: Value,
+    /// Coordenadas só com loja física declarada (`storefront_address` preenchida ou
+    /// `supports_click_collect`), arredondadas na BD a 3 casas (~100 m: privacidade do ENI que
+    /// vende a partir de casa); senão `None`. Texto, só exibição, nunca contas.
+    pub geo_lat: Option<String>,
+    pub geo_lng: Option<String>,
+    pub business_hours: Value,
+    pub is_vacation_mode: bool,
+    pub vacation_message: Option<String>,
+    pub supports_click_collect: bool,
+    pub supports_local_courier: bool,
+    pub supports_national_shipping: bool,
+}
+
+/// Linha de `portal_stores` com as colunas da ficha.
+#[derive(sqlx::FromRow)]
+struct ProfileRow {
+    #[sqlx(flatten)]
+    store: StoreRow,
+    email: String,
+    phone: Option<String>,
+    address_json: Value,
+    storefront_address: Value,
+    geo_lat: Option<String>,
+    geo_lng: Option<String>,
+    business_hours: Value,
+    is_vacation_mode: bool,
+    vacation_message: Option<String>,
+    supports_click_collect: bool,
+    supports_local_courier: bool,
+    supports_national_shipping: bool,
+}
+
 /// Linha de `portal_store_badges`.
 #[derive(sqlx::FromRow)]
 struct BadgeRow {
@@ -179,14 +253,20 @@ struct BadgeRow {
 }
 
 /// Colunas de `portal_stores` lidas pelo módulo (todas `NOT NULL` em `stores`, menos o DICOFRE).
+/// A forma com dois argumentos junta colunas (`", s.x::t AS x, …"`) antes do `FROM`.
 macro_rules! store_select {
     ($rest:literal) => {
+        store_select!("", $rest)
+    };
+    ($extra:literal, $rest:literal) => {
         concat!(
             "SELECT s.id::uuid AS id, s.tenant_id::uuid AS tenant_id, s.name::text AS name,
                     s.slug::text AS slug, s.legal_name::text AS legal_name, s.nif::text AS nif,
                     s.shipping_scope::text AS shipping_scope,
                     s.storefront_dicofre::text AS storefront_dicofre,
-                    s.vat_exempt_art53::bool AS vat_exempt_art53
+                    s.vat_exempt_art53::bool AS vat_exempt_art53",
+            $extra,
+            "
              FROM portal_stores s ",
             $rest
         )
@@ -274,6 +354,107 @@ impl PortalReadTx {
         self.with_badges(rows).await
     }
 
+    /// Uma página de lojas visíveis neste canal, por `(name, id)`; `after` = `next` da página
+    /// anterior (comparação por tuplo: lojas com o mesmo nome não se perdem nem repetem). Com
+    /// `entity_slug`, só as lojas com selo dessa entidade. `limit` limitado a 1..=48; lê
+    /// `limit + 1` para saber se há mais. Uma loja co-patrocinada sai uma vez, com todos os selos.
+    /// `entity_slug` com mais de 128 caracteres ou nome do cursor com mais de 255 (máximo de
+    /// `stores.name`) → `Validation`. Faz `SET LOCAL statement_timeout = '2s'` (até ao fim desta
+    /// transação); um timeout → `Busy`. 3 consultas: timeout, lojas e selos (2 se a página vier
+    /// vazia).
+    pub async fn stores_page(
+        &mut self,
+        entity_slug: Option<&str>,
+        after: Option<(String, Uuid)>,
+        limit: i64,
+    ) -> Result<StorePage, AppError> {
+        if let Some(e) = entity_slug {
+            check_len("entity_slug", e, MAX_SLUG_CHARS)?;
+        }
+        if let Some((name, _)) = &after {
+            check_len("after", name, MAX_CURSOR_NAME_CHARS)?;
+        }
+        let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+        sqlx::query!("SET LOCAL statement_timeout = '2s'")
+            .execute(&mut *self.tx)
+            .await
+            .map_err(db_error)?;
+        let (after_name, after_id) = after.unzip();
+        let mut rows = sqlx::query_as::<_, StoreRow>(store_select!(
+            "WHERE ($1::text IS NULL OR EXISTS (SELECT 1 FROM portal_store_badges b
+                                                 WHERE b.store_id = s.id AND b.slug = $1::text))
+               AND ($2::text IS NULL OR (s.name::text, s.id) > ($2::text, $3::uuid))
+             ORDER BY s.name::text, s.id
+             LIMIT $4::int8"
+        ))
+        .bind(entity_slug)
+        .bind(after_name)
+        .bind(after_id)
+        .bind(limit + 1)
+        .fetch_all(&mut *self.tx)
+        .await
+        .map_err(|e| busy_on_timeout(db_error(e)))?;
+        let next = if rows.len() as i64 > limit {
+            rows.truncate(limit as usize);
+            rows.last().map(|r| (r.name.clone(), r.id))
+        } else {
+            None
+        };
+        let items = self.with_badges(rows).await.map_err(busy_on_timeout)?;
+        Ok(StorePage { items, next })
+    }
+
+    /// Ficha pública da loja `slug` (dados de exibição obrigatória do comerciante) se for visível
+    /// NESTE canal; `None` caso contrário (não revela se existe noutro canal). 2 consultas: loja
+    /// e selos. `slug` com mais de 128 caracteres → `Validation`.
+    pub async fn store_profile_by_slug(
+        &mut self,
+        slug: &str,
+    ) -> Result<Option<PortalStoreProfile>, AppError> {
+        check_len("slug", slug, MAX_SLUG_CHARS)?;
+        let Some(row) = sqlx::query_as::<_, ProfileRow>(store_select!(
+            ", s.email::text AS email, s.phone::text AS phone,
+                    s.address_json::jsonb AS address_json,
+                    s.storefront_address::jsonb AS storefront_address,
+                    CASE WHEN s.storefront_address <> '{}'::jsonb OR s.supports_click_collect
+                         THEN round(s.geo_lat::numeric, 3)::text END AS geo_lat,
+                    CASE WHEN s.storefront_address <> '{}'::jsonb OR s.supports_click_collect
+                         THEN round(s.geo_lng::numeric, 3)::text END AS geo_lng,
+                    s.business_hours::jsonb AS business_hours,
+                    s.is_vacation_mode::bool AS is_vacation_mode,
+                    s.vacation_message::text AS vacation_message,
+                    s.supports_click_collect::bool AS supports_click_collect,
+                    s.supports_local_courier::bool AS supports_local_courier,
+                    s.supports_national_shipping::bool AS supports_national_shipping",
+            "WHERE s.slug = $1::text LIMIT 1"
+        ))
+        .bind(slug)
+        .fetch_optional(&mut *self.tx)
+        .await
+        .map_err(db_error)?
+        else {
+            return Ok(None);
+        };
+        let Some(store) = self.with_badges(vec![row.store]).await?.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(PortalStoreProfile {
+            store,
+            email: row.email,
+            phone: row.phone,
+            address_json: row.address_json,
+            storefront_address: row.storefront_address,
+            geo_lat: row.geo_lat,
+            geo_lng: row.geo_lng,
+            business_hours: row.business_hours,
+            is_vacation_mode: row.is_vacation_mode,
+            vacation_message: row.vacation_message,
+            supports_click_collect: row.supports_click_collect,
+            supports_local_courier: row.supports_local_courier,
+            supports_national_shipping: row.supports_national_shipping,
+        }))
+    }
+
     /// Junta os selos às lojas numa só consulta (`store_id = ANY($1)`, sem N+1).
     async fn with_badges(&mut self, rows: Vec<StoreRow>) -> Result<Vec<PortalStore>, AppError> {
         if rows.is_empty() {
@@ -312,17 +493,19 @@ impl PortalReadTx {
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
+        // Por loja, pela ordem da consulta (municipality → parish → association; depois nome).
+        let mut by_store: HashMap<Uuid, Vec<StoreBadge>> = HashMap::with_capacity(out.len());
         for b in badges {
-            let badge = StoreBadge {
+            by_store.entry(b.store_id).or_default().push(StoreBadge {
                 sponsor_entity_id: b.sponsor_entity_id,
                 kind: SponsorKind::parse(&b.kind)?,
                 name: b.name,
                 slug: b.slug,
                 logo_key: b.logo_key,
-            };
-            if let Some(s) = out.iter_mut().find(|s| s.id == b.store_id) {
-                s.badges.push(badge);
-            }
+            });
+        }
+        for s in &mut out {
+            s.badges = by_store.remove(&s.id).unwrap_or_default();
         }
         Ok(out)
     }
