@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET custom_commission_bps = $2, billing_plan_code = $3, storefront_dicofre = $4\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7dc40ba0a04d73abcf7699346970c130db68c599ee5288f46a6ece881e0f17ac"
+}

@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT custom_commission_bps, billing_plan_code, storefront_dicofre FROM stores\n         WHERE id = $1 AND tenant_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "custom_commission_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "stores",
+            "name": "custom_commission_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "stores",
+            "name": "billing_plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "storefront_dicofre",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "stores",
+            "name": "storefront_dicofre"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "1ce0f73b5c9bb690109063a8bcfa1af56b4d13383d2754f7a5e45f576028d723"
+}

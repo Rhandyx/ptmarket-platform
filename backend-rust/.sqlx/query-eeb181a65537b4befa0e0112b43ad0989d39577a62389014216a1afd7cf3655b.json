@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sponsor_entity_id, commission_override_bps FROM store_sponsorships\n         WHERE tenant_id = $1 AND store_id = $2 AND status = 'active'\n           AND ('epoch'::timestamptz + $3::int8 * interval '1 microsecond')\n               <@ tstzrange(valid_from, valid_to)\n         ORDER BY sponsor_entity_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sponsor_entity_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "sponsor_entity_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "commission_override_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "commission_override_bps"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "eeb181a65537b4befa0e0112b43ad0989d39577a62389014216a1afd7cf3655b"
+}

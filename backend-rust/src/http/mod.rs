@@ -93,7 +93,12 @@ pub fn api(
             get(sponsors::http::municipalities),
         )
         .route("/api/v1/geo/parishes", get(sponsors::http::parishes))
-        .route("/api/v1/sponsors/eligible", get(sponsors::http::eligible));
+        .route("/api/v1/sponsors/eligible", get(sponsors::http::eligible))
+        // Âncora de comissão do formulário de registo (cartão 03/18): pública, sem sessão.
+        .route(
+            "/api/v1/signup/commission-preview",
+            get(sponsors::http::commission_preview),
+        );
     let Some(sessions) = sessions else {
         return with_host_resolution(
             Router::new().merge(audited(read_async, audit).layer(Extension(AuditClass::ReadAsync))),

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_plan_tiers SET gmv_to_cents = 1500000\n         WHERE plan_code = 'commission_payg' AND gmv_from_cents = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "39726e1081c19ea7f48964f2be2ad3b2020da2e9a0e8aad098e8abd053a2bfcb"
+}

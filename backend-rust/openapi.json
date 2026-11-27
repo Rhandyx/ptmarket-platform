@@ -337,6 +337,42 @@
         }
       }
     },
+    "/api/v1/signup/commission-preview": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Pré-visualização da comissão para o formulário de registo: comissão de referência, planos com os\nescalões da BD e, se a freguesia tiver entidades elegíveis, a previsão com patrocínio.",
+        "description": "`sponsored` é só uma PREVISÃO sujeita à validação da entidade: este endpoint não cria pedido\nnenhum, não reserva nada e não promete condições. Sem sessão; não lê dados de lojas.",
+        "operationId": "commission_preview",
+        "parameters": [
+          {
+            "name": "dicofre",
+            "in": "query",
+            "description": "DICOFRE da freguesia da loja (6 caracteres, opcional)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Âncora de comissão (previsão; nada é criado nem prometido)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommissionPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Código com formato inválido, inexistente ou fora de vigor"
+          }
+        }
+      }
+    },
     "/api/v1/sponsors/eligible": {
       "get": {
         "tags": [
@@ -1151,6 +1187,38 @@
           }
         }
       },
+      "CommissionPreview": {
+        "type": "object",
+        "description": "Âncora do formulário de registo: só inteiros (cêntimos, bps).",
+        "required": [
+          "reference_bps",
+          "plans"
+        ],
+        "properties": {
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanView"
+            }
+          },
+          "reference_bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Comissão de referência da plataforma, em bps."
+          },
+          "sponsored": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SponsoredPreview",
+                "description": "`null` sem `dicofre` ou sem entidades elegíveis."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "ConsentsInput": {
         "type": "object",
         "description": "Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado).",
@@ -1351,6 +1419,61 @@
           "valid": {
             "type": "boolean",
             "description": "`false` = registada com o `rp_id` de outro host (passkey antiga de um canal): não serve\npara entrar neste painel; pode ser apagada."
+          }
+        }
+      },
+      "PlanTierView": {
+        "type": "object",
+        "description": "Escalão para mostrar (só inteiros: cêntimos e bps). Cobre o volume mensal em `]from, to]`.",
+        "required": [
+          "gmv_from_cents",
+          "monthly_fee_cents",
+          "marginal_commission_bps"
+        ],
+        "properties": {
+          "gmv_from_cents": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "gmv_to_cents": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`null` = sem teto."
+          },
+          "marginal_commission_bps": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "monthly_fee_cents": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PlanView": {
+        "type": "object",
+        "description": "Plano com os seus escalões, por ordem de volume.",
+        "required": [
+          "plan_code",
+          "is_default",
+          "tiers"
+        ],
+        "properties": {
+          "is_default": {
+            "type": "boolean",
+            "description": "`true` só para o plano com que uma loja nasce."
+          },
+          "plan_code": {
+            "type": "string"
+          },
+          "tiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanTierView"
+            }
           }
         }
       },
@@ -1568,6 +1691,28 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "SponsoredPreview": {
+        "type": "object",
+        "description": "Previsão do patrocínio (nada criado nem prometido).",
+        "required": [
+          "applied_bps",
+          "sponsors"
+        ],
+        "properties": {
+          "applied_bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Comissão prevista com patrocínio ativo, em bps."
+          },
+          "sponsors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SponsorSummary"
+            },
+            "description": "Entidades que cobrem a freguesia, na ordem fixa dos selos."
           }
         }
       },

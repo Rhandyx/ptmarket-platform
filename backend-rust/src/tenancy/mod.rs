@@ -8,6 +8,7 @@ pub mod host;
 pub mod http;
 pub mod portal;
 pub mod resolver;
+pub mod store_terms;
 
 pub use db::{TenantId, TenantTx, begin_tenant_tx};
 pub use http::PlatformHost;

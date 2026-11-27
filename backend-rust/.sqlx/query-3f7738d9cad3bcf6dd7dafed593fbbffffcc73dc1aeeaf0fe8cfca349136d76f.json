@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version, valid_to) VALUES\n            ('93', 'district', NULL, 'Distrito Teste', 'T', NULL),\n            ('9301', 'municipality', '93', 'Concelho A', 'T', NULL),\n            ('9302', 'municipality', '93', 'Concelho B', 'T', NULL),\n            ('930101', 'parish', '9301', 'Freguesia J', 'T', NULL),\n            ('930102', 'parish', '9301', 'Freguesia K', 'T', NULL),\n            ('930199', 'parish', '9301', 'Extinta', 'T', now()),\n            ('930201', 'parish', '9302', 'Freguesia B', 'T', NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3f7738d9cad3bcf6dd7dafed593fbbffffcc73dc1aeeaf0fe8cfca349136d76f"
+}

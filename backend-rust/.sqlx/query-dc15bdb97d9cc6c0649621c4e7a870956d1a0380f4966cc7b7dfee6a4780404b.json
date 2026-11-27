@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM billing_plan_tiers WHERE plan_code = 'tiered_subscription'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "dc15bdb97d9cc6c0649621c4e7a870956d1a0380f4966cc7b7dfee6a4780404b"
+}

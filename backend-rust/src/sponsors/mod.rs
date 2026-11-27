@@ -6,6 +6,7 @@
 pub mod eligibility;
 pub mod geo;
 pub mod http;
+pub mod sponsorships;
 
 /// País das listas públicas neste épico (sem pesquisa por código postal nem Espanha).
 pub const PUBLIC_COUNTRY: &str = "PT";

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE platform_settings SET base_commission_bps = 1000",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9ddb2bd19e0f294516cc07091ade89d419cbc1bd03d4c05f0e3eebb5586871b6"
+}

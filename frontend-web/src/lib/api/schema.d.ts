@@ -147,6 +147,28 @@ export interface paths {
         patch: operations["patch_me"];
         trace?: never;
     };
+    "/api/v1/signup/commission-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pré-visualização da comissão para o formulário de registo: comissão de referência, planos com os
+         *     escalões da BD e, se a freguesia tiver entidades elegíveis, a previsão com patrocínio.
+         * @description `sponsored` é só uma PREVISÃO sujeita à validação da entidade: este endpoint não cria pedido
+         *     nenhum, não reserva nada e não promete condições. Sem sessão; não lê dados de lojas.
+         */
+        get: operations["commission_preview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sponsors/eligible": {
         parameters: {
             query?: never;
@@ -479,6 +501,16 @@ export interface components {
             /** @description `{"publicKey": …}` (binários em base64url). */
             options: Record<string, never>;
         };
+        /** @description Âncora do formulário de registo: só inteiros (cêntimos, bps). */
+        CommissionPreview: {
+            plans: components["schemas"]["PlanView"][];
+            /**
+             * Format: int32
+             * @description Comissão de referência da plataforma, em bps.
+             */
+            reference_bps: number;
+            sponsored?: components["schemas"]["SponsoredPreview"] | null;
+        };
         /** @description Consentimentos do registo. `marketing` ausente = `false` (nunca pré-assinalado). */
         ConsentsInput: {
             marketing?: boolean;
@@ -558,6 +590,27 @@ export interface components {
              *     para entrar neste painel; pode ser apagada.
              */
             valid: boolean;
+        };
+        /** @description Escalão para mostrar (só inteiros: cêntimos e bps). Cobre o volume mensal em `]from, to]`. */
+        PlanTierView: {
+            /** Format: int64 */
+            gmv_from_cents: number;
+            /**
+             * Format: int64
+             * @description `null` = sem teto.
+             */
+            gmv_to_cents?: number | null;
+            /** Format: int32 */
+            marginal_commission_bps: number;
+            /** Format: int64 */
+            monthly_fee_cents: number;
+        };
+        /** @description Plano com os seus escalões, por ordem de volume. */
+        PlanView: {
+            /** @description `true` só para o plano com que uma loja nasce. */
+            is_default: boolean;
+            plan_code: string;
+            tiers: components["schemas"]["PlanTierView"][];
         };
         /**
          * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
@@ -644,6 +697,16 @@ export interface components {
             logo_key?: string | null;
             name: string;
             slug: string;
+        };
+        /** @description Previsão do patrocínio (nada criado nem prometido). */
+        SponsoredPreview: {
+            /**
+             * Format: int32
+             * @description Comissão prevista com patrocínio ativo, em bps.
+             */
+            applied_bps: number;
+            /** @description Entidades que cobrem a freguesia, na ordem fixa dos selos. */
+            sponsors: components["schemas"]["SponsorSummary"][];
         };
         /** @description Resposta do login de staff. */
         StaffLoginResponse: {
@@ -1098,6 +1161,36 @@ export interface operations {
             };
             /** @description Serviço temporariamente indisponível */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    commission_preview: {
+        parameters: {
+            query?: {
+                /** @description DICOFRE da freguesia da loja (6 caracteres, opcional) */
+                dicofre?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Âncora de comissão (previsão; nada é criado nem prometido) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommissionPreview"];
+                };
+            };
+            /** @description Código com formato inválido, inexistente ou fora de vigor */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
