@@ -280,7 +280,7 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) V
 -- O movimento para o canal nacional (move_stores) corre sempre com o trinco ligado.
 ALTER TABLE stores DISABLE TRIGGER stores_national_tenant_guard;
 SET ROLE ptmarket_app;
-SELECT pg_temp.as_actor('system');
+SELECT pg_temp.as_actor('admin'); -- várias lojas de seguida: ator admin (âmbito por loja da 0035)
 
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000030a1', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
@@ -380,21 +380,20 @@ SELECT pg_temp.expect_error('SELECT pg_temp.move_stores()', 'P0001',
 SELECT pg_temp.expect_count(
     'SELECT (pg_temp.stores_state() = (SELECT s FROM snc_state))::int', 1, 'sem national_portal: nada mudou');
 
--- ES: um national_portal inativo não conta; só o ativo.
+-- ES: um national_portal inativo não conta; só o ativo. Desde a 0035 há um só national_portal por país (ativo ou
+-- não): o nacional ES nasce inativo e é depois ativado.
 INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code, is_active) VALUES
-    ('00000000-0000-7000-8000-0000000030a4', 'snc-nes-old', 'snc-nes-old.teste.invalid', 'Nacional ES antigo 30',
+    ('00000000-0000-7000-8000-0000000030a5', 'snc-nes', 'snc-nes.teste.invalid', 'Nacional ES 30',
      'national_portal', 'ES', false);
 SELECT pg_temp.expect_error('SELECT pg_temp.move_stores()', 'P0001',
     '%falha em: ES (0 national_portal ativos)%', 'national_portal inativo não conta');
-INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) VALUES
-    ('00000000-0000-7000-8000-0000000030a5', 'snc-nes', 'snc-nes.teste.invalid', 'Nacional ES 30',
-     'national_portal', 'ES');
+UPDATE tenants SET is_active = true WHERE id = '00000000-0000-7000-8000-0000000030a5';
 
 -- Slug repetido no canal PT (SA e SC, ambos 'padaria'); SES ('padaria', ES) não colide.
 -- SC nasce num tenant municipal: só o trinco da 0033 desligado, e só durante este INSERT (ver a secção 1).
 ALTER TABLE stores DISABLE TRIGGER stores_national_tenant_guard;
 SET ROLE ptmarket_app;
-SELECT pg_temp.as_actor('system');
+SELECT pg_temp.as_actor('admin'); -- várias lojas de seguida: ator admin (âmbito por loja da 0035)
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000030a2', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000030b9', '00000000-0000-7000-8000-0000000030a2',
@@ -488,7 +487,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM (TABLE snc_tenants EXCEPT TABLE tenants) d$q$, 0, 'tenants: nenhuma linha mudou');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM tenants WHERE id::text LIKE '00000000-0000-7000-8000-0000000030a%'$q$,
-    6, 'tenants municipais continuam a existir');
+    5, 'tenants municipais continuam a existir'); -- a0..a3 e a5 (0035: sem o 2.º nacional ES)
 SELECT pg_temp.force_rls(true);
 
 -- Idempotente: segunda passagem não muda nada.
@@ -501,7 +500,7 @@ SELECT pg_temp.expect_count(
 
 -- A app, no contexto do canal nacional PT, vê a loja movida, o produto e o histórico.
 SET ROLE ptmarket_app;
-SELECT pg_temp.as_actor('system');
+SELECT pg_temp.as_actor('admin'); -- várias lojas de seguida: ator admin (âmbito por loja da 0035)
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000030a0', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM product_price_history WHERE variant_id = '00000000-0000-7000-8000-0000000030d1'$q$,

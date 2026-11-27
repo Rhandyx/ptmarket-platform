@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,\n                set_config('app.portal_national', $9, true) AS portal_national,\n                set_config('app.session_id', $10, true) AS session_id",
+  "query": "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,\n                set_config('app.actor_type', $2, true) AS actor_type,\n                set_config('app.actor_id', $3, true) AS actor_id,\n                set_config('app.actor_label', $4, true) AS actor_label,\n                set_config('app.impersonator_id', $5, true) AS impersonator_id,\n                set_config('app.request_id', $6, true) AS request_id,\n                set_config('app.ip', $7, true) AS ip,\n                set_config('app.user_agent_hash', $8, true) AS user_agent_hash,\n                set_config('app.portal_national', $9, true) AS portal_national,\n                set_config('app.session_id', $10, true) AS session_id,\n                set_config('app.store_id', $11, true) AS store_id,\n                set_config('app.sponsor_entity_id', $12, true) AS sponsor_entity_id",
   "describe": {
     "columns": [
       {
@@ -62,10 +62,24 @@
         "name": "session_id",
         "type_info": "Text",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "store_id",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "sponsor_entity_id",
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
+        "Text",
         "Text",
         "Text",
         "Text",
@@ -88,8 +102,10 @@
       null,
       null,
       null,
+      null,
+      null,
       null
     ]
   },
-  "hash": "5fbc5007bd37719a206445c07e83a3fa64fa20c8c5f303355bb5555d3b55ea62"
+  "hash": "0615322bc0543bc5b87e584248fe22bcf3fe46bce2e942c50479fe4ebb261f8c"
 }

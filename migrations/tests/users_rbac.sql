@@ -81,14 +81,17 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code) V
 
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system', '');
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000013a1', true); -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000013a1', '00000000-0000-7000-8000-0000000013a0',
      'Loja SA', 'loja-sa', 'Loja SA Lda', '500001301', 'PT50000000000000000001301', 'sa@teste.invalid');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013c0', true);
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000013b1', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000013b1', '00000000-0000-7000-8000-0000000013c0',
      'Loja SB', 'loja-sb', 'Loja SB Lda', '500001302', 'PT50000000000000000001302', 'sb@teste.invalid');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000013a0', true);
+SELECT set_config('app.store_id', '', true);
 SELECT pg_temp.as_actor('', '');
 RESET ROLE;
 

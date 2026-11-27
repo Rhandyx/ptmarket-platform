@@ -184,6 +184,8 @@ SELECT set_config('app.actor_id', '', true);
 
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000c00a';
+-- Âmbito da loja (0035): as escritas da app em stores/products/variantes são da loja L1 (c0a1).
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'tenants.insert' AND target_type = 'tenants'
@@ -211,8 +213,9 @@ SELECT pg_temp.expect_value(
 SELECT pg_temp.l1_mark();
 
 SELECT pg_temp.expect_error(
-    $q$INSERT INTO stores (tenant_id, name, slug, legal_name, nif, iban, email)
-       VALUES ('00000000-0000-7000-8000-00000000c00a', 'S', 's', 'S Lda', '1', 'PT50', 's@teste.invalid')$q$,
+    $q$INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
+       VALUES ('00000000-0000-7000-8000-00000000c0a1', '00000000-0000-7000-8000-00000000c00a', 'S', 's', 'S Lda',
+               '1', 'PT50', 's@teste.invalid')$q$,
     'PTA01', 'app sem ator: INSERT em stores ⇒ PTA01');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO ptm_l1_probe (tenant_id, note) VALUES ('00000000-0000-7000-8000-00000000c00a', 'x')$q$,

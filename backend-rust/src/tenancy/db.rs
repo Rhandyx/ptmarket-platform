@@ -4,6 +4,13 @@
 //! (tabelas globais). Tudo vive em `app.*` com `is_local = true`: morre no COMMIT/ROLLBACK e nunca
 //! passa para o pedido seguinte que reutilize a ligação da pool. Nenhuma `Transaction` crua sai daqui.
 //!
+//! Âmbito por loja/entidade (0035, cartão 03/14): todas as lojas de um país partilham o tenant; as
+//! policies RESTRICTIVE comparam `store_id` com `app.store_id` e `sponsor_entity_id` com
+//! `app.sponsor_entity_id`. `begin_store_tx` só aceita um `StoreScope` e `begin_sponsor_tx` só um
+//! `SponsorScope` (ambos só nascem nos extractores de `identity::rbac`). Todas as transações põem os
+//! dois GUCs (`''` = sem âmbito): sem âmbito, `begin_tenant_tx` serve para leitura pública e para o
+//! que não é de loja; escrever numa tabela de loja falha na BD (salvo o ator `admin`).
+//!
 //! Sem `AuditCtx` não compila:
 //! ```compile_fail
 //! # async fn f(pool: &sqlx::PgPool, tenant: ptmarket_api::tenancy::TenantId) {
@@ -21,7 +28,11 @@ use std::ops::{Deref, DerefMut};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::{audit::AuditCtx, error::AppError};
+use crate::{
+    audit::AuditCtx,
+    error::AppError,
+    identity::rbac::{SponsorScope, StoreScope},
+};
 
 /// Identificador de tenant (Câmara). Só se cria no resolver do `Host` (`tenancy::resolver`);
 /// fora do crate, só com a feature `test-support` (testes de integração).
@@ -191,14 +202,34 @@ pub(super) enum PortalMode {
     On,
 }
 
-/// Fixa tenant, ator, sessão (`app.session_id`) e modo portal só para esta transação: uma query, `set_config(..., true)`
-/// (= `SET LOCAL`), valores sempre por parâmetro. `''` = sem valor (as funções da BD fazem
-/// `NULLIF(..., '')`).
+/// Âmbito da transação (GUCs `app.store_id` / `app.sponsor_entity_id`, policies da 0035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    None,
+    Store(Uuid),
+    Sponsor(Uuid),
+}
+
+/// Como `set_context_scoped`, sem âmbito de loja nem de entidade (portal e transações sem loja).
 pub(super) async fn set_context(
     conn: &mut PgConnection,
     tenant: Option<TenantId>,
     ctx: &AuditCtx,
     portal: PortalMode,
+) -> Result<(), AppError> {
+    set_context_scoped(conn, tenant, ctx, portal, Scope::None).await
+}
+
+/// Fixa tenant, ator, sessão (`app.session_id`), modo portal e âmbito (`app.store_id`,
+/// `app.sponsor_entity_id`) só para esta transação: uma query, `set_config(..., true)`
+/// (= `SET LOCAL`), valores sempre por parâmetro. `''` = sem valor (as funções da BD fazem
+/// `NULLIF(..., '')`); os dois GUCs de âmbito são sempre postos (nunca herdados).
+async fn set_context_scoped(
+    conn: &mut PgConnection,
+    tenant: Option<TenantId>,
+    ctx: &AuditCtx,
+    portal: PortalMode,
+    scope: Scope,
 ) -> Result<(), AppError> {
     fn text<T: ToString>(v: Option<T>) -> String {
         v.map(|x| x.to_string()).unwrap_or_default()
@@ -216,6 +247,11 @@ pub(super) async fn set_context(
         PortalMode::Off => "",
         PortalMode::On => "on",
     };
+    let (store_id, sponsor_entity_id) = match scope {
+        Scope::None => (String::new(), String::new()),
+        Scope::Store(id) => (id.to_string(), String::new()),
+        Scope::Sponsor(id) => (String::new(), id.to_string()),
+    };
     sqlx::query!(
         "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,
                 set_config('app.actor_type', $2, true) AS actor_type,
@@ -226,7 +262,9 @@ pub(super) async fn set_context(
                 set_config('app.ip', $7, true) AS ip,
                 set_config('app.user_agent_hash', $8, true) AS user_agent_hash,
                 set_config('app.portal_national', $9, true) AS portal_national,
-                set_config('app.session_id', $10, true) AS session_id",
+                set_config('app.session_id', $10, true) AS session_id,
+                set_config('app.store_id', $11, true) AS store_id,
+                set_config('app.sponsor_entity_id', $12, true) AS sponsor_entity_id",
         tenant_id,
         actor_type,
         actor_id,
@@ -236,7 +274,9 @@ pub(super) async fn set_context(
         ip,
         ua_hash,
         portal,
-        session_id
+        session_id,
+        store_id,
+        sponsor_entity_id
     )
     .fetch_one(conn)
     .await
@@ -244,14 +284,46 @@ pub(super) async fn set_context(
     Ok(())
 }
 
-/// Abre uma transação com o tenant e o ator fixados só para ela.
+/// Abre uma transação com o tenant e o ator fixados só para ela, sem âmbito de loja nem de entidade
+/// (leitura pública e o que não é de loja; escrever numa tabela de loja falha na BD).
 pub async fn begin_tenant_tx(
     pool: &PgPool,
     tenant: TenantId,
     ctx: &AuditCtx,
 ) -> Result<TenantTx, AppError> {
+    begin_scoped(pool, tenant, ctx, Scope::None).await
+}
+
+/// Abre uma transação no tenant da loja com `app.store_id` = a loja do `StoreScope` (provado por
+/// `RequireStoreRole`/`RequireStoreOwner`): só lê e escreve as linhas dessa loja (0035).
+pub async fn begin_store_tx(
+    pool: &PgPool,
+    scope: &StoreScope,
+    ctx: &AuditCtx,
+) -> Result<TenantTx, AppError> {
+    begin_scoped(pool, scope.tenant(), ctx, Scope::Store(scope.store_id())).await
+}
+
+/// Abre uma transação com `app.sponsor_entity_id` = a entidade do `SponsorScope` (provado por
+/// `RequireSponsorAdmin`). `tenant` TEM de ser o canal nacional do país da entidade (onde vivem as
+/// lojas e os patrocínios); outro tenant não vê patrocínio nenhum (`tenant_isolation`).
+pub async fn begin_sponsor_tx(
+    pool: &PgPool,
+    tenant: TenantId,
+    scope: &SponsorScope,
+    ctx: &AuditCtx,
+) -> Result<TenantTx, AppError> {
+    begin_scoped(pool, tenant, ctx, Scope::Sponsor(scope.entity_id())).await
+}
+
+async fn begin_scoped(
+    pool: &PgPool,
+    tenant: TenantId,
+    ctx: &AuditCtx,
+    scope: Scope,
+) -> Result<TenantTx, AppError> {
     let mut tx = pool.begin().await.map_err(db_error)?;
-    set_context(&mut tx, Some(tenant), ctx, PortalMode::Off).await?;
+    set_context_scoped(&mut tx, Some(tenant), ctx, PortalMode::Off, scope).await?;
     Ok(TenantTx {
         tenant,
         ctx: ctx.clone(),

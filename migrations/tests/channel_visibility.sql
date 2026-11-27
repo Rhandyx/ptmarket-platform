@@ -79,7 +79,8 @@ SELECT set_config('app.actor_label', 'test', true);
 
 -- ---------------------------------------------------------------------------
 -- 0. Preparação (migrator).
---   NP = nacional PT · NE = nacional ES · NI = nacional PT inativo
+--   NP = nacional PT · NE = nacional ES (0035: um só national_portal por país; o caso "nacional inativo" desativa o
+--   NP dentro de um savepoint, na secção 3)
 --   CA, CB = municipais PT (canais das Câmaras A e B) · CI = municipal PT inativo (canal da Câmara I) · M = municipal PT
 --   Entidades: EA Câmara (canal CA) · EB Câmara (canal CB) · EJ Junta (sem canal) · EX Câmara inativa (canal CA) ·
 --              EI Câmara (canal CI, inativo).
@@ -93,7 +94,6 @@ INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version) VALUES
 INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code, is_active) VALUES
     ('00000000-0000-7000-8000-0000000033a0', 'cv-npt', 'cv-npt.teste.invalid', 'Nacional PT 33', 'national_portal', 'PT', true),
     ('00000000-0000-7000-8000-0000000033a1', 'cv-nes', 'cv-nes.teste.invalid', 'Nacional ES 33', 'national_portal', 'ES', true),
-    ('00000000-0000-7000-8000-0000000033a2', 'cv-npi', 'cv-npi.teste.invalid', 'Nacional PT inativo 33', 'national_portal', 'PT', false),
     ('00000000-0000-7000-8000-0000000033c1', 'cv-ca', 'cv-ca.teste.invalid', 'Canal A 33', 'municipal', 'PT', true),
     ('00000000-0000-7000-8000-0000000033c2', 'cv-cb', 'cv-cb.teste.invalid', 'Canal B 33', 'municipal', 'PT', true),
     ('00000000-0000-7000-8000-0000000033c3', 'cv-ci', 'cv-ci.teste.invalid', 'Canal inativo 33', 'municipal', 'PT', false),
@@ -117,10 +117,11 @@ INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code, cha
 --          S4 pending · S5 rejected · S6 revoked · S7 expired · S8 active com valid_to passado ·
 --          S9 active com valid_from futuro (todos com EA) · S10 inativa (EA ativo) · S11 (EX inativa, ativo) ·
 --          S12 (EI, canal inativo, ativo).
---   No NE: SE (ES). No NI: SI (EA ativo; tenant inativo).
+--   No NE: SE (ES).
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_app;
-SELECT pg_temp.as_actor('system');
+-- Seed de várias lojas de uma vez: ator admin (âmbito por loja da 0035); as leituras (secções 2 e 3) voltam a 'system'.
+SELECT pg_temp.as_actor('admin');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a0', true);
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email, publish_to_national_portal, is_active,
                     shipping_scope)
@@ -153,31 +154,45 @@ INSERT INTO product_variants (id, tenant_id, product_id, price_cents, is_active)
      '00000000-0000-7000-8000-0000000033f4', 140, true);
 
 -- Patrocínios: nascem pending; a decisão é por UPDATE (trigger da 0031).
-INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
-    ('00000000-0000-7000-8000-000000033101', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003301', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033102', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003301', '00000000-0000-7000-8000-0000000033e3'),
-    ('00000000-0000-7000-8000-000000033103', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003302', '00000000-0000-7000-8000-0000000033e2'),
-    ('00000000-0000-7000-8000-000000033104', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003304', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033105', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003305', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033106', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003306', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033107', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003307', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033108', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003308', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-000000033109', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-000000003309', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-00000003310a', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-00000000330a', '00000000-0000-7000-8000-0000000033e1'),
-    ('00000000-0000-7000-8000-00000003310b', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-00000000330b', '00000000-0000-7000-8000-0000000033e4'),
-    ('00000000-0000-7000-8000-00000003310c', '00000000-0000-7000-8000-0000000033a0',
-     '00000000-0000-7000-8000-00000000330c', '00000000-0000-7000-8000-0000000033e5');
+-- 0035: o pedido é sempre da loja do contexto (INSERT só com app.store_id = store_id, nem o admin): uma linha de
+-- cada vez, com o app.store_id da loja.
+DO $$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN SELECT * FROM (VALUES
+        ('00000000-0000-7000-8000-000000033101', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003301', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033102', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003301', '00000000-0000-7000-8000-0000000033e3'),
+        ('00000000-0000-7000-8000-000000033103', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003302', '00000000-0000-7000-8000-0000000033e2'),
+        ('00000000-0000-7000-8000-000000033104', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003304', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033105', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003305', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033106', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003306', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033107', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003307', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033108', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003308', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-000000033109', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-000000003309', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-00000003310a', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-00000000330a', '00000000-0000-7000-8000-0000000033e1'),
+        ('00000000-0000-7000-8000-00000003310b', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-00000000330b', '00000000-0000-7000-8000-0000000033e4'),
+        ('00000000-0000-7000-8000-00000003310c', '00000000-0000-7000-8000-0000000033a0',
+         '00000000-0000-7000-8000-00000000330c', '00000000-0000-7000-8000-0000000033e5')
+    ) AS v(id, tenant_id, store_id, sponsor_entity_id) LOOP
+        PERFORM set_config('app.store_id', r.store_id, true);
+        INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id)
+        VALUES (r.id::uuid, r.tenant_id::uuid, r.store_id::uuid, r.sponsor_entity_id::uuid);
+    END LOOP;
+    PERFORM set_config('app.store_id', '', true);
+END
+$$;
 
 -- Ativos e vigentes (desde ontem, sem fim): S1 (EA, EJ), S2, S6 e S7 (antes de revogar/expirar), S10, S11, S12.
 UPDATE store_sponsorships SET status = 'active', valid_from = now() - interval '1 day'
@@ -199,16 +214,7 @@ SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a1
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000033b1', '00000000-0000-7000-8000-0000000033a1',
      'Tienda SE', 'cv-se', 'SE SL', 'B00003301', 'ES9100000000000000003301', 'se@teste.invalid');
-
-SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a2', true);
-INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
-    ('00000000-0000-7000-8000-0000000033b2', '00000000-0000-7000-8000-0000000033a2',
-     'Loja SI', 'cv-si', 'SI Lda', '500003399', 'PT50000000000000000003399', 'si@teste.invalid');
-INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
-    ('00000000-0000-7000-8000-00000003310d', '00000000-0000-7000-8000-0000000033a2',
-     '00000000-0000-7000-8000-0000000033b2', '00000000-0000-7000-8000-0000000033e1');
-UPDATE store_sponsorships SET status = 'active', valid_from = now() - interval '1 day'
-WHERE id = '00000000-0000-7000-8000-00000003310d';
+SELECT pg_temp.as_actor('system');
 
 -- ---------------------------------------------------------------------------
 -- 2. Isolamento entre canais (white-label; a flag nacional não muda nada num tenant municipal).
@@ -224,8 +230,8 @@ SELECT pg_temp.expect_count(
          '00000000-0000-7000-8000-000000003306', '00000000-0000-7000-8000-000000003307',
          '00000000-0000-7000-8000-000000003308', '00000000-0000-7000-8000-000000003309',
          '00000000-0000-7000-8000-00000000330a', '00000000-0000-7000-8000-00000000330b',
-         '00000000-0000-7000-8000-0000000033b1', '00000000-0000-7000-8000-0000000033b2')$q$,
-    0, 'canal A: sem canal B, sem patrocínio, pending/rejected/revoked/expired, fora da vigência, loja/entidade/tenant inativos');
+         '00000000-0000-7000-8000-0000000033b1')$q$,
+    0, 'canal A: sem canal B, sem patrocínio, pending/rejected/revoked/expired, fora da vigência, loja/entidade inativas');
 SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'canal A: stores sem linhas (tenant_isolation)');
 SELECT pg_temp.expect_count('SELECT count(*) FROM store_sponsorships', 0, 'canal A: store_sponsorships sem linhas');
 
@@ -297,9 +303,8 @@ SELECT pg_temp.expect_count(
     1, 'nacional PT vê S3 (publish_to_national_portal = false, pickup_only)');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores WHERE id IN ('00000000-0000-7000-8000-00000000330a',
-                                                       '00000000-0000-7000-8000-0000000033b1',
-                                                       '00000000-0000-7000-8000-0000000033b2')$q$,
-    0, 'nacional PT não vê loja inativa, loja ES nem loja de tenant inativo');
+                                                       '00000000-0000-7000-8000-0000000033b1')$q$,
+    0, 'nacional PT não vê loja inativa nem loja ES');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores WHERE id = '00000000-0000-7000-8000-000000003301'$q$,
     1, 'nacional PT: S1 co-patrocinada aparece uma só vez');
@@ -317,8 +322,18 @@ SET app.portal_national = 'on';
 
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a1', true);
 SELECT pg_temp.expect_text('SELECT string_agg(name, '','') FROM portal_stores', 'Tienda SE', 'nacional ES vê só SE');
-SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a2', true);
+-- Tenant da loja inativo (0035: um só national_portal por país): o NP é desativado só dentro deste savepoint.
+SAVEPOINT cv_ni;
+RESET ROLE;
+UPDATE tenants SET is_active = false WHERE id = '00000000-0000-7000-8000-0000000033a0';
+SET ROLE ptmarket_app;
+SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033a0', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'nacional inativo: portal_stores vazia');
+SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033c1', true);
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0,
+    'canal A: loja de tenant inativo (S1, EA ativo e vigente) não aparece');
+SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'canal A: 0 produtos de loja de tenant inativo');
+ROLLBACK TO SAVEPOINT cv_ni;
 SELECT set_config('app.current_tenant_id', '', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'sem contexto: portal_stores vazia');
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_store_badges', 0, 'sem contexto: 0 selos');

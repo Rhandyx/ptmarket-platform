@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET name = 'Loja Um' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2a9a5ef79c556a7af3eff43f22f3c964e06a24bf52ac8f7397ad4c5f01ad8576"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type)\n         VALUES ($1, $2, $3, $4, 'national_portal')",
+  "query": "INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code)\n         VALUES ($1, $2, 'PT', $3, $3, $4)",
   "describe": {
     "columns": [],
     "parameters": {
@@ -13,5 +13,5 @@
     },
     "nullable": []
   },
-  "hash": "7e7a417e9f59cd2dcf141f9e5c0862625e97e1ee473c1f6175dbeac0ef7ab688"
+  "hash": "79a912200846232d1e537c6b84c6a1de4a3a6cc84947015042f59e7b25c656bd"
 }

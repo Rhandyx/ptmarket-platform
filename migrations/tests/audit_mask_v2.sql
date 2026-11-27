@@ -281,6 +281,7 @@ SET ROLE ptmarket_app;
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000003ea', true);
 SELECT set_config('app.actor_type', 'merchant', true);
 SELECT set_config('app.actor_id', '00000000-0000-7000-8000-0000000003e9', true);
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000003c1', true); -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000003c1', '00000000-0000-7000-8000-0000000003ea',
      'Loja 03e', 'loja-03e', 'Loja 03e Lda', '512345678', 'PT50000201231234567890154', 'l@teste.invalid');
@@ -302,6 +303,7 @@ SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000003ea
 SELECT set_config('app.actor_type', 'merchant', true);
 DELETE FROM stores WHERE id = '00000000-0000-7000-8000-0000000003c1';
 SELECT set_config('app.actor_type', '', true);
+SELECT set_config('app.store_id', '', true);
 SELECT set_config('app.current_tenant_id', '', true);
 RESET ROLE;
 ALTER TABLE stores FORCE ROW LEVEL SECURITY;
@@ -422,10 +424,12 @@ SELECT pg_temp.expect_error(
        END $do$$q$,
     'PTA02', 'app: actor_label > 128 num bloco DO → PTA02');
 -- L1 acima do limite (actor_label > 128 e changes > 64 KiB): a escrita de negócio passa, cortado e marcado.
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000003c2', true); -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000003c2', '00000000-0000-7000-8000-0000000003ea',
      'Loja 03e L1', 'loja-03e-l1', 'Loja 03e L1 Lda', '512345678', 'PT50000201231234567890154', 'l1@teste.invalid');
 UPDATE stores SET vacation_message = pg_temp.blob(70000) WHERE id = '00000000-0000-7000-8000-0000000003c2';
+SELECT set_config('app.store_id', '', true);
 SELECT set_config('app.actor_label', '', true);
 SELECT set_config('app.actor_type', '', true);
 SELECT set_config('app.current_tenant_id', '', true);

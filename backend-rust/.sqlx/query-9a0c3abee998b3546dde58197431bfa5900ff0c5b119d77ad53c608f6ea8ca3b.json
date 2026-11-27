@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE store_sponsorships SET status = 'rejected' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a0c3abee998b3546dde58197431bfa5900ff0c5b119d77ad53c608f6ea8ca3b"
+}

@@ -86,6 +86,7 @@ ALTER TABLE product_price_history NO FORCE ROW LEVEL SECURITY;
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000100b';
+SET app.store_id = '00000000-0000-7000-8000-0000000010b1'; -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000010b1', '00000000-0000-7000-8000-00000000100b',
      'Omni B', 'omni-b', 'Omni B Lda', '500000012', 'PT50000000000000000000012', 'ob@teste.invalid');
@@ -104,6 +105,7 @@ SELECT pg_temp.expect_value(
 -- Dados do tenant A: 3 variantes.
 -- ---------------------------------------------------------------------------
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000100a';
+SET app.store_id = '00000000-0000-7000-8000-0000000010a1'; -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000010a1', '00000000-0000-7000-8000-00000000100a',
      'Omni A', 'omni-a', 'Omni A Lda', '500000011', 'PT50000000000000000000011', 'oa@teste.invalid');

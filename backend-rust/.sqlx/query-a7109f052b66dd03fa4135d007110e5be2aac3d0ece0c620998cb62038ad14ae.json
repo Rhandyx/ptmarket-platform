@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code)\n         VALUES ($1, $2, $3, $2, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a7109f052b66dd03fa4135d007110e5be2aac3d0ece0c620998cb62038ad14ae"
+}

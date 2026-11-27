@@ -156,8 +156,16 @@ pub fn api(
             get(identity::rbac::test_store),
         )
         .route(
+            "/api/v1/_test/stores/{store_id}/name",
+            axum::routing::put(identity::rbac::test_store_name),
+        )
+        .route(
             "/api/v1/_test/stores/{store_id}/owner",
             get(identity::rbac::test_store_owner),
+        )
+        .route(
+            "/api/v1/_test/sponsors/{entity_id}",
+            get(identity::rbac::test_sponsor),
         )
         .route(
             "/api/v1/_test/tenants/{tenant_id}/admin",

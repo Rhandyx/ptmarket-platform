@@ -17,8 +17,17 @@
 //!   E sessão com `mfa_verified_at`; qualquer falha → 404 + `Denied("superadmin_gate")` (a consola
 //!   não se anuncia). Aplicado ao grupo `/api/v1/superadmin/*` inteiro por `superadmin_gate`
 //!   (route_layer); os handlers leem `Extension<RequireSuperAdmin>` (sem ela → 500, falha fechado).
+//! - Âmbito na BD (cartão 03/14, policies RESTRICTIVE da 0035): `RequireStoreRole`/`RequireStoreOwner`
+//!   expõem `scope(): StoreScope` (→ `begin_store_tx`, GUC `app.store_id`) e `RequireSponsorAdmin`
+//!   expõe `scope(): SponsorScope` (→ `begin_sponsor_tx`, GUC `app.sponsor_entity_id`). Os dois tipos
+//!   só nascem nestes extractores (campos privados; fora do módulo só com `test-support`): o âmbito
+//!   da transação é sempre o que o papel provou.
 //!
 //! REGRA (spec 07 §1, decisão 1 do épico 03): `tenant_admin` não tem acesso a lojas.
+//!
+//! REGRA (spec 07 §1, também para `sponsor_admin`): nenhum papel de loja ou de entidade recebe
+//! `iban`, `invoicing_credentials_enc`, `eupago_split_key`, `stripe_account_id` nem
+//! `custom_commission_bps`: nenhum tipo de resposta deste módulo tem esses campos.
 
 use std::sync::Arc;
 
@@ -418,6 +427,82 @@ async fn store_grant<S: Send + Sync>(
     Ok((store_id, grant.role, TenantId::new(tenant)))
 }
 
+/// Âmbito de loja provado por `RequireStoreRole`/`RequireStoreOwner`: a loja e o tenant do papel.
+/// É o único argumento que abre `begin_store_tx` (GUC `app.store_id`). Campos privados e sem
+/// construtor público (fora deste módulo, só `for_tests` com a feature `test-support`):
+///
+/// ```compile_fail,E0451
+/// # fn f(t: ptmarket_api::tenancy::TenantId, id: uuid::Uuid) {
+/// let _ = ptmarket_api::identity::rbac::StoreScope { tenant: t, store_id: id };
+/// # }
+/// ```
+///
+/// Nem pelo extractor montado à mão:
+///
+/// ```compile_fail,E0451
+/// # fn f(r: ptmarket_api::identity::rbac::RequireStoreRole) {
+/// let _ = ptmarket_api::identity::rbac::RequireStoreRole { scope: r.scope(), ..r };
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreScope {
+    tenant: TenantId,
+    store_id: Uuid,
+}
+
+impl StoreScope {
+    /// Só os extractores de loja deste módulo.
+    fn new(tenant: TenantId, store_id: Uuid) -> Self {
+        Self { tenant, store_id }
+    }
+
+    /// Só para testes de integração (`tests/`); não existe em `cargo build --release`.
+    #[cfg(feature = "test-support")]
+    pub fn for_tests(tenant: TenantId, store_id: Uuid) -> Self {
+        Self::new(tenant, store_id)
+    }
+
+    /// Tenant do papel (`user_roles.tenant_id`): o canal nacional do país da loja.
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    pub fn store_id(&self) -> Uuid {
+        self.store_id
+    }
+}
+
+/// Âmbito de entidade patrocinadora provado por `RequireSponsorAdmin`. É o único argumento que abre
+/// `begin_sponsor_tx` (GUC `app.sponsor_entity_id`). Campos privados e sem construtor público (fora
+/// deste módulo, só `for_tests` com a feature `test-support`):
+///
+/// ```compile_fail,E0451
+/// # fn f(id: uuid::Uuid) {
+/// let _ = ptmarket_api::identity::rbac::SponsorScope { entity_id: id };
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SponsorScope {
+    entity_id: Uuid,
+}
+
+impl SponsorScope {
+    /// Só `RequireSponsorAdmin`.
+    fn new(entity_id: Uuid) -> Self {
+        Self { entity_id }
+    }
+
+    /// Só para testes de integração (`tests/`); não existe em `cargo build --release`.
+    #[cfg(feature = "test-support")]
+    pub fn for_tests(entity_id: Uuid) -> Self {
+        Self::new(entity_id)
+    }
+
+    pub fn entity_id(&self) -> Uuid {
+        self.entity_id
+    }
+}
+
 /// `merchant_owner`/`merchant_staff` da loja `{store_id}`. Sem papel nela ou loja inexistente → 404
 /// + `Denied("idor")` (sem ler `stores`: o papel é a prova).
 #[derive(Debug, Clone, Copy)]
@@ -427,6 +512,14 @@ pub struct RequireStoreRole {
     /// Tenant do pedido: o do papel (`user_roles.tenant_id`).
     pub tenant_id: TenantId,
     pub role: Role,
+    scope: StoreScope,
+}
+
+impl RequireStoreRole {
+    /// Âmbito para `begin_store_tx`.
+    pub fn scope(&self) -> StoreScope {
+        self.scope
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for RequireStoreRole {
@@ -440,6 +533,7 @@ impl<S: Send + Sync> FromRequestParts<S> for RequireStoreRole {
             store_id,
             tenant_id,
             role,
+            scope: StoreScope::new(tenant_id, store_id),
         })
     }
 }
@@ -453,6 +547,14 @@ pub struct RequireStoreOwner {
     pub store_id: Uuid,
     /// Tenant do pedido: o do papel (`user_roles.tenant_id`).
     pub tenant_id: TenantId,
+    scope: StoreScope,
+}
+
+impl RequireStoreOwner {
+    /// Âmbito para `begin_store_tx`.
+    pub fn scope(&self) -> StoreScope {
+        self.scope
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for RequireStoreOwner {
@@ -469,9 +571,58 @@ impl<S: Send + Sync> FromRequestParts<S> for RequireStoreOwner {
                 user_id: roles.user_id(),
                 store_id,
                 tenant_id,
+                scope: StoreScope::new(tenant_id, store_id),
             }),
             _ => Err(denied(DENIED_RBAC, AppError::Forbidden)),
         }
+    }
+}
+
+/// `sponsor_admin` da entidade `{entity_id}` (`RoleGrant.sponsor_entity_id`) com a sessão elevada por
+/// 2FA, SEMPRE: sem 2FA → 403 `mfa_required` (antes de olhar para o recurso). Sem `sponsor_admin`
+/// nenhum → 403 `rbac`; outra entidade, entidade inexistente ou `{entity_id}` inválido → 404 + `idor`.
+/// O tenant da transação (canal nacional do país da entidade) é resolvido pelo módulo que o usa.
+#[derive(Debug, Clone, Copy)]
+pub struct RequireSponsorAdmin {
+    pub user_id: Uuid,
+    scope: SponsorScope,
+}
+
+impl RequireSponsorAdmin {
+    /// Âmbito para `begin_sponsor_tx`.
+    pub fn scope(&self) -> SponsorScope {
+        self.scope
+    }
+
+    pub fn entity_id(&self) -> Uuid {
+        self.scope.entity_id
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for RequireSponsorAdmin {
+    type Rejection = RbacRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // `sponsor_admin` exige sempre 2FA (`needs_mfa`): `staff_parts` já recusa sem ele; a
+        // verificação abaixo repete-a para falhar fechado se `needs_mfa` mudar.
+        let (roles, info) = staff_parts(parts, Mfa::Enforce)?;
+        if !roles.has_here(Role::SponsorAdmin) {
+            return Err(denied(DENIED_RBAC, AppError::Forbidden));
+        }
+        if info.mfa_verified_at.is_none() {
+            return Err(denied(DENIED_MFA, AppError::Forbidden));
+        }
+        let entity = path_uuid(parts, state, "entity_id").await?;
+        if !roles
+            .here()
+            .any(|g| g.role == Role::SponsorAdmin && g.sponsor_entity_id == Some(entity))
+        {
+            return Err(denied(DENIED_IDOR, AppError::NotFound));
+        }
+        Ok(Self {
+            user_id: roles.user_id(),
+            scope: SponsorScope::new(entity),
+        })
     }
 }
 
@@ -568,14 +719,79 @@ pub async fn superadmin_whoami(
     Ok(no_store(Json(body).into_response()))
 }
 
-/// Rota de prova (só com a feature `test-support`): `GET /api/v1/_test/stores/{store_id}`.
+/// Rota de prova (só com a feature `test-support`): `GET /api/v1/_test/stores/{store_id}`. Lê o
+/// nome da loja dentro de `begin_store_tx` (filtro pela loja do papel + RLS); sem linha → 404.
 #[cfg(feature = "test-support")]
-pub async fn test_store(r: RequireStoreRole) -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
+pub async fn test_store(
+    State(st): State<AppState>,
+    r: RequireStoreRole,
+    ctx: AuditCtx,
+) -> Result<Response, AppError> {
+    let mut tx = crate::tenancy::db::begin_store_tx(&st.db_primary, &r.scope(), &ctx).await?;
+    let name = sqlx::query_scalar!("SELECT name FROM stores WHERE id = $1", r.store_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.rollback().await?;
+    let Some(name) = name else {
+        return Err(AppError::NotFound);
+    };
+    let body = serde_json::json!({
         "store_id": r.store_id,
         "tenant_id": r.tenant_id.as_uuid(),
         "role": r.role,
-    }))
+        "name": name,
+    });
+    Ok(no_store(Json(body).into_response()))
+}
+
+/// Corpo de `PUT /api/v1/_test/stores/{store_id}/name` (só `test-support`).
+#[cfg(feature = "test-support")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestStoreName {
+    pub name: String,
+}
+
+/// Rota de prova (só `test-support`): muda o nome da loja dentro de `begin_store_tx`. Nome vazio
+/// ou com mais de 255 caracteres → 422; loja sem linha → 404.
+#[cfg(feature = "test-support")]
+pub async fn test_store_name(
+    State(st): State<AppState>,
+    r: RequireStoreRole,
+    ctx: AuditCtx,
+    Json(body): Json<TestStoreName>,
+) -> Result<Response, AppError> {
+    let name = body.name.trim();
+    if name.is_empty() || name.chars().count() > 255 {
+        return Err(AppError::Validation(vec![crate::error::FieldError {
+            field: "name".to_owned(),
+            message: "1 a 255 caracteres".to_owned(),
+        }]));
+    }
+    let mut tx = crate::tenancy::db::begin_store_tx(&st.db_primary, &r.scope(), &ctx).await?;
+    let done = sqlx::query!(
+        "UPDATE stores SET name = $2 WHERE id = $1",
+        r.store_id,
+        name
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    if done.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Err(AppError::NotFound);
+    }
+    tx.commit().await?;
+    Ok(no_store(
+        Json(serde_json::json!({ "store_id": r.store_id, "name": name })).into_response(),
+    ))
+}
+
+/// Rota de prova do `RequireSponsorAdmin` (só `test-support`): `GET /api/v1/_test/sponsors/{entity_id}`.
+#[cfg(feature = "test-support")]
+pub async fn test_sponsor(r: RequireSponsorAdmin) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "entity_id": r.entity_id(), "user_id": r.user_id }))
 }
 
 /// Rota de prova do `RequireStoreOwner` (só `test-support`).

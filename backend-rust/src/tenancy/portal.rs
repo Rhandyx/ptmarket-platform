@@ -223,13 +223,11 @@ impl PortalReadTx {
     /// A loja `slug` se for visível NESTE canal; `None` caso contrário (não revela se existe
     /// noutro canal).
     pub async fn store_by_slug(&mut self, slug: &str) -> Result<Option<PortalStore>, AppError> {
-        let rows = sqlx::query_as::<_, StoreRow>(store_select!(
-            "WHERE s.slug = $1::text ORDER BY s.id LIMIT 1"
-        ))
-        .bind(slug)
-        .fetch_all(&mut *self.tx)
-        .await
-        .map_err(db_error)?;
+        let rows = sqlx::query_as::<_, StoreRow>(store_select!("WHERE s.slug = $1::text LIMIT 1"))
+            .bind(slug)
+            .fetch_all(&mut *self.tx)
+            .await
+            .map_err(db_error)?;
         Ok(self.with_badges(rows).await?.into_iter().next())
     }
 

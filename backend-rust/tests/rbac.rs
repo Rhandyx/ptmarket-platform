@@ -3,7 +3,8 @@
 //! `/api/v1/_test/*` (feature `test-support`).
 //!
 //! Contas e papéis nascem pelo dono (a app não escreve `users`/`user_roles`): `NO FORCE ROW LEVEL
-//! SECURITY` só dentro da transação do seed. As lojas nascem num tenant `national_portal`. Os
+//! SECURITY` só dentro da transação do seed. As lojas nascem num tenant `national_portal` (um por país,
+//! 0035), pela app com o âmbito da própria loja (`begin_store_tx`). Os
 //! eventos da plataforma (`tenant_id` NULL) leem-se pela porta do super_admin (`common`).
 
 mod common;
@@ -26,6 +27,7 @@ use http_body_util::BodyExt;
 use ptmarket_api::{
     audit::{ActorType, AuditCtx},
     http::{api, audit_layer::AuditLayerState, client_ip::TrustedProxies},
+    identity::rbac::StoreScope,
     identity::{
         AccountKey, BreachChecker, CaptchaVerifier, Login, Password, Registration, Sessions,
         password,
@@ -33,7 +35,10 @@ use ptmarket_api::{
     },
     state::AppState,
     storage::NullStorage,
-    tenancy::{HostResolver, TenantId, begin_tenant_tx, db::begin_platform_tx},
+    tenancy::{
+        HostResolver, TenantId, begin_tenant_tx,
+        db::{begin_platform_tx, begin_store_tx},
+    },
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -190,6 +195,37 @@ async fn send(
     })
 }
 
+/// Mutação com sessão: `Origin` do host e o token CSRF da sessão.
+async fn mutate(
+    app: &Router,
+    method: Method,
+    host: &str,
+    uri: &str,
+    cookie: &str,
+    body: &str,
+) -> anyhow::Result<Reply> {
+    let s = get(app, host, "/api/v1/auth/session", cookie).await?;
+    let csrf = s.json()["csrf_token"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("sem csrf_token: {}", s.body))?;
+    let origin = format!("https://{host}");
+    send(
+        app,
+        method,
+        uri,
+        &[
+            (header::HOST, host),
+            (header::COOKIE, cookie),
+            (header::ORIGIN, &origin),
+            (header::CONTENT_TYPE, "application/json"),
+            (HeaderName::from_static("x-csrf-token"), &csrf),
+        ],
+        body,
+    )
+    .await
+}
+
 async fn staff_login(app: &Router, host: &str, email: &str, pw: &str) -> anyhow::Result<Reply> {
     let origin = format!("https://{host}");
     let body = json!({"email": email, "password": pw});
@@ -233,17 +269,28 @@ impl Tenant {
     }
 }
 
-/// Tenant `national_portal` (onde nascem as lojas) ou `municipal` (só um Host de canal).
+/// Tenant `national_portal` (onde nascem as lojas) ou `municipal` (só um Host de canal), em PT.
 async fn seed_tenant(owner: &PgPool, slug: &str, tenant_type: &str) -> sqlx::Result<Tenant> {
+    seed_tenant_in(owner, slug, tenant_type, "PT").await
+}
+
+/// Como `seed_tenant`, no país `country` (um só `national_portal` por país, 0035).
+async fn seed_tenant_in(
+    owner: &PgPool,
+    slug: &str,
+    tenant_type: &str,
+    country: &str,
+) -> sqlx::Result<Tenant> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.ptmarket.invalid");
     sqlx::query!(
         "INSERT INTO tenants (id, slug, custom_domain, name, country_code, tenant_type)
-         VALUES ($1, $2, $3, $4, 'PT', $5)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
         id,
         slug,
         domain,
         format!("Canal {slug}"),
+        country,
         tenant_type
     )
     .execute(owner)
@@ -251,10 +298,11 @@ async fn seed_tenant(owner: &PgPool, slug: &str, tenant_type: &str) -> sqlx::Res
     Ok(Tenant { id, domain })
 }
 
+/// Loja pela app, com o âmbito da própria loja (`app.store_id` = o id novo, gerado em Rust: 0035).
 async fn seed_store(app: &PgPool, t: &Tenant, slug: &str) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None);
-    let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
+    let mut tx = begin_store_tx(app, &StoreScope::for_tests(t.tid(), id), &ctx).await?;
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
          VALUES ($1, $2, $3, $3, $3, '500000000', 'PT50000000000000000000000', 'loja@test.invalid')",
@@ -279,6 +327,41 @@ async fn seed_entity(owner: &PgPool, slug: &str) -> sqlx::Result<Uuid> {
     .execute(owner)
     .await?;
     Ok(id)
+}
+
+/// Câmara (`municipality`, concelho `9301`) ou Junta (`parish`, freguesia `930101`) de PT, pelo
+/// dono. As áreas DICOFRE de teste nascem antes (`seed_test_areas`).
+async fn seed_area_entity(
+    owner: &PgPool,
+    kind: &str,
+    slug: &str,
+    area: &str,
+) -> sqlx::Result<Uuid> {
+    let id = Uuid::now_v7();
+    sqlx::query!(
+        "INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code)
+         VALUES ($1, $2, 'PT', $3, $3, $4)",
+        id,
+        kind,
+        slug,
+        area
+    )
+    .execute(owner)
+    .await?;
+    Ok(id)
+}
+
+/// Distrito `93`, concelho `9301` e freguesia `930101` de teste (DICOFRE), pelo dono.
+async fn seed_test_areas(owner: &PgPool) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO geo_dicofre (code, level, parent_code, name, caop_version) VALUES
+            ('93', 'district', NULL, 'Distrito Teste', 'T'),
+            ('9301', 'municipality', '93', 'Concelho A', 'T'),
+            ('930101', 'parish', '9301', 'Freguesia B', 'T')"
+    )
+    .execute(owner)
+    .await?;
+    Ok(())
 }
 
 /// Papel: (role, tenant, loja, entidade).
@@ -910,4 +993,131 @@ async fn session_lifetime_follows_the_role(
         cleanup(&ns).await?;
     }
     Ok(())
+}
+
+/// Âmbito de loja e de entidade pelo lado do extractor (cartão 03/14): o merchant de L1 lê e
+/// escreve L1 (dentro de `begin_store_tx`); L2 do mesmo país (mesmo tenant), uma loja ES e um UUID
+/// inexistente → 404 + `idor`. O `sponsor_admin` da Câmara A → 200 em A e 404 + `idor` na Junta B
+/// e num UUID inexistente; sem 2FA → 403 `mfa_required`; um merchant numa rota de entidade → 403
+/// `rbac`.
+#[sqlx::test(migrations = "../migrations")]
+async fn store_and_sponsor_scope_from_the_extractor(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let pool = app_login_pool(&opts, &conn).await?;
+    let owner = owner_pool(&opts, &conn).await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
+    let pt = seed_tenant_in(&owner, "nacional-pt", "national_portal", "PT").await?;
+    let es = seed_tenant_in(&owner, "nacional-es", "national_portal", "ES").await?;
+    let l1 = seed_store(&pool, &pt, "loja-1").await?;
+    let l2 = seed_store(&pool, &pt, "loja-2").await?;
+    let les = seed_store(&pool, &es, "tienda").await?;
+    seed_test_areas(&owner).await?;
+    let camara_a = seed_area_entity(&owner, "municipality", "camara-a", "9301").await?;
+    let junta_b = seed_area_entity(&owner, "parish", "junta-b", "930101").await?;
+    let dona = seed_user(
+        &owner,
+        "dona@x.pt",
+        true,
+        &[merchant("merchant_owner", &pt, l1)],
+    )
+    .await?;
+    let sponsor = seed_user(
+        &owner,
+        "camara@x.pt",
+        true,
+        &[("sponsor_admin", None, None, Some(camara_a))],
+    )
+    .await?;
+    let ns = format!("test:rbac:{}:", Uuid::now_v7());
+    let app = router(&pool, &ns)?;
+    let store = |l: Uuid| format!("/api/v1/_test/stores/{l}");
+    let entity = |e: &str| format!("/api/v1/_test/sponsors/{e}");
+    let d = |e: &Value| is(e, "outcome", "denied");
+
+    // Merchant de L1: lê e escreve L1; L2 (mesmo tenant), ES e inexistente → 404.
+    let c = staff_login(&app, PLATFORM, "dona@x.pt", PW)
+        .await?
+        .cookie()?;
+    let r = get(&app, PLATFORM, &store(l1), &c).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json()["name"], json!("loja-1"));
+    assert_eq!(r.json()["tenant_id"], json!(pt.id));
+    let body = json!({"name": "Loja Um"}).to_string();
+    let r = mutate(
+        &app,
+        Method::PUT,
+        PLATFORM,
+        &format!("{}/name", store(l1)),
+        &c,
+        &body,
+    )
+    .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = get(&app, PLATFORM, &store(l1), &c).await?;
+    assert_eq!(r.json()["name"], json!("Loja Um"));
+    for other in [l2, les, Uuid::now_v7()] {
+        let r = get(&app, PLATFORM, &store(other), &c).await?;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{other}: {}", r.body);
+    }
+    let r = mutate(
+        &app,
+        Method::PUT,
+        PLATFORM,
+        &format!("{}/name", store(l2)),
+        &c,
+        &body,
+    )
+    .await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    // Merchant numa rota de entidade → 403 `rbac`.
+    let r = get(&app, PLATFORM, &entity(&camara_a.to_string()), &c).await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    let evs = reader.events(&pool, Some(dona)).await?;
+    assert_eq!(
+        count(&evs, |e| d(e) && is(e, "reason", "idor")),
+        4,
+        "{evs:?}"
+    );
+    assert_eq!(
+        count(&evs, |e| d(e) && is(e, "reason", "rbac")),
+        1,
+        "{evs:?}"
+    );
+
+    // sponsor_admin da Câmara A: sem 2FA → 403; com 2FA → 200 em A, 404 na Junta B e inexistente.
+    let r = staff_login(&app, PLATFORM, "camara@x.pt", PW).await?;
+    assert_eq!(r.json(), json!({"mfa_required": true}), "{}", r.body);
+    let cs = r.cookie()?;
+    let r = get(&app, PLATFORM, &entity(&camara_a.to_string()), &cs).await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    elevate(&pool, sponsor).await?;
+    let r = get(&app, PLATFORM, &entity(&camara_a.to_string()), &cs).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.json(), json!({"entity_id": camara_a, "user_id": sponsor}));
+    for other in [
+        junta_b.to_string(),
+        Uuid::now_v7().to_string(),
+        "nao-e-uuid".to_owned(),
+    ] {
+        let r = get(&app, PLATFORM, &entity(&other), &cs).await?;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{other}: {}", r.body);
+    }
+    // E nenhuma loja (o papel de entidade não dá âmbito de loja).
+    let r = get(&app, PLATFORM, &store(l1), &cs).await?;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    let evs = reader.events(&pool, Some(sponsor)).await?;
+    let mine = |e: &Value| uid(e) == Some(sponsor) && is(e, "actor_type", "municipal");
+    assert_eq!(
+        count(&evs, |e| mine(e) && d(e) && is(e, "reason", "mfa_required")),
+        1,
+        "{evs:?}"
+    );
+    assert_eq!(
+        count(&evs, |e| mine(e) && d(e) && is(e, "reason", "idor")),
+        4,
+        "{evs:?}"
+    );
+    cleanup(&ns).await
 }

@@ -81,8 +81,9 @@ END
 $$;
 
 -- Tenants (globais):  P = portal nacional PT · A = municipal PT (canal da entidade EA) · B, M = municipais PT ·
---   E = portal nacional ES · X = portal nacional PT inativo · H = tenant de contexto dos eventos de identidade.
---   Desde a 0033 as lojas só vivem em tenants national_portal (P, E, X).
+--   E = portal nacional ES · H = tenant de contexto dos eventos de identidade.
+--   Desde a 0033 as lojas só vivem em tenants national_portal (P, E). Desde a 0035 há um só national_portal por país:
+--   o caso "tenant inativo" desativa o P dentro de um savepoint (secção C).
 -- Clientes: C1 = 21c1 (verificado) · C2 = 21c2 (verificado).  Utilizadores: UX = 21e1 · UY = 21e2.
 SELECT set_config('app.actor_label', 'test', true);
 SELECT set_config('app.actor_type', '', true);
@@ -94,7 +95,6 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code, i
     ('00000000-0000-7000-8000-0000000021b0', 'h21-b', 'h21-b.teste.invalid', 'Tenant B', 'municipal', 'PT', true),
     ('00000000-0000-7000-8000-0000000021c0', 'h21-m', 'h21-m.teste.invalid', 'Tenant M', 'municipal', 'PT', true),
     ('00000000-0000-7000-8000-0000000021e0', 'h21-e', 'h21-e.teste.invalid', 'Portal ES', 'national_portal', 'ES', true),
-    ('00000000-0000-7000-8000-0000000021d0', 'h21-x', 'h21-x.teste.invalid', 'Portal PT X', 'national_portal', 'PT', false),
     ('00000000-0000-7000-8000-0000000021f9', 'h21-h', 'h21-h.teste.invalid', 'Tenant H', 'municipal', 'PT', true);
 
 ALTER TABLE customers NO FORCE ROW LEVEL SECURITY;
@@ -271,9 +271,10 @@ INSERT INTO sponsor_entities (id, kind, country_code, name, slug, channel_tenant
      '00000000-0000-7000-8000-0000000021a0');
 
 SET ROLE ptmarket_app;
-SELECT pg_temp.as_actor('system', '');
+-- Seed de várias lojas de seguida: ator admin (âmbito por loja da 0035); as leituras voltam a 'system'.
+SELECT pg_temp.as_actor('admin', '');
 -- Todas no portal P: a1 publicada · a2 não publicada · a3 publicada mas inativa · b1 publicada · m1 não publicada.
--- E (portal ES): e1 publicada. X (portal PT inativo): x1 publicada. EA patrocina a1, b1 e a3 (ativo e vigente).
+-- E (portal ES): e1 publicada. EA patrocina a1, b1 e a3 (ativo e vigente).
 -- custom_commission_bps/kyc_verified ficam no default: desde a 0029 a app não os escreve (as asserções do portal
 -- abaixo não dependem do valor).
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021f0';
@@ -308,23 +309,27 @@ INSERT INTO product_variants (id, tenant_id, product_id, price_cents) VALUES
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-00000021c001', '00000000-0000-7000-8000-0000000021f0', 'Loja M1', 'h21-m1', 'M1 Lda',
      '500002121', 'PT50000000000000000002121', 'm1@teste.invalid');
+-- 0035: o pedido de patrocínio é sempre da loja do contexto (app.store_id = store_id).
+SET app.store_id = '00000000-0000-7000-8000-00000021a001';
 INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
     ('00000000-0000-7000-8000-0000000021b5', '00000000-0000-7000-8000-0000000021f0',
-     '00000000-0000-7000-8000-00000021a001', '00000000-0000-7000-8000-0000000021ea'),
+     '00000000-0000-7000-8000-00000021a001', '00000000-0000-7000-8000-0000000021ea');
+SET app.store_id = '00000000-0000-7000-8000-00000021b001';
+INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
     ('00000000-0000-7000-8000-0000000021b6', '00000000-0000-7000-8000-0000000021f0',
-     '00000000-0000-7000-8000-00000021b001', '00000000-0000-7000-8000-0000000021ea'),
+     '00000000-0000-7000-8000-00000021b001', '00000000-0000-7000-8000-0000000021ea');
+SET app.store_id = '00000000-0000-7000-8000-00000021a003';
+INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
     ('00000000-0000-7000-8000-0000000021b7', '00000000-0000-7000-8000-0000000021f0',
      '00000000-0000-7000-8000-00000021a003', '00000000-0000-7000-8000-0000000021ea');
+RESET app.store_id;
 UPDATE store_sponsorships SET status = 'active', valid_from = now() - interval '1 day'
 WHERE tenant_id = '00000000-0000-7000-8000-0000000021f0';
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021e0';
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email, publish_to_national_portal) VALUES
     ('00000000-0000-7000-8000-00000021e001', '00000000-0000-7000-8000-0000000021e0', 'Tienda E1', 'h21-e1', 'E1 SL',
      'B00002131', 'ES9100000000000000002131', 'e1@teste.invalid', true);
-SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021d0';
-INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email, publish_to_national_portal) VALUES
-    ('00000000-0000-7000-8000-00000021d001', '00000000-0000-7000-8000-0000000021d0', 'Loja X1', 'h21-x1', 'X1 Lda',
-     '500002141', 'PT50000000000000000002141', 'x1@teste.invalid', true);
+SELECT pg_temp.as_actor('system', '');
 
 -- Canal A (white-label, com a flag: não muda nada num tenant municipal).
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021a0';
@@ -356,9 +361,8 @@ SELECT pg_temp.expect_count(
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores
        WHERE id IN ('00000000-0000-7000-8000-00000021a002', '00000000-0000-7000-8000-00000021c001',
-                    '00000000-0000-7000-8000-00000021a003', '00000000-0000-7000-8000-00000021e001',
-                    '00000000-0000-7000-8000-00000021d001')$q$,
-    0, 'canal A: portal_stores sem lojas não patrocinadas, inativas, de outro país ou de tenant inativo');
+                    '00000000-0000-7000-8000-00000021a003', '00000000-0000-7000-8000-00000021e001')$q$,
+    0, 'canal A: portal_stores sem lojas não patrocinadas, inativas ou de outro país');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores
        WHERE id = '00000000-0000-7000-8000-00000021a001' AND legal_name = 'A1 Lda' AND nif = '500002101'
@@ -397,7 +401,7 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM products WHERE tenant_id <> '00000000-0000-7000-8000-0000000021c0'$q$,
     0, 'municipal M com flag: 0 produtos de terceiros');
 
--- Portal P com a flag: todas as lojas ativas de P (A2 e M1 sem opt-in incluídas); nada de E nem de X.
+-- Portal P com a flag: todas as lojas ativas de P (A2 e M1 sem opt-in incluídas); nada de E.
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021f0';
 SELECT pg_temp.expect_count('SELECT (SELECT app_is_national_portal())::int', 1, 'portal P: modo portal ativo');
 SELECT pg_temp.expect_count(
@@ -406,7 +410,17 @@ SELECT pg_temp.expect_count(
                     '00000000-0000-7000-8000-00000021b001', '00000000-0000-7000-8000-00000021c001')$q$,
     4, 'portal P: portal_stores mostra as 4 lojas ativas de P');
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 4,
-    'portal P: sem loja inativa, de outro país ou de tenant inativo');
+    'portal P: sem loja inativa nem de outro país');
+-- Tenant da loja inativo (0035: um só national_portal por país): o P é desativado só dentro deste savepoint.
+SAVEPOINT h21_ni;
+RESET ROLE;
+UPDATE tenants SET is_active = false WHERE id = '00000000-0000-7000-8000-0000000021f0';
+SET ROLE ptmarket_app;
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'portal P inativo: portal_stores vazia');
+SET app.current_tenant_id = '00000000-0000-7000-8000-0000000021a0';
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0,
+    'canal A: lojas patrocinadas por EA num tenant inativo não aparecem');
+ROLLBACK TO SAVEPOINT h21_ni;
 RESET app.portal_national;
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'portal P sem flag: portal_stores vazia');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000021f9', true);

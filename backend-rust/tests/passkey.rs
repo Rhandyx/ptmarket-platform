@@ -28,6 +28,7 @@ use ptmarket_api::{
     audit::{ActorType, AuditCtx},
     config::AppEnv,
     http::{api, audit_layer::AuditLayerState, client_ip::TrustedProxies},
+    identity::rbac::StoreScope,
     identity::{
         AccountKey, CaptchaVerifier, Login, Passkeys, Password, Sessions, Subject, password,
         session::{self, COOKIE_PLATFORM},
@@ -35,7 +36,10 @@ use ptmarket_api::{
     },
     state::AppState,
     storage::NullStorage,
-    tenancy::{HostResolver, TenantId, begin_tenant_tx, db::begin_platform_tx},
+    tenancy::{
+        HostResolver, TenantId, begin_tenant_tx,
+        db::{begin_platform_tx, begin_store_tx},
+    },
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -412,7 +416,9 @@ async fn seed_tenant(owner: &PgPool, slug: &str, tenant_type: &str) -> sqlx::Res
 async fn seed_store(app: &PgPool, t: &Tenant, slug: &str) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None);
-    let mut tx = begin_tenant_tx(app, TenantId::for_tests(t.id), &ctx).await?;
+    // Âmbito da própria loja (`app.store_id` = o id novo, gerado em Rust: 0035).
+    let scope = StoreScope::for_tests(TenantId::for_tests(t.id), id);
+    let mut tx = begin_store_tx(app, &scope, &ctx).await?;
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
          VALUES ($1, $2, $3, $3, $3, '500000000', 'PT50000000000000000000000', 'loja@test.invalid')",

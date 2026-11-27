@@ -6,10 +6,10 @@
 Mesmo com todas as lojas de um país no mesmo `tenant_id`, a `ptmarket_app` só escreve e só lê em backoffice as linhas da loja (ou da entidade) que o extractor pôs no contexto; a leitura pública continua a passar pelo portal.
 
 ## Pode alterar
-- `migrations/0034_store_scope_rls.sql`, `migrations/tests/store_scope_rls.sql` (criar); testes existentes em `migrations/tests/` que escrevem em tabelas de loja como `ptmarket_app` (só acrescentar o GUC ao contexto; não mudar o que provam)
+- `migrations/0035_store_scope_rls.sql`, `migrations/tests/store_scope_rls.sql` (criar); testes existentes em `migrations/tests/` que escrevem em tabelas de loja como `ptmarket_app` (só acrescentar o GUC ao contexto; não mudar o que provam)
 
 ## Não tocar
-- `migrations/0001–0033`; as policies `tenant_isolation`, `portal_read`, `portal_view` e as views do portal (ficam como o 08 as deixou); `audit.*`; `backend-rust/` (cartão 14). Nunca ler `.env`.
+- `migrations/0001–0034 (a 0034 é o tiered_subscription, 27/11)`; as policies `tenant_isolation`, `portal_read`, `portal_view` e as views do portal (ficam como o 08 as deixou); `audit.*`; `backend-rust/` (cartão 14). Nunca ler `.env`.
 
 ## Contexto exato (decisão do supervisor; padrão do GUC `app.session_id` da 0026)
 ```
@@ -40,6 +40,6 @@ Sem tabelas novas (sem bloco L1). Nunca SET ROLE para papéis sem acesso a audit
 - Dentro do par, `cargo test -p ptmarket-api` pode falhar onde o Rust ainda não põe o GUC: listar as falhas para o 14, que as fecha. O par só é entregue com `run.sh`, `cargo test -p ptmarket-api` e `go test -race ./...` verdes.
 
 ## Adenda do supervisor (auditoria do par A, 26/11)
-- Na 0034, acrescentar `CREATE UNIQUE INDEX tenants_one_national_portal_per_country ON tenants (country_code) WHERE tenant_type = 'national_portal';` (sem isto, dois nacionais no mesmo país permitiam slugs de loja repetidos e o `tenancy::portal::store_by_slug` escolhia por `id`). Antes de criar o índice, abortar com uma mensagem clara se houver duplicados.
+- Na 0035, acrescentar `CREATE UNIQUE INDEX tenants_one_national_portal_per_country ON tenants (country_code) WHERE tenant_type = 'national_portal';` (sem isto, dois nacionais no mesmo país permitiam slugs de loja repetidos e o `tenancy::portal::store_by_slug` escolhia por `id`). Antes de criar o índice, abortar com uma mensagem clara se houver duplicados.
 - Testes SQL e Rust que criem dois tenants `national_portal` no mesmo país passam a usar PT e ES (o país é o que distingue os canais nacionais). Lista-os no relatório.
 - Com o índice, o `store_by_slug` passa a ser determinístico: o cartão 14 pode tirar o `ORDER BY s.id` e acrescentar um teste.

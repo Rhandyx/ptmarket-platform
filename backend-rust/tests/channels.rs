@@ -3,7 +3,8 @@
 //! duplicados e patrocínios vencidos/revogados fora do white-label sem correr job nenhum.
 //!
 //! A pool da app faz `SET ROLE ptmarket_app` (o dono não prova nada). Tenants, DICOFRE e entidades
-//! semeiam-se como dono (migrator); lojas e patrocínios pela app dentro de `begin_tenant_tx`.
+//! semeiam-se como dono (migrator); lojas e pedidos de patrocínio pela app com o âmbito da loja
+//! (`begin_store_tx`) e as decisões com o âmbito da entidade (`begin_sponsor_tx`), cartão 03/14.
 //!
 //! Mundo (todas as lojas no nacional PT, o único tipo de tenant que pode ter lojas):
 //! - `s1` Câmara A (canal CA) + Junta J (sem domínio) · `s2` Câmara B (canal CB) · `s3` sem
@@ -14,9 +15,11 @@
 use ptmarket_api::{
     audit::{ActorType, AuditCtx},
     error::AppError,
+    identity::rbac::{SponsorScope, StoreScope},
     tenancy::{
         CountryCode, PortalReadTx, PortalStore, ResolvedTenant, ShippingScope, SponsorKind,
-        TenantId, TenantType, begin_portal_read_tx, begin_tenant_tx,
+        TenantId, TenantType, begin_portal_read_tx,
+        db::{begin_sponsor_tx, begin_store_tx},
     },
 };
 use sqlx::{
@@ -117,7 +120,8 @@ async fn seed_store(
     dicofre: Option<&str>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::now_v7();
-    let mut tx = begin_tenant_tx(app, t.id(), &actor()).await?;
+    // Âmbito da própria loja (`app.store_id` = o id novo, gerado em Rust: 0035).
+    let mut tx = begin_store_tx(app, &StoreScope::for_tests(t.id(), id), &actor()).await?;
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email,
                              publish_to_national_portal, shipping_scope, storefront_dicofre)
@@ -148,7 +152,8 @@ enum Fate {
     Revoked,
 }
 
-/// Patrocínio pela app: nasce `pending` e a decisão é por UPDATE (trigger da 0031).
+/// Patrocínio pela app: a loja pede (nasce `pending`, com o âmbito da loja) e a entidade decide
+/// por UPDATE (trigger da 0031), com o âmbito da entidade no canal nacional da loja (0035).
 async fn sponsor(
     app: &PgPool,
     t: &ResolvedTenant,
@@ -157,7 +162,7 @@ async fn sponsor(
     fate: Fate,
 ) -> anyhow::Result<()> {
     let id = Uuid::now_v7();
-    let mut tx = begin_tenant_tx(app, t.id(), &actor()).await?;
+    let mut tx = begin_store_tx(app, &StoreScope::for_tests(t.id(), store), &actor()).await?;
     sqlx::query!(
         "INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id)
          VALUES ($1, $2, $3, $4)",
@@ -168,6 +173,9 @@ async fn sponsor(
     )
     .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
+    let decider = AuditCtx::for_tests(ActorType::Municipal, Some(Uuid::now_v7()), None, None);
+    let mut tx = begin_sponsor_tx(app, t.id(), &SponsorScope::for_tests(entity), &decider).await?;
     match fate {
         Fate::Active | Fate::Revoked => {
             sqlx::query!(

@@ -72,6 +72,7 @@ SELECT pg_temp.expect_error(
 -- Dados de cada tenant, criados pela própria app com o contexto certo.
 -- ---------------------------------------------------------------------------
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000000b';
+SET app.store_id = '00000000-0000-7000-8000-0000000000b1'; -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000000b1', '00000000-0000-7000-8000-00000000000b',
      'Loja B', 'loja-b', 'Loja B Lda', '500000002', 'PT50000000000000000000002', 'b@teste.invalid');
@@ -82,6 +83,7 @@ INSERT INTO product_variants (tenant_id, product_id, price_cents) VALUES
     ('00000000-0000-7000-8000-00000000000b', '00000000-0000-7000-8000-0000000000b2', 199);
 
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000000a';
+SET app.store_id = '00000000-0000-7000-8000-0000000000a1'; -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000000a1', '00000000-0000-7000-8000-00000000000a',
      'Loja A', 'loja-a', 'Loja A Lda', '500000001', 'PT50000000000000000000001', 'a@teste.invalid');
@@ -121,6 +123,8 @@ SET app.current_tenant_id = '00000000-0000-7000-8000-00000000000a';
 -- ---------------------------------------------------------------------------
 -- Escritas para o tenant B a partir do contexto A: 42501.
 -- ---------------------------------------------------------------------------
+-- app.store_id = loja do B (0035): o âmbito da loja deixa passar; quem recusa é só o tenant_isolation.
+SET app.store_id = '00000000-0000-7000-8000-0000000000b1';
 SELECT pg_temp.expect_error(
     $q$INSERT INTO stores (tenant_id, name, slug, legal_name, nif, iban, email)
        VALUES ('00000000-0000-7000-8000-00000000000b', 'Intrusa', 'intrusa', 'X', '1', 'PT50', 'x@x.pt')$q$,
@@ -155,6 +159,7 @@ SELECT pg_temp.expect_error(
     $q$INSERT INTO products (tenant_id, store_id, title, vat_rate_bps)
        VALUES ('00000000-0000-7000-8000-00000000000a', '00000000-0000-7000-8000-0000000000b1', '{}', 2300)$q$,
     '23503', 'produto do tenant A com loja do tenant B falha');
+SET app.store_id = '00000000-0000-7000-8000-0000000000a1';
 SELECT pg_temp.expect_error(
     $q$INSERT INTO product_variants (tenant_id, product_id, price_cents, stock_qty)
        VALUES ('00000000-0000-7000-8000-00000000000a', '00000000-0000-7000-8000-0000000000a2', 100, -1)$q$,

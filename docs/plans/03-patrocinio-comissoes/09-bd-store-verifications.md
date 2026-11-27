@@ -6,10 +6,10 @@
 Existe o registo dos documentos de verificação de cada loja, com o hash como prova, o código da Certidão Permanente só cifrado, a data-limite de eliminação do ficheiro garantida pela BD e o worker só com o acesso mínimo para apagar.
 
 ## Pode alterar
-- `migrations/0035_store_verifications.sql`, `migrations/tests/store_verifications.sql` (criar)
+- `migrations/0036_store_verifications.sql`, `migrations/tests/store_verifications.sql` (criar)
 
 ## Não tocar
-- `migrations/0001–0034`; `audit.*`; as funções de revisão do super_admin (cartão 10). Nunca ler `.env`.
+- `migrations/0001–0035`; `audit.*`; as funções de revisão do super_admin (cartão 10). Nunca ler `.env`.
 
 ## Contexto exato (spec 14 §6; RGPD art. 5.º/1/c e e, art. 32.º)
 ```

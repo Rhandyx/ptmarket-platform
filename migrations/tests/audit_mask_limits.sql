@@ -285,6 +285,7 @@ INSERT INTO tenants (id, slug, custom_domain, name, tenant_type) VALUES
 SET ROLE ptmarket_app;
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000014aa', true);
 SELECT set_config('app.actor_type', 'merchant', true);
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000014c1', true); -- âmbito da loja (0035)
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000014c1', '00000000-0000-7000-8000-0000000014aa',
      'Loja 03d', 'loja-03d', 'Loja 03d Lda', '500000014', 'PT50000000000000000000014', 'l@teste.invalid');
@@ -307,6 +308,7 @@ UPDATE products SET description = (SELECT jsonb_object_agg('k' || i, pg_temp.blo
  WHERE id = '00000000-0000-7000-8000-0000000014c2';
 SELECT set_config('app.actor_type', '', true);
 SELECT set_config('app.current_tenant_id', '', true);
+SELECT set_config('app.store_id', '', true);
 RESET ROLE;
 
 SET ROLE ptmarket_audit_writer;

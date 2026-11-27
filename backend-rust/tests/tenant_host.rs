@@ -4,7 +4,7 @@
 //! hosts desconhecidos por IP (Redis; falha aberta).
 //!
 //! As pools da app fazem `SET ROLE ptmarket_app` (o dono não prova nada). Os tenants semeiam-se
-//! como dono (tabela global); as lojas pela app dentro de `begin_tenant_tx`. Leituras de `audit.*`
+//! como dono (tabela global); as lojas pela app com o âmbito da loja (`begin_store_tx`). Leituras de `audit.*`
 //! sem `query!` (o migrator não tem SELECT na caixa negra): SQL estático.
 
 use std::{
@@ -31,11 +31,13 @@ use ptmarket_api::{
         client_ip::TrustedProxies,
         router, with_host_resolution,
     },
+    identity::rbac::StoreScope,
     state::AppState,
     storage::NullStorage,
     tenancy::{
         HostResolver, PlatformHost, ResolvedHost, ResolvedTenant, TenantId, begin_portal_read_tx,
         begin_tenant_tx,
+        db::begin_store_tx,
         portal::PORTAL_FORBIDDEN_COLUMNS,
         resolver::{MAX_UNKNOWN_HOSTS, MAX_UNKNOWN_HOSTS_48, POSITIVE_TTL},
     },
@@ -186,13 +188,16 @@ async fn seed_store(
     publish: bool,
 ) -> anyhow::Result<()> {
     let ctx = AuditCtx::for_tests(ActorType::Merchant, Some(Uuid::now_v7()), None, None);
-    let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
+    // Âmbito da própria loja (`app.store_id` = o id novo, gerado em Rust: 0035).
+    let id = Uuid::now_v7();
+    let scope = StoreScope::for_tests(t.tid(), id);
+    let mut tx = begin_store_tx(app, &scope, &ctx).await?;
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email,
                              invoicing_credentials_enc, eupago_split_key, stripe_account_id,
                              publish_to_national_portal)
          VALUES ($1, $2, $3, $4, $5, '500000000', $6, 'loja@test.invalid', $7, $8, $9, $10)",
-        Uuid::now_v7(),
+        id,
         t.id,
         slug,
         slug,
@@ -206,8 +211,8 @@ async fn seed_store(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    // Trinco da 0029: a app não escreve estas colunas; o dono (migrator) sim.
-    let mut tx = begin_tenant_tx(app, t.tid(), &ctx).await?;
+    // Trinco da 0029: a app não escreve estas colunas (nem na própria loja); o dono (migrator) sim.
+    let mut tx = begin_store_tx(app, &scope, &ctx).await?;
     let denied = sqlx::query!("UPDATE stores SET custom_commission_bps = 1")
         .execute(&mut *tx)
         .await
@@ -512,14 +517,13 @@ async fn national_channel_reads_its_stores_without_opt_out_without_secrets_and_i
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
     // Canal nacional (0033): todas as lojas ativas do tenant nacional do pedido, com ou sem o antigo
-    // opt-in; as de outro national_portal (PT ou ES) ficam de fora.
+    // opt-in; as do outro national_portal (ES) ficam de fora. Um só national_portal por país (0035):
+    // o "outro canal" é o nacional ES.
     let p = seed_tenant(&owner, "portal", "national_portal", "PT", true).await?;
-    let a = seed_tenant(&owner, "nacional-a", "national_portal", "PT", true).await?;
     let es = seed_tenant(&owner, "nacional-es", "national_portal", "ES", true).await?;
     let app = app_pool(&opts, &conn).await?;
     seed_store(&app, &owner, &p, "p-com-opt-in", true).await?;
     seed_store(&app, &owner, &p, "p-sem-opt-in", false).await?;
-    seed_store(&app, &owner, &a, "a-outro-canal", true).await?;
     seed_store(&app, &owner, &es, "es-outro-pais", true).await?;
 
     let portal = resolve(&app, &p).await?;
@@ -549,7 +553,7 @@ async fn national_channel_reads_its_stores_without_opt_out_without_secrets_and_i
         assert!(PORTAL_FORBIDDEN_COLUMNS.contains(&col), "{col}");
         assert!(in_stores.contains(col) && in_view.contains(col), "{col}");
         let rows = sqlx::query(in_stores)
-            .bind(a.id)
+            .bind(es.id)
             .fetch_all(tx.conn_for_tests())
             .await?;
         assert!(rows.is_empty(), "{col}: stores de outro tenant visível");
@@ -584,8 +588,10 @@ async fn national_channel_reads_its_stores_without_opt_out_without_secrets_and_i
     assert_eq!(code.as_deref(), Some(READ_ONLY), "{err:?}");
     tx.finish().await?;
 
-    // Fora do modo portal, o mesmo tenant só vê as suas lojas (nenhuma de outro tenant).
-    let mut t = begin_tenant_tx(&app, p.tid(), &ctx).await?;
+    // Fora do modo portal, o mesmo tenant só vê as suas lojas (nenhuma de outro tenant). Ator admin:
+    // sem âmbito de loja (0035) um anónimo não leria nenhuma; o admin só passa pelo tenant_isolation.
+    let admin = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
+    let mut t = begin_tenant_tx(&app, p.tid(), &admin).await?;
     let tenants = sqlx::query_scalar!("SELECT tenant_id FROM stores")
         .fetch_all(&mut *t)
         .await?;

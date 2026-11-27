@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET name = 'x'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9d4d7927dde69d8eb94a7ebc72b04c122acef7ba096a888e8a6ad6168231cb55"
+}

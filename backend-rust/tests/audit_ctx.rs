@@ -13,7 +13,11 @@ use std::net::IpAddr;
 use ptmarket_api::{
     audit::{ActorType, AuditCtx, AuditEvent, Outcome, record},
     error::AppError,
-    tenancy::{TenantId, TenantTx, begin_tenant_tx, db::begin_platform_tx},
+    identity::rbac::StoreScope,
+    tenancy::{
+        TenantId, TenantTx, begin_tenant_tx,
+        db::{begin_platform_tx, begin_store_tx},
+    },
 };
 use sqlx::{
     PgConnection, PgPool, Postgres,
@@ -93,17 +97,19 @@ async fn owner_pool(opts: &PoolOptions<Postgres>, conn: &PgConnectOptions) -> sq
         .await
 }
 
-/// Tenant do canal nacional (as lojas dos testes nascem lá: cartão 03/13).
-async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<TenantId> {
+/// Tenant do canal nacional do país `country` (as lojas dos testes nascem lá: cartão 03/13; um só
+/// por país, 0035: A é o PT e B o ES).
+async fn seed_tenant(owner: &PgPool, slug: &str, country: &str) -> sqlx::Result<TenantId> {
     let id = Uuid::now_v7();
     let domain = format!("{slug}.test.invalid");
     sqlx::query!(
-        "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type)
-         VALUES ($1, $2, $3, $4, 'national_portal')",
+        "INSERT INTO tenants (id, slug, custom_domain, name, tenant_type, country_code)
+         VALUES ($1, $2, $3, $4, 'national_portal', $5)",
         id,
         slug,
         domain,
-        slug
+        slug,
+        country
     )
     .execute(owner)
     .await?;
@@ -111,7 +117,15 @@ async fn seed_tenant(owner: &PgPool, slug: &str) -> sqlx::Result<TenantId> {
 }
 
 async fn insert_store(conn: &mut PgConnection, tenant: TenantId, slug: &str) -> sqlx::Result<Uuid> {
-    let id = Uuid::now_v7();
+    insert_store_with_id(conn, tenant, Uuid::now_v7(), slug).await
+}
+
+async fn insert_store_with_id(
+    conn: &mut PgConnection,
+    tenant: TenantId,
+    id: Uuid,
+    slug: &str,
+) -> sqlx::Result<Uuid> {
     sqlx::query!(
         "INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
          VALUES ($1, $2, $3, $4, $5, '500000000', 'PT50000000000000000000000', 'loja@test.invalid')",
@@ -168,18 +182,37 @@ async fn backend_pid(conn: &mut PgConnection) -> sqlx::Result<i32> {
         .await
 }
 
-/// Na mesma ligação, uma transação crua só com o tenant (sem ator): o INSERT tem de falhar com PTA01.
+/// Transação de uma loja nova (`app.store_id` = o id gerado aqui, 0035): (tx, id da loja).
+async fn store_tx(
+    app: &PgPool,
+    tenant: TenantId,
+    ctx: &AuditCtx,
+) -> anyhow::Result<(TenantTx, Uuid)> {
+    let id = Uuid::now_v7();
+    let tx = begin_store_tx(app, &StoreScope::for_tests(tenant, id), ctx).await?;
+    Ok((tx, id))
+}
+
+/// Na mesma ligação, uma transação crua só com o tenant e a loja (sem ator): o INSERT tem de falhar
+/// com PTA01 (a loja vai no contexto para a RLS da 0035 não recusar antes do trigger L1).
 async fn insert_without_actor_fails(app: &PgPool, tenant: TenantId, slug: &str) -> TestResult {
     let mut tx = app.begin().await?;
     let t = tenant.as_uuid().to_string();
-    sqlx::query!("SELECT set_config('app.current_tenant_id', $1, true)", t)
-        .fetch_one(&mut *tx)
-        .await?;
+    let id = Uuid::now_v7();
+    let store = id.to_string();
+    sqlx::query!(
+        "SELECT set_config('app.current_tenant_id', $1, true) AS tenant_id,
+                set_config('app.store_id', $2, true) AS store_id",
+        t,
+        store
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     let actor = sqlx::query_scalar!("SELECT current_setting('app.actor_type', true)")
         .fetch_one(&mut *tx)
         .await?;
     assert!(actor.unwrap_or_default().is_empty(), "o ator sobreviveu");
-    let res = insert_store(&mut tx, tenant, slug).await;
+    let res = insert_store_with_id(&mut tx, tenant, id, slug).await;
     assert_eq!(
         res.as_ref().err().and_then(sqlstate).as_deref(),
         Some(NO_ACTOR),
@@ -195,15 +228,15 @@ async fn l1_event_carries_ctx_and_actor_dies_with_tx(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "nacional-a").await?;
+    let a = seed_tenant(&owner, "nacional-a", "PT").await?;
     // Uma só ligação: depois da transação, a query seguinte reutiliza-a.
     let app = app_pool(&opts, &conn, 1).await?;
     let pid_before = backend_pid(&mut *app.acquire().await?).await?;
 
     let ip: IpAddr = "203.0.113.7".parse()?;
     let ctx = merchant(Some(ip));
-    let mut tx = begin_tenant_tx(&app, a, &ctx).await?;
-    let store_id = insert_store(&mut tx, a, "a1").await?;
+    let (mut tx, store_id) = store_tx(&app, a, &ctx).await?;
+    insert_store_with_id(&mut tx, a, store_id, "a1").await?;
     let target = store_id.to_string();
     let (actor_type, actor_id, request_id, ev_ip, tenant_id): L1Row = sqlx::query_as(
         "SELECT actor_type::text, actor_id, request_id, host(ip), tenant_id
@@ -224,8 +257,8 @@ async fn l1_event_carries_ctx_and_actor_dies_with_tx(
     insert_without_actor_fails(&app, a, "sem-ator-1").await?;
 
     // Depois do ROLLBACK: idem.
-    let mut tx = begin_tenant_tx(&app, a, &ctx).await?;
-    insert_store(&mut tx, a, "a2").await?;
+    let (mut tx, a2) = store_tx(&app, a, &ctx).await?;
+    insert_store_with_id(&mut tx, a, a2, "a2").await?;
     tx.rollback().await?;
     assert_eq!(backend_pid(&mut *app.acquire().await?).await?, pid_before);
     insert_without_actor_fails(&app, a, "sem-ator-2").await?;
@@ -243,8 +276,8 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "nacional-a").await?;
-    let b = seed_tenant(&owner, "nacional-b").await?;
+    let a = seed_tenant(&owner, "nacional-a", "PT").await?;
+    let b = seed_tenant(&owner, "nacional-b", "ES").await?;
     let app = app_pool(&opts, &conn, 2).await?;
 
     // Evento semântico com segredos: sai mascarado.
@@ -351,7 +384,7 @@ async fn chain_race_in_repeatable_read_retries_and_stays_contiguous(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "nacional-a").await?;
+    let a = seed_tenant(&owner, "nacional-a", "PT").await?;
     let app = app_pool_repeatable_read(&opts, &conn, 2).await?;
 
     // Cadeia já iniciada (cabeça existe).
@@ -419,7 +452,7 @@ async fn record_rejects_oversized_event_without_truncating(
     conn: PgConnectOptions,
 ) -> TestResult {
     let owner = owner_pool(&opts, &conn).await?;
-    let a = seed_tenant(&owner, "nacional-a").await?;
+    let a = seed_tenant(&owner, "nacional-a", "PT").await?;
     let app = app_pool(&opts, &conn, 1).await?;
     let ctx = merchant(None);
     let mut tx = begin_tenant_tx(&app, a, &ctx).await?;

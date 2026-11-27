@@ -87,6 +87,8 @@ INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code) VAL
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('system');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a1', true);
+-- Âmbito da loja (0035): a seed de várias lojas de uma vez é feita pelo ator admin.
+SELECT pg_temp.as_actor('admin');
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VALUES
     ('00000000-0000-7000-8000-0000000031b1', '00000000-0000-7000-8000-0000000031a1',
      'Loja S1', 'ssp-s1', 'Loja S1 Lda', '500003101', 'PT50000000000000000003101', 's1@teste.invalid'),
@@ -103,11 +105,15 @@ INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email) VAL
 -- 1. Co-patrocínio e EXCLUDE (como ptmarket_app no tenant T1: pedidos nascem pending, decisão por UPDATE).
 -- ---------------------------------------------------------------------------
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a1', true);
+-- Âmbito (0035): o pedido é da loja do contexto (app.store_id); as decisões (UPDATE) de várias entidades são feitas
+-- pelo ator admin (a única exceção ao âmbito da entidade). O âmbito em si é provado em store_scope_rls.sql.
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000031b1', true);
 INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id, initiated_by) VALUES
     ('00000000-0000-7000-8000-000000003101', '00000000-0000-7000-8000-0000000031a1',
      '00000000-0000-7000-8000-0000000031b1', '00000000-0000-7000-8000-0000000031e1', 'store'),
     ('00000000-0000-7000-8000-000000003102', '00000000-0000-7000-8000-0000000031a1',
-     '00000000-0000-7000-8000-0000000031b1', '00000000-0000-7000-8000-0000000031e2', 'sponsor');
+     '00000000-0000-7000-8000-0000000031b1', '00000000-0000-7000-8000-0000000031e2', 'store');
+-- (Convite da entidade, initiated_by = 'sponsor', pela app: recusado pela 0035; ver store_scope_rls.sql.)
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_sponsorships WHERE store_id = '00000000-0000-7000-8000-0000000031b1'
          AND status = 'pending' AND commission_override_bps = 0$q$,
@@ -233,6 +239,7 @@ SELECT pg_temp.expect_count(
          AND isempty(tstzrange(valid_from, valid_to))$q$,
     1, 'active futuro revogado: valid_to = valid_from (intervalo vazio)');
 -- (S1b, Câmara) ativo com valid_from = now() e revogado na mesma transação.
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000031b3', true);
 INSERT INTO store_sponsorships (id, tenant_id, store_id, sponsor_entity_id) VALUES
     ('00000000-0000-7000-8000-000000003109', '00000000-0000-7000-8000-0000000031a1',
      '00000000-0000-7000-8000-0000000031b3', '00000000-0000-7000-8000-0000000031e1');
@@ -334,6 +341,8 @@ SELECT pg_temp.expect_count(
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('merchant');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a3', true);
+-- app.store_id = loja de T1 (0035): o âmbito da loja deixa passar; quem recusa é só o tenant_isolation.
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000031b3', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_sponsorships WHERE tenant_id = '00000000-0000-7000-8000-0000000031a1'$q$,
     0, 'outro tenant não vê os patrocínios de T1');
@@ -345,6 +354,7 @@ SELECT pg_temp.expect_error(
        ('00000000-0000-7000-8000-0000000031a1', '00000000-0000-7000-8000-0000000031b3',
         '00000000-0000-7000-8000-0000000031e2')$q$,
     '42501', 'outro tenant não cria patrocínios em T1');
+SELECT set_config('app.store_id', '00000000-0000-7000-8000-0000000031b2', true);
 SELECT pg_temp.expect_rows(
     $q$INSERT INTO store_sponsorships (tenant_id, store_id, sponsor_entity_id) VALUES
        ('00000000-0000-7000-8000-0000000031a3', '00000000-0000-7000-8000-0000000031b2',
@@ -352,6 +362,8 @@ SELECT pg_temp.expect_rows(
     1, 'T3 cria o seu pedido');
 
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000031a1', true);
+-- Ator admin (0035): vê as lojas todas do tenant (o lojista só veria a sua); o tenant continua a filtrar.
+SELECT pg_temp.as_actor('admin');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_sponsorships$q$, 9, 'T1 vê só os seus 9 patrocínios');
 SELECT pg_temp.expect_error(

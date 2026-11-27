@@ -4,7 +4,9 @@
 -- Tudo com ROLLBACK.
 BEGIN;
 
-SELECT set_config('app.actor_type', 'system', true);
+-- Ator admin (0035): este teste escreve e lê várias lojas do mesmo tenant de seguida; o âmbito por loja
+-- (app.store_id) é provado em store_scope_rls.sql. Os trincos por coluna (GRANT) não dependem do ator.
+SELECT set_config('app.actor_type', 'admin', true);
 SELECT set_config('app.actor_label', 'test', true);
 
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)

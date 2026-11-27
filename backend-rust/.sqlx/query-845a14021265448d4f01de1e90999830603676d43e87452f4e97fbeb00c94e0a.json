@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO product_variants (id, tenant_id, product_id, price_cents)\n         VALUES ($1, $2, $3, 1000)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "845a14021265448d4f01de1e90999830603676d43e87452f4e97fbeb00c94e0a"
+}

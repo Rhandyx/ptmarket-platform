@@ -6,10 +6,10 @@
 Mudar a comissão base, os escalões, a exceção de uma loja ou revogar um patrocínio gera um evento crítico (alerta imediato Telegram + Discord pelo worker, sem mudar o worker).
 
 ## Pode alterar
-- `infra/postgres/init/03-audit-bootstrap.sh` (texto da alteração selada nova `0037_critical_kinds_commission`); `migrations/0037_audit_critical_kinds_commission.sql`, `migrations/tests/audit_critical_commission.sql` (criar); `infra/README.md` (uma linha na lista de alterações seladas)
+- `infra/postgres/init/03-audit-bootstrap.sh` (texto da alteração selada nova `0038_critical_kinds_commission`); `migrations/0038_audit_critical_kinds_commission.sql`, `migrations/tests/audit_critical_commission.sql` (criar); `infra/README.md` (uma linha na lista de alterações seladas)
 
 ## Não tocar
-- `migrations/0001–0036`; as outras funções de `audit.*`; `workers-go/` (os kinds novos seguem o caminho dos existentes); `backend-rust/`. Nunca ler `.env`.
+- `migrations/0001–0037`; as outras funções de `audit.*`; `workers-go/` (os kinds novos seguem o caminho dos existentes); `backend-rust/`. Nunca ler `.env`.
 
 ## Contexto exato (spec 14 §9 + 0015)
 ```
@@ -34,3 +34,6 @@ Agrupamento (decisão 2 do owner): estes 4 kinds seguem a regra geral (> 5 do me
 
 ## Re-provar (funcionalidades já aprovadas que partilham este código)
 - Suites completas verdes: `cd workers-go && go test -race ./...` e `cargo test -p ptmarket-api` (com o `DATABASE_URL`/`REDIS_URL` de dev)
+
+## Adenda do supervisor (auditoria do 08b, 27/11)
+- **Alto, entra nesta alteração selada:** `audit.audit_events` tem só a policy `tenant_read` (0008:168, filtra por `tenant_id`). Com todas as lojas de um país no mesmo tenant, o lojista de L1 lê os eventos de L2. Acrescentar `CREATE POLICY store_scope_read ON audit.audit_events AS RESTRICTIVE FOR SELECT TO ptmarket_app USING (store_id IS NULL OR store_id = (SELECT public.app_store_id()) OR (SELECT public.app_is_platform_admin()))`. Decidir com o teste se os eventos sem `store_id`, do tenant, continuam visíveis ao lojista; por defeito NÃO: trocar `store_id IS NULL` por `(SELECT public.app_store_id()) IS NULL`. Teste: L1 não lê eventos de L2; o admin lê os dois. Pôr o schema `audit` na guarda de `migrations/tests/store_scope_rls.sql`.

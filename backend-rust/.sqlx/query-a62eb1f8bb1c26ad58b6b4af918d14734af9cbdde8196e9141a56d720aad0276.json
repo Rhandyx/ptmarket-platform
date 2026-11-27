@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO products (id, tenant_id, store_id, title, vat_rate_bps, is_published)\n         VALUES ($1, $2, $3, $4, 2300, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Jsonb",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a62eb1f8bb1c26ad58b6b4af918d14734af9cbdde8196e9141a56d720aad0276"
+}

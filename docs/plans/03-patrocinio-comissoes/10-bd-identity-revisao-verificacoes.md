@@ -6,10 +6,10 @@
 Três funções DEFINER deixam um super_admin com 2FA verificado listar as verificações, obter a chave do ficheiro ou o código cifrado, e decidir; mais ninguém as consegue usar.
 
 ## Pode alterar
-- `migrations/0036_identity_admin_verifications.sql`, `migrations/tests/identity_admin_verifications.sql` (criar)
+- `migrations/0037_identity_admin_verifications.sql`, `migrations/tests/identity_admin_verifications.sql` (criar)
 
 ## Não tocar
-- `migrations/0001–0035`; `audit.*` e `infra/postgres/init/` (nenhuma função de `audit` muda: não há alteração selada). Nunca ler `.env`.
+- `migrations/0001–0036`; `audit.*` e `infra/postgres/init/` (nenhuma função de `audit` muda: não há alteração selada). Nunca ler `.env`.
 
 ## Contexto exato
 ```

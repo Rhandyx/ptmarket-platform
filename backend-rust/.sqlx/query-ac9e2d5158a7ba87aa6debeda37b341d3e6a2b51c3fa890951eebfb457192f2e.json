@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sponsor_entities (id, kind, country_code, name, slug, area_code) VALUES\n            ($1, 'municipality', 'PT', 'Câmara A', 'camara-a', '9301'),\n            ($2, 'parish', 'PT', 'Junta J', 'junta-j', '930101')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac9e2d5158a7ba87aa6debeda37b341d3e6a2b51c3fa890951eebfb457192f2e"
+}

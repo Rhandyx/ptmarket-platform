@@ -36,3 +36,7 @@ Auditoria na mesma transação (AuditCtx): 'sponsorship.approved' / 'sponsorship
 
 ## Re-provar (funcionalidades já aprovadas que partilham este código)
 - Suite completa `cargo test -p ptmarket-api` (mesmas variáveis), que inclui `sponsorships_merchant`, `commission`, `channels`, `store_scope` e `rbac`
+
+## Adenda do supervisor (auditoria do 14, 27/11)
+- **Entidade desativada:** `RequireSponsorAdmin` (cartão 14) só compara o grant com o caminho; não sabe se `sponsor_entities.is_active`. Neste cartão, o módulo `sponsors` (dono da tabela) já lê a entidade para encontrar o canal nacional. Se `is_active = false` → 404 + `Denied("idor")`, antes de qualquer leitura ou escrita de patrocínios. Teste: o sponsor_admin de uma entidade desativada recebe 404 em listar, aprovar, rejeitar e revogar.
+- **Canal nacional:** fixar o tenant do `begin_sponsor_tx` a partir da entidade (país → `national_portal` ativo). Nunca vem do pedido.

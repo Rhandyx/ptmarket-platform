@@ -17,10 +17,10 @@ Fonte canónica: spec 14 (decisão do owner de 26/11/2026). Cada executor lê **
 | 7 | 06 `store_sponsorships` | db-architect | opus | 03, 05 | 0031 |
 | 8 | 07 `platform_settings` + `billing_plan_tiers` (seed) | db-architect | opus | 06 | 0032 |
 | 9 | **Par A:** 08 Visibilidade por canal (view, RLS, selos, trinco) → 16 `tenancy::portal` | db-architect → rust-core | opus | 06, 07, 13 | 0033 |
-| 10 | **Par B:** 08b Isolamento por loja na RLS (`app.store_id`) → 14 Âmbito de loja/entidade no tx + `RequireSponsorAdmin` | db-architect → rust-core | opus | par A | 0034 |
-| 11 | 09 `store_verifications` (código cifrado) | db-architect | opus | par B | 0035 |
-| 12 | 10 `identity_admin_verification_*` | db-architect | opus | 09 | 0036 |
-| 13 | 11 Kinds críticos (alteração selada) | db-architect | opus | 10 | 0037 |
+| 10 | **Par B:** 08b Isolamento por loja na RLS (`app.store_id`) → 14 Âmbito de loja/entidade no tx + `RequireSponsorAdmin` | db-architect → rust-core | opus | par A | 0035 |
+| 11 | 09 `store_verifications` (código cifrado) | db-architect | opus | par B | 0036 |
+| 12 | 10 `identity_admin_verification_*` | db-architect | opus | 09 | 0037 |
+| 13 | 11 Kinds críticos (alteração selada) | db-architect | opus | 10 | 0038 |
 | 14 | 15 Passkeys de staff com um só `rp_id` | rust-core | opus | 14 | — |
 | 15 | 17 `sponsors`: geografia e entidades elegíveis | rust-core | sonnet | 15 | — |
 | 16 | 18 Comissão: leitura da BD + preview do registo | rust-core | opus | 12, 14, 17 | — |
