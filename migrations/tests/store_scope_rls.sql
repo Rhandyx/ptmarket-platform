@@ -1,6 +1,7 @@
 -- Teste da 0035 (cartão 03/08b): isolamento entre lojas do mesmo tenant (app.store_id), âmbito da entidade
--- patrocinadora (app.sponsor_entity_id), exceção do ator admin e leitura pública pelo portal; um só national_portal
--- por país. Tenants, geografia e entidades pelo migrator; tudo o resto com SET ROLE ptmarket_app. Tudo com ROLLBACK.
+-- patrocinadora (app.sponsor_entity_id), exceção do ator admin e leitura pública pelo portal (desde a 0039 só pelas
+-- views do catálogo); um só national_portal por país. Tenants, geografia e entidades pelo migrator; tudo o resto com
+-- SET ROLE ptmarket_app. Tudo com ROLLBACK.
 --   NP = nacional PT · NE = nacional ES · W = municipal PT (canal da Câmara EC)
 --   EC = Câmara (canal W) · EJ = Junta (sem canal)
 --   L1, L2 = lojas no NP. L1: P1 publicado (V1 ativa), P1U não publicado (V1U). L2: P2 publicado (V2), P2U não
@@ -479,8 +480,8 @@ BEGIN
 END
 $$;
 
--- Leitura pública, canal nacional PT (modo portal, ator customer, sem app.store_id): o mesmo que no cartão 08 —
--- as lojas ativas pela view, os produtos publicados e as variantes ativas desses produtos.
+-- Leitura pública, canal nacional PT (modo portal, ator customer, sem app.store_id): as lojas ativas pela view; desde
+-- a 0039 os produtos publicados e as variantes ativas só pelas views do catálogo (tabelas e histórico: 0 linhas).
 SELECT pg_temp.ctx('customer', '', '');
 SET app.portal_national = 'on';
 SELECT pg_temp.expect_count(
@@ -489,22 +490,24 @@ SELECT pg_temp.expect_count(
     2, 'nacional PT: portal_stores mostra L1 e L2');
 SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'nacional PT: stores direto continua a 0 linhas');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
-    2, 'nacional PT: só os produtos publicados (P1, P2)');
+    $q$SELECT count(*) FROM portal_products WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
+    2, 'nacional PT: portal_products só com os publicados (P1, P2)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE id IN ('00000000-0000-7000-8000-0000000035f2',
-                                                  '00000000-0000-7000-8000-0000000035f4')$q$,
+    $q$SELECT count(*) FROM portal_products WHERE id IN ('00000000-0000-7000-8000-0000000035f2',
+                                                         '00000000-0000-7000-8000-0000000035f4')$q$,
     0, 'nacional PT: produtos não publicados invisíveis');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
+    $q$SELECT count(*) FROM portal_product_variants WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
     3, 'nacional PT: variantes ativas dos produtos publicados (V1, V1b, V2)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_price_history WHERE variant_id = '00000000-0000-7000-8000-0000000035d1'$q$,
-    2, 'nacional PT: histórico Omnibus da variante publicada legível');
+    $q$SELECT count(*) FROM products WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
+    0, 'nacional PT (0039): products direto sem app.store_id → 0 linhas');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_price_history WHERE variant_id IN ('00000000-0000-7000-8000-0000000035d2',
-                                                                       '00000000-0000-7000-8000-0000000035d4')$q$,
-    0, 'nacional PT: histórico de variantes de produtos não publicados invisível');
+    $q$SELECT count(*) FROM product_variants WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
+    0, 'nacional PT (0039): product_variants direto sem app.store_id → 0 linhas');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM product_price_history WHERE tenant_id = '00000000-0000-7000-8000-0000000035a0'$q$,
+    0, 'nacional PT (0039): histórico sem app.store_id → 0 linhas (Omnibus público = lowest_price_30d_cents)');
 RESET app.portal_national;
 
 -- ---------------------------------------------------------------------------
@@ -589,10 +592,14 @@ SELECT pg_temp.ctx('customer', '', '');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000035c1', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 1, 'canal W: portal_stores só com L1');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE id = '00000000-0000-7000-8000-0000000035f1'$q$,
+    $q$SELECT count(*) FROM portal_products WHERE id = '00000000-0000-7000-8000-0000000035f1'$q$,
     1, 'canal W: produto publicado de L1 visível');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 1, 'canal W: só P1 (nem P1U nem L2)');
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 2, 'canal W: as 2 variantes ativas de P1');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 1, 'canal W: só P1 (nem P1U nem L2)');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 2,
+    'canal W: as 2 variantes ativas de P1');
+SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'canal W (0039): products direto → 0 linhas');
+SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 0,
+    'canal W (0039): product_variants direto → 0 linhas');
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_store_badges', 2, 'canal W: selos da Câmara e da Junta em L1');
 
 -- ---------------------------------------------------------------------------

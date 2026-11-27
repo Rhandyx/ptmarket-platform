@@ -44,6 +44,13 @@ use serde::Serialize;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod catalog;
+
+pub use catalog::{
+    MAX_FILTER_CATEGORIES, MAX_PAGE_LIMIT, PortalCategory, PortalProduct, PortalProductCard,
+    PortalVariant, ProductFilter, ProductPage,
+};
+
 use crate::{
     audit::AuditCtx,
     error::{AppError, FieldError},
@@ -56,13 +63,19 @@ use crate::{
 
 /// Colunas de `stores` que nunca são selecionadas em modo portal (nem qualquer `*_enc`/`*_key`)
 /// e que a view `portal_stores` não tem.
-pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 6] = [
+/// Desde a 0039 também as de `products`/`product_variants` que as views do catálogo não têm.
+pub const PORTAL_FORBIDDEN_COLUMNS: [&str; 11] = [
     "iban",
     "invoicing_credentials_enc",
     "eupago_split_key",
     "stripe_account_id",
     "custom_commission_bps",
     "kyc_verified",
+    "stock_qty",
+    "sku",
+    "compare_at_price_cents",
+    "catalog_item_id",
+    "ai_enriched",
 ];
 
 /// Máximo de linhas por consulta do portal (e de ids em `stores_by_ids`).
@@ -135,6 +148,8 @@ pub struct PortalStore {
     pub nif: String,
     pub shipping_scope: ShippingScope,
     pub storefront_dicofre: Option<String>,
+    /// Isenta de IVA pelo art. 53.º CIVA: os preços desta loja têm IVA 0%.
+    pub vat_exempt_art53: bool,
     pub badges: Vec<StoreBadge>,
 }
 
@@ -149,6 +164,7 @@ struct StoreRow {
     nif: String,
     shipping_scope: String,
     storefront_dicofre: Option<String>,
+    vat_exempt_art53: bool,
 }
 
 /// Linha de `portal_store_badges`.
@@ -169,7 +185,8 @@ macro_rules! store_select {
             "SELECT s.id::uuid AS id, s.tenant_id::uuid AS tenant_id, s.name::text AS name,
                     s.slug::text AS slug, s.legal_name::text AS legal_name, s.nif::text AS nif,
                     s.shipping_scope::text AS shipping_scope,
-                    s.storefront_dicofre::text AS storefront_dicofre
+                    s.storefront_dicofre::text AS storefront_dicofre,
+                    s.vat_exempt_art53::bool AS vat_exempt_art53
              FROM portal_stores s ",
             $rest
         )
@@ -290,6 +307,7 @@ impl PortalReadTx {
                     nif: r.nif,
                     shipping_scope: ShippingScope::parse(&r.shipping_scope)?,
                     storefront_dicofre: r.storefront_dicofre,
+                    vat_exempt_art53: r.vat_exempt_art53,
                     badges: Vec::new(),
                 })
             })
@@ -435,6 +453,7 @@ mod tests {
             nif: String::new(),
             shipping_scope: ShippingScope::LocalOnly,
             storefront_dicofre: None,
+            vat_exempt_art53: false,
             badges: vec![StoreBadge {
                 sponsor_entity_id: Uuid::nil(),
                 kind: SponsorKind::Parish,
@@ -456,7 +475,8 @@ mod tests {
                 "shipping_scope",
                 "slug",
                 "storefront_dicofre",
-                "tenant_id"
+                "tenant_id",
+                "vat_exempt_art53"
             ]
         );
         assert_eq!(json["shipping_scope"], "local_only");

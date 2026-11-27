@@ -373,15 +373,15 @@ SELECT pg_temp.expect_count(
          AND email = 'a1@teste.invalid' AND phone = '+351210000001' AND vat_exempt_art53$q$,
     1, 'portal_stores tem os dados de exibição obrigatória (DSA, DL 7/2004, Art. 53.º)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products
+    $q$SELECT count(*) FROM portal_products
        WHERE id IN ('00000000-0000-7000-8000-00000021a101', '00000000-0000-7000-8000-00000021b101')$q$,
     2, 'canal A: produtos publicados das lojas visíveis continuam visíveis');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants
+    $q$SELECT count(*) FROM portal_product_variants
        WHERE id IN ('00000000-0000-7000-8000-00000021a201', '00000000-0000-7000-8000-00000021b201')$q$,
     2, 'canal A: variantes desses produtos continuam visíveis');
 SELECT pg_temp.expect_no_seqscan(
-    $q$SELECT id FROM products WHERE tenant_id = '00000000-0000-7000-8000-0000000021f0'
+    $q$SELECT id FROM portal_products WHERE tenant_id = '00000000-0000-7000-8000-0000000021f0'
                                  AND store_id = '00000000-0000-7000-8000-00000021b001'$q$,
     'products', 'canal A: produtos por loja sem seq scan');
 SELECT pg_temp.expect_error(

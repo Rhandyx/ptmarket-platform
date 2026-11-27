@@ -548,7 +548,9 @@ async fn national_channel_reads_its_stores_without_opt_out_without_secrets_and_i
 
     // Pela ligação de testes, em modo portal: as lojas de outro tenant não se leem em `stores`
     // (0 linhas) e a view não tem nenhuma das 6 colunas (42703).
-    assert_eq!(FORBIDDEN_PROBES.len(), PORTAL_FORBIDDEN_COLUMNS.len());
+    // As 6 colunas privadas de `stores` (a constante inclui também as de produtos, provadas em
+    // `tests/portal_catalog.rs`); cada sonda tem de estar na constante (verificado no ciclo).
+    assert_eq!(FORBIDDEN_PROBES.len(), 6);
     for (col, in_stores, in_view) in FORBIDDEN_PROBES {
         assert!(PORTAL_FORBIDDEN_COLUMNS.contains(&col), "{col}");
         assert!(in_stores.contains(col) && in_view.contains(col), "{col}");

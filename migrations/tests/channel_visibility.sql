@@ -1,5 +1,6 @@
 -- Teste da 0033 (cartão 03/08; spec 14 §1.1): visibilidade por canal em portal_stores, selos em portal_store_badges,
--- portal_read sem gate em products/product_variants, trinco de stores e grants/policies de ptmarket_portal.
+-- portal_read sem gate em products/product_variants (desde a 0039: views portal_products/portal_product_variants),
+-- trinco de stores e grants/policies de ptmarket_portal.
 -- Tenants, geografia e entidades pelo migrator (policies migrator_all); lojas, produtos e patrocínios pela app
 -- (SET ROLE ptmarket_app, cada um no seu tenant). Asserções de acesso com SET ROLE ptmarket_app. Tudo com ROLLBACK.
 
@@ -236,16 +237,16 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'canal A: stores s
 SELECT pg_temp.expect_count('SELECT count(*) FROM store_sponsorships', 0, 'canal A: store_sponsorships sem linhas');
 
 -- Produtos e variantes: só os publicados/ativos das lojas visíveis.
-SELECT pg_temp.expect_text('SELECT string_agg(title->>''pt'', '','' ORDER BY id) FROM products', 'P1',
+SELECT pg_temp.expect_text('SELECT string_agg(title->>''pt'', '','' ORDER BY id) FROM portal_products', 'P1',
     'canal A lê só o produto publicado de S1');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE store_id IN ('00000000-0000-7000-8000-000000003302',
+    $q$SELECT count(*) FROM portal_products WHERE store_id IN ('00000000-0000-7000-8000-000000003302',
                                                         '00000000-0000-7000-8000-000000003303')$q$,
     0, 'canal A: 0 produtos das lojas não visíveis');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants WHERE id = '00000000-0000-7000-8000-0000000033d1'$q$,
+    $q$SELECT count(*) FROM portal_product_variants WHERE id = '00000000-0000-7000-8000-0000000033d1'$q$,
     1, 'canal A lê a variante ativa do produto publicado');
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1,
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 1,
     'canal A: sem variante inativa, de produto não publicado ou de loja não visível');
 
 -- Selos: co-patrocínio Câmara A + Junta, ordem fixa municipality → parish.
@@ -279,7 +280,7 @@ $$;
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033c2', true);
 SELECT pg_temp.expect_text('SELECT string_agg(name, '','' ORDER BY name) FROM portal_stores', 'Loja S2',
     'canal B vê só S2');
-SELECT pg_temp.expect_text('SELECT string_agg(title->>''pt'', '','' ORDER BY id) FROM products', 'P2',
+SELECT pg_temp.expect_text('SELECT string_agg(title->>''pt'', '','' ORDER BY id) FROM portal_products', 'P2',
     'canal B lê só o produto de S2');
 SELECT pg_temp.expect_text('SELECT string_agg(name, '','') FROM portal_store_badges', 'Câmara B 33',
     'canal B: 1 selo (Câmara B)');
@@ -288,7 +289,7 @@ SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033c3
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'canal inativo: portal_stores vazia');
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033c4', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'municipal sem entidade: portal_stores vazia');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'municipal sem entidade: 0 produtos');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0, 'municipal sem entidade: 0 produtos');
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_store_badges', 0, 'municipal sem entidade: 0 selos');
 
 -- ---------------------------------------------------------------------------
@@ -332,7 +333,7 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'nacional i
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000033c1', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0,
     'canal A: loja de tenant inativo (S1, EA ativo e vigente) não aparece');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'canal A: 0 produtos de loja de tenant inativo');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0, 'canal A: 0 produtos de loja de tenant inativo');
 ROLLBACK TO SAVEPOINT cv_ni;
 SELECT set_config('app.current_tenant_id', '', true);
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'sem contexto: portal_stores vazia');
@@ -421,13 +422,19 @@ SELECT pg_temp.expect_count(
        WHERE polrelid IN ('store_sponsorships'::regclass, 'sponsor_entities'::regclass) AND polname = 'portal_view'
          AND polcmd = 'r' AND polroles = ARRAY['ptmarket_portal'::regrole::oid]$q$,
     2, 'policies portal_view FOR SELECT TO ptmarket_portal em store_sponsorships e sponsor_entities');
+-- 0039: a leitura pública de products/product_variants passa às views do catálogo (portal_read removida; a dona
+-- ptmarket_portal lê pela policy portal_view, condição por portal_stores, sem o gate).
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_policy
-       WHERE polrelid IN ('products'::regclass, 'product_variants'::regclass) AND polname = 'portal_read'
-         AND polcmd = 'r' AND polroles = ARRAY['ptmarket_app'::regrole::oid]
+       WHERE polrelid IN ('products'::regclass, 'product_variants'::regclass) AND polname = 'portal_read'$q$,
+    0, 'portal_read de products/product_variants removida (0039)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM pg_policy
+       WHERE polrelid IN ('products'::regclass, 'product_variants'::regclass) AND polname = 'portal_view'
+         AND polcmd = 'r' AND polroles = ARRAY['ptmarket_portal'::regrole::oid]
          AND pg_get_expr(polqual, polrelid) NOT LIKE '%app_is_national_portal%'
          AND pg_get_expr(polqual, polrelid) LIKE '%portal_stores%'$q$,
-    2, 'portal_read de products/product_variants sem o gate, por portal_stores');
+    2, 'portal_view de products/product_variants (ptmarket_portal) sem o gate, por portal_stores');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_policy
        WHERE polrelid = 'stores'::regclass AND polname = 'portal_view'
@@ -473,7 +480,7 @@ SELECT pg_temp.expect_no_seqscan('SELECT id, name FROM portal_stores', 'store_sp
 SELECT pg_temp.expect_no_seqscan('SELECT store_id, kind, name FROM portal_store_badges', 'store_sponsorships',
     'canal A: portal_store_badges sem Seq Scan em store_sponsorships');
 SELECT pg_temp.expect_no_seqscan(
-    $q$SELECT id FROM products WHERE store_id = '00000000-0000-7000-8000-000000003301'$q$, 'store_sponsorships',
+    $q$SELECT id FROM portal_products WHERE store_id = '00000000-0000-7000-8000-000000003301'$q$, 'store_sponsorships',
     'canal A: produtos por loja sem Seq Scan em store_sponsorships');
 RESET ROLE;
 

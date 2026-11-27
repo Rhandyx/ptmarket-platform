@@ -1,6 +1,7 @@
 -- Teste do portal (0016; view portal_stores desde a 0021; visibilidade por canal desde a 0033): no canal nacional
 -- (tenant do contexto = national_portal ativo + flag) todas as lojas ativas desse tenant; num canal white-label só as
--- lojas patrocinadas e os seus produtos publicados / variantes ativas; escritas continuam isoladas.
+-- lojas patrocinadas e os seus produtos publicados / variantes ativas (desde a 0039 só pelas views portal_products e
+-- portal_product_variants); escritas continuam isoladas.
 -- Asserções correm sempre com SET ROLE ptmarket_app. Só os tenants e a entidade patrocinadora (sem grant de escrita
 -- para a app) são criados pelo dono das migrations. Tudo numa transação com ROLLBACK: a BD fica como estava.
 
@@ -198,45 +199,48 @@ SELECT pg_temp.expect_count(
                                                        '00000000-0000-7000-8000-0000000020f3')$q$,
     0, 'canal W não vê A3 (inativa, patrocinada) nem lojas sem patrocínio (A4, F3)');
 
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 1, 'canal W vê 1 produto (A2)');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 1, 'canal W vê 1 produto (A2)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE id = '00000000-0000-7000-8000-0000000020a2'$q$,
+    $q$SELECT count(*) FROM portal_products WHERE id = '00000000-0000-7000-8000-0000000020a2'$q$,
     1, 'produtos seguem a loja: A2');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE id = '00000000-0000-7000-8000-0000000020a5'$q$,
+    $q$SELECT count(*) FROM portal_products WHERE id = '00000000-0000-7000-8000-0000000020a5'$q$,
     0, 'produto não publicado não aparece');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE id IN ('00000000-0000-7000-8000-0000000020a6',
+    $q$SELECT count(*) FROM portal_products WHERE id IN ('00000000-0000-7000-8000-0000000020a6',
                                                   '00000000-0000-7000-8000-0000000020a7',
                                                   '00000000-0000-7000-8000-0000000020f4')$q$,
     0, 'produto publicado de loja sem patrocínio/inativa não aparece');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM products WHERE tenant_id = '00000000-0000-7000-8000-0000000020f2'$q$,
+    $q$SELECT count(*) FROM portal_products WHERE tenant_id = '00000000-0000-7000-8000-0000000020f2'$q$,
     0, 'sem produtos de ES');
 
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1, 'canal W vê 1 variante (A2v1)');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 1, 'canal W vê 1 variante (A2v1)');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants WHERE id = '00000000-0000-7000-8000-00000002a201'$q$,
+    $q$SELECT count(*) FROM portal_product_variants WHERE id = '00000000-0000-7000-8000-00000002a201'$q$,
     1, 'variantes seguem o produto: A2v1');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants WHERE id = '00000000-0000-7000-8000-00000002a202'$q$,
+    $q$SELECT count(*) FROM portal_product_variants WHERE id = '00000000-0000-7000-8000-00000002a202'$q$,
     0, 'variante inativa não aparece');
 SELECT pg_temp.expect_count(
-    $q$SELECT count(*) FROM product_variants WHERE id IN ('00000000-0000-7000-8000-00000002a501',
+    $q$SELECT count(*) FROM portal_product_variants WHERE id IN ('00000000-0000-7000-8000-00000002a501',
                                                           '00000000-0000-7000-8000-00000002a601',
                                                           '00000000-0000-7000-8000-00000002a701')$q$,
     0, 'variante ativa de produto não publicado / loja não visível não aparece');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM product_price_history$q$,
     0, 'product_price_history sem policy de portal: o canal W não lê histórico de P');
+SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'canal W (0039): products direto → 0 linhas');
+SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 0,
+    'canal W (0039): product_variants direto → 0 linhas');
 
 -- Índices: lojas do canal e produtos por loja não precisam de seq scan.
 SELECT pg_temp.expect_no_seqscan(
-    $q$SELECT id FROM products WHERE store_id = '00000000-0000-7000-8000-0000000020a1'$q$,
+    $q$SELECT id FROM portal_products WHERE store_id = '00000000-0000-7000-8000-0000000020a1'$q$,
     'products', 'produtos por loja (store_id) no canal W usam índice');
 SELECT pg_temp.expect_no_seqscan(
-    $q$SELECT id FROM products WHERE tenant_id = '00000000-0000-7000-8000-0000000020f0'
-                                 AND store_id = '00000000-0000-7000-8000-0000000020a1'$q$,
+    $q$SELECT id FROM portal_products WHERE tenant_id = '00000000-0000-7000-8000-0000000020f0'
+                                        AND store_id = '00000000-0000-7000-8000-0000000020a1'$q$,
     'products', 'produtos por (tenant_id, store_id) no canal W usam índice');
 SELECT pg_temp.expect_no_seqscan(
     $q$SELECT id FROM portal_stores$q$,
@@ -290,8 +294,8 @@ SELECT pg_temp.expect_count(
 -- As linhas continuam lá e intactas (lidas no canal W).
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores s
-       JOIN products p ON p.store_id = s.id AND p.tenant_id = s.tenant_id
-       JOIN product_variants v ON v.product_id = p.id AND v.tenant_id = p.tenant_id
+       JOIN portal_products p ON p.store_id = s.id AND p.tenant_id = s.tenant_id
+       JOIN portal_product_variants v ON v.product_id = p.id AND v.tenant_id = p.tenant_id
        WHERE s.id = '00000000-0000-7000-8000-0000000020a1' AND s.name = 'Loja A1'
          AND p.id = '00000000-0000-7000-8000-0000000020a2' AND v.price_cents = 250$q$,
     1, 'canal W: loja/produto/variante de P intactos');
@@ -323,8 +327,8 @@ SET app.portal_national = 'on';
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000200c';
 SELECT pg_temp.expect_count('SELECT (SELECT app_is_national_portal())::int', 0, 'municipal com flag: modo portal desligado');
 SELECT pg_temp.expect_count('SELECT count(*) FROM stores', 0, 'municipal com flag: 0 lojas');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'municipal com flag: 0 produtos');
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 0, 'municipal com flag: 0 variantes');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0, 'municipal com flag: 0 produtos');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 0, 'municipal com flag: 0 variantes');
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'municipal sem entidade com flag: portal_stores vazia');
 
 -- Portal/tenant inativo (0035: um só national_portal por país): o P é desativado só dentro deste savepoint.
@@ -334,16 +338,18 @@ UPDATE tenants SET is_active = false WHERE id = '00000000-0000-7000-8000-0000000
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-0000000020f0';
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'portal inativo com flag: 0 lojas');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'portal inativo com flag: 0 produtos');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0, 'portal inativo com flag: 0 produtos');
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000200a';
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'canal W: loja de tenant inativo não aparece');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'canal W: produtos de tenant inativo não aparecem');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0,
+    'canal W: produtos de tenant inativo não aparecem');
 ROLLBACK TO SAVEPOINT portal_ni;
 
 RESET app.current_tenant_id;
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'sem contexto com flag: 0 lojas');
-SELECT pg_temp.expect_count('SELECT count(*) FROM products', 0, 'sem contexto com flag: 0 produtos');
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 0, 'sem contexto com flag: 0 variantes');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_products', 0, 'sem contexto com flag: 0 produtos');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 0,
+    'sem contexto com flag: 0 variantes');
 SET app.current_tenant_id = '';
 SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 0, 'contexto vazio com flag: 0 lojas');
 
@@ -355,7 +361,7 @@ SELECT pg_temp.expect_count('SELECT count(*) FROM portal_stores', 1, 'portal ES 
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM portal_stores WHERE id = '00000000-0000-7000-8000-0000000020e1'$q$,
     1, 'portal ES vê a loja ES');
-SELECT pg_temp.expect_count('SELECT count(*) FROM product_variants', 1, 'portal ES vê 1 variante (E2)');
+SELECT pg_temp.expect_count('SELECT count(*) FROM portal_product_variants', 1, 'portal ES vê 1 variante (E2)');
 
 RESET app.portal_national;
 RESET app.current_tenant_id;

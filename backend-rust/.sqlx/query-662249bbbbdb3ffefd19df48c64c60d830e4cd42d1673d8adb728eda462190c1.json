@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO product_variants (id, tenant_id, product_id, sku, price_cents,\n                                           compare_at_price_cents, stock_qty, is_active)\n             VALUES ($1, $2, $3, $4, $5, 99999, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Int8",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "662249bbbbdb3ffefd19df48c64c60d830e4cd42d1673d8adb728eda462190c1"
+}
