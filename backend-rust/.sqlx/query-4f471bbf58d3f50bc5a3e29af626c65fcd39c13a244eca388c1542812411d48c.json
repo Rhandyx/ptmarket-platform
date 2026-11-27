@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE store_sponsorships SET decision_reason = 'x' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f471bbf58d3f50bc5a3e29af626c65fcd39c13a244eca388c1542812411d48c"
+}

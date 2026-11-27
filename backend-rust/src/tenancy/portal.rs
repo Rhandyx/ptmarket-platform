@@ -41,7 +41,7 @@
 //! ```
 
 use serde::Serialize;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -50,7 +50,7 @@ use crate::{
     tenancy::{
         TenantId,
         db::{PortalMode, db_error, set_context},
-        resolver::{ResolvedTenant, TenantType},
+        resolver::{CountryCode, ResolvedTenant, TenantType},
     },
 };
 
@@ -130,6 +130,8 @@ pub struct PortalStore {
     pub tenant_id: Uuid,
     pub name: String,
     pub slug: String,
+    /// Denominação legal (DSA: dado público do vendedor).
+    pub legal_name: String,
     pub nif: String,
     pub shipping_scope: ShippingScope,
     pub storefront_dicofre: Option<String>,
@@ -143,6 +145,7 @@ struct StoreRow {
     tenant_id: Uuid,
     name: String,
     slug: String,
+    legal_name: String,
     nif: String,
     shipping_scope: String,
     storefront_dicofre: Option<String>,
@@ -164,7 +167,7 @@ macro_rules! store_select {
     ($rest:literal) => {
         concat!(
             "SELECT s.id::uuid AS id, s.tenant_id::uuid AS tenant_id, s.name::text AS name,
-                    s.slug::text AS slug, s.nif::text AS nif,
+                    s.slug::text AS slug, s.legal_name::text AS legal_name, s.nif::text AS nif,
                     s.shipping_scope::text AS shipping_scope,
                     s.storefront_dicofre::text AS storefront_dicofre
              FROM portal_stores s ",
@@ -283,6 +286,7 @@ impl PortalReadTx {
                     tenant_id: r.tenant_id,
                     name: r.name,
                     slug: r.slug,
+                    legal_name: r.legal_name,
                     nif: r.nif,
                     shipping_scope: ShippingScope::parse(&r.shipping_scope)?,
                     storefront_dicofre: r.storefront_dicofre,
@@ -331,16 +335,78 @@ pub async fn begin_portal_read_tx(
     } else {
         PortalMode::Off
     };
-    let mut tx = replica.begin().await.map_err(db_error)?;
+    open_read_tx(replica, tenant.id(), ctx, mode).await
+}
+
+async fn open_read_tx(
+    pool: &PgPool,
+    tenant: TenantId,
+    ctx: &AuditCtx,
+    mode: PortalMode,
+) -> Result<PortalReadTx, AppError> {
+    let mut tx = pool.begin().await.map_err(db_error)?;
     sqlx::query!("SET TRANSACTION READ ONLY")
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
-    set_context(&mut tx, Some(tenant.id()), ctx, mode).await?;
-    Ok(PortalReadTx {
-        tenant: tenant.id(),
-        tx,
-    })
+    set_context(&mut tx, Some(tenant), ctx, mode).await?;
+    Ok(PortalReadTx { tenant, tx })
+}
+
+/// Canal nacional de um país (tenant `national_portal` ativo), para quem não tem o tenant no
+/// `Host` (ex.: o `sponsor_admin` no `PLATFORM_ADMIN_HOST`). Só `national_portal_for_country` o
+/// cria: o tenant vem sempre do país (da entidade), nunca do pedido.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NationalPortal {
+    id: TenantId,
+    country_code: CountryCode,
+}
+
+impl NationalPortal {
+    pub fn id(&self) -> TenantId {
+        self.id
+    }
+
+    pub fn country_code(&self) -> CountryCode {
+        self.country_code
+    }
+}
+
+/// O canal nacional ativo do país `country`; `None` se não houver. Mais de um → erro interno
+/// (configuração inválida: falha fechado).
+pub async fn national_portal_for_country(
+    conn: &mut PgConnection,
+    country: CountryCode,
+) -> Result<Option<NationalPortal>, AppError> {
+    let ids = sqlx::query_scalar!(
+        "SELECT id FROM tenants
+         WHERE tenant_type = 'national_portal' AND country_code = $1 AND is_active
+         ORDER BY id LIMIT 2",
+        country.as_str()
+    )
+    .fetch_all(conn)
+    .await
+    .map_err(db_error)?;
+    match ids.as_slice() {
+        [] => Ok(None),
+        [id] => Ok(Some(NationalPortal {
+            id: TenantId::new(*id),
+            country_code: country,
+        })),
+        _ => Err(AppError::Internal(anyhow::anyhow!(
+            "mais de um national_portal ativo para o país"
+        ))),
+    }
+}
+
+/// Abre a transação de leitura no canal nacional `channel` (`app.portal_national = 'on'`): todas
+/// as lojas ativas do país, só pelas consultas dedicadas de `PortalReadTx`.
+pub async fn begin_national_read_tx(
+    pool: &PgPool,
+    channel: &NationalPortal,
+    ctx: &AuditCtx,
+) -> Result<PortalReadTx, AppError> {
+    open_read_tx(pool, channel.id, ctx, PortalMode::On).await
 }
 
 #[cfg(test)]
@@ -365,6 +431,7 @@ mod tests {
             tenant_id: Uuid::nil(),
             name: String::new(),
             slug: String::new(),
+            legal_name: String::new(),
             nif: String::new(),
             shipping_scope: ShippingScope::LocalOnly,
             storefront_dicofre: None,
@@ -383,6 +450,7 @@ mod tests {
             [
                 "badges",
                 "id",
+                "legal_name",
                 "name",
                 "nif",
                 "shipping_scope",

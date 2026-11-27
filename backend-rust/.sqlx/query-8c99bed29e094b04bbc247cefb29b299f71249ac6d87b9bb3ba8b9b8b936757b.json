@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE store_sponsorships\n           SET status = 'revoked', decided_by = $4, decided_at = now(), decision_reason = $5,\n               updated_at = now()\n           WHERE id = $1 AND tenant_id = $2 AND sponsor_entity_id = $3 AND status = 'active'\n           RETURNING\n               to_char(valid_from AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_from?\",\n               to_char(valid_to AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_to?\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "valid_from?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "valid_to?",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "8c99bed29e094b04bbc247cefb29b299f71249ac6d87b9bb3ba8b9b8b936757b"
+}

@@ -13,6 +13,7 @@ pub mod store_terms;
 pub use db::{TenantId, TenantTx, begin_tenant_tx};
 pub use http::PlatformHost;
 pub use portal::{
-    PortalReadTx, PortalStore, ShippingScope, SponsorKind, StoreBadge, begin_portal_read_tx,
+    NationalPortal, PortalReadTx, PortalStore, ShippingScope, SponsorKind, StoreBadge,
+    begin_national_read_tx, begin_portal_read_tx, national_portal_for_country,
 };
 pub use resolver::{CountryCode, HostResolver, ResolvedHost, ResolvedTenant, TenantType};

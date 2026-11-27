@@ -159,6 +159,24 @@ pub fn api(
         .route(
             "/api/v1/stores/{store_id}/sponsors/eligible",
             get(sponsors::http::eligible_for_store),
+        )
+        // Patrocínios da entidade (cartão 03/20): `sponsor_admin` + 2FA; a lista é leitura de
+        // admin (síncrona na caixa negra, por isso neste grupo).
+        .route(
+            "/api/v1/sponsors/{entity_id}/sponsorships",
+            get(sponsors::http::entity_sponsorships),
+        )
+        .route(
+            "/api/v1/sponsors/{entity_id}/sponsorships/{id}/approve",
+            post(sponsors::http::approve_sponsorship),
+        )
+        .route(
+            "/api/v1/sponsors/{entity_id}/sponsorships/{id}/reject",
+            post(sponsors::http::reject_sponsorship),
+        )
+        .route(
+            "/api/v1/sponsors/{entity_id}/sponsorships/{id}/revoke",
+            post(sponsors::http::revoke_sponsorship),
         );
     // Consola de plataforma: o gate (`RequireSuperAdmin`) vale para o grupo INTEIRO (`.layer`),
     // incluindo os caminhos desconhecidos: qualquer caminho sob `/api/v1/superadmin` dá o mesmo 404

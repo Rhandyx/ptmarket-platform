@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stores SET storefront_dicofre = $2, is_active = $3 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b9bfb83b7f69c43a2c14c96878a9368fd3ea2f57af140fd2d362b9d8517dcc75"
+}

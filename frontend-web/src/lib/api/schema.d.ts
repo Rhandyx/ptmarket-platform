@@ -186,6 +186,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sponsors/{entity_id}/sponsorships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pedidos e patrocínios da entidade, do mais recente para o mais antigo, com os dados públicos
+         *     da loja (nunca IBAN, contactos, comissões nem compradores). Lojas inativas ficam de fora.
+         */
+        get: operations["entity_sponsorships"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Aprova um pedido `pending` (→ `active`), com a elegibilidade revista pela morada da loja. */
+        post: operations["approve_sponsorship"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rejeita um pedido `pending` (→ `rejected`) com motivo. */
+        post: operations["reject_sponsorship"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoga um patrocínio `active` (→ `revoked`; a BD fecha a vigência agora) com motivo. Evento
+         *     crítico da caixa negra. A loja continua no portal e volta à exceção ou ao plano se não tiver
+         *     outro patrocínio ativo.
+         */
+        post: operations["revoke_sponsorship"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/staff/auth/login": {
         parameters: {
             query?: never;
@@ -541,6 +616,15 @@ export interface components {
          * @enum {string}
          */
         Already: "none" | "pending" | "active";
+        /**
+         * @description Corpo de `approve`: vigência opcional (RFC 3339). `valid_from` por defeito = agora, nunca
+         *     anterior a agora − 1 min; `valid_to` (`null` = sem fim) > `valid_from`. Nada mais (estado, bps
+         *     ou outro campo → 400).
+         */
+        ApproveBody: {
+            valid_from?: string | null;
+            valid_to?: string | null;
+        };
         /** @description Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`. */
         CeremonyOptions: {
             ceremony_id: string;
@@ -586,6 +670,10 @@ export interface components {
             nif: string | null;
             phone: string | null;
         };
+        /** @description Corpo de `reject` e `revoke`: só o motivo (1..=500 caracteres). */
+        DecisionReasonBody: {
+            reason: string;
+        };
         /** @description Entidade elegível para a loja, com o estado do pedido. */
         EligibleForStore: {
             already: components["schemas"]["Already"];
@@ -595,6 +683,24 @@ export interface components {
             logo_key?: string | null;
             name: string;
             slug: string;
+        };
+        /** @description Pedido/patrocínio visto pela entidade. Datas em RFC 3339 UTC. */
+        EntitySponsorshipItem: {
+            decided_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            requested_at: string;
+            /** @description `pending`, `active`, `rejected`, `expired` ou `revoked`. */
+            status: string;
+            store: components["schemas"]["SponsoredStore"];
+            valid_from?: string | null;
+            /** @description `null` = sem fim. */
+            valid_to?: string | null;
+        };
+        /** @description Página da lista (mais recentes primeiro). `next_cursor` = `null` quando não há mais. */
+        EntitySponsorshipPage: {
+            items: components["schemas"]["EntitySponsorshipItem"][];
+            next_cursor?: string | null;
         };
         /** @description Código DICOFRE + nome. */
         GeoItem: {
@@ -764,11 +870,34 @@ export interface components {
             /** @description Entidades que cobrem a freguesia, na ordem fixa dos selos. */
             sponsors: components["schemas"]["SponsorSummary"][];
         };
+        /**
+         * @description Loja patrocinada (ou que pede): só os campos públicos do portal (DSA). Nunca IBAN, chaves,
+         *     comissões, contactos nem dados de compradores (spec 14 §7).
+         */
+        SponsoredStore: {
+            /** Format: uuid */
+            id: string;
+            legal_name: string;
+            name: string;
+            nif: string;
+            slug: string;
+            storefront_dicofre?: string | null;
+        };
         /** @description Pedido criado (sempre `pending`: a entidade aprova no painel). */
         SponsorshipCreated: {
             /** Format: uuid */
             id: string;
             status: string;
+        };
+        /** @description Patrocínio depois da decisão. */
+        SponsorshipDecision: {
+            /** Format: uuid */
+            id: string;
+            /** @description `active`, `rejected` ou `revoked`. */
+            status: string;
+            valid_from?: string | null;
+            /** @description `null` = sem fim. */
+            valid_to?: string | null;
         };
         /**
          * @description Corpo de `POST /api/v1/stores/{store_id}/sponsorships`: só a entidade (nunca datas, estado nem
@@ -1320,6 +1449,300 @@ export interface operations {
             };
             /** @description Freguesia inexistente ou fora de vigor */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    entity_sponsorships: {
+        parameters: {
+            query?: {
+                /** @description pending, active, rejected, expired ou revoked */
+                status?: string;
+                /** @description `next_cursor` da página anterior */
+                cursor?: string;
+                /** @description 1..=100 (por defeito 50) */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Id da entidade patrocinadora */
+                entity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Página de patrocínios da entidade */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntitySponsorshipPage"];
+                };
+            };
+            /** @description Filtros inválidos */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem `sponsor_admin` (`rbac`) ou 2FA em falta (`mfa_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Outra entidade, inexistente ou desativada (`idor`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    approve_sponsorship: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path: {
+                /** @description Id da entidade patrocinadora */
+                entity_id: string;
+                /** @description Id do patrocínio */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApproveBody"];
+            };
+        };
+        responses: {
+            /** @description Patrocínio ativo */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SponsorshipDecision"];
+                };
+            };
+            /** @description Corpo inválido, campos desconhecidos ou vigência inválida */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `invalid_transition` ou `overlapping_period` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `not_eligible` */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reject_sponsorship: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path: {
+                /** @description Id da entidade patrocinadora */
+                entity_id: string;
+                /** @description Id do patrocínio */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionReasonBody"];
+            };
+        };
+        responses: {
+            /** @description Pedido rejeitado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SponsorshipDecision"];
+                };
+            };
+            /** @description Corpo inválido, campos desconhecidos ou motivo fora de 1..=500 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `invalid_transition` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_sponsorship: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path: {
+                /** @description Id da entidade patrocinadora */
+                entity_id: string;
+                /** @description Id do patrocínio */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionReasonBody"];
+            };
+        };
+        responses: {
+            /** @description Patrocínio revogado */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SponsorshipDecision"];
+                };
+            };
+            /** @description Corpo inválido, campos desconhecidos ou motivo fora de 1..=500 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `invalid_transition` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

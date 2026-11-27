@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, decided_by, decision_reason, valid_to IS NOT NULL AS \"has_end!\"\n           FROM store_sponsorships WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "decided_by",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "decided_by"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "decision_reason",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "decision_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "has_end!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "9c721acff9356b26ba3999f2d6a34dfadf1eb9a716f3f1acda1f85af68fbdd03"
+}

@@ -414,6 +414,318 @@
         }
       }
     },
+    "/api/v1/sponsors/{entity_id}/sponsorships": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Pedidos e patrocínios da entidade, do mais recente para o mais antigo, com os dados públicos\nda loja (nunca IBAN, contactos, comissões nem compradores). Lojas inativas ficam de fora.",
+        "operationId": "entity_sponsorships",
+        "parameters": [
+          {
+            "name": "entity_id",
+            "in": "path",
+            "description": "Id da entidade patrocinadora",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "pending, active, rejected, expired ou revoked",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` da página anterior",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1..=100 (por defeito 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Página de patrocínios da entidade",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitySponsorshipPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Filtros inválidos"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem `sponsor_admin` (`rbac`) ou 2FA em falta (`mfa_required`)"
+          },
+          "404": {
+            "description": "Outra entidade, inexistente ou desativada (`idor`)"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/approve": {
+      "post": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Aprova um pedido `pending` (→ `active`), com a elegibilidade revista pela morada da loja.",
+        "operationId": "approve_sponsorship",
+        "parameters": [
+          {
+            "name": "entity_id",
+            "in": "path",
+            "description": "Id da entidade patrocinadora",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id do patrocínio",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Patrocínio ativo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SponsorshipDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo inválido, campos desconhecidos ou vigência inválida"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"
+          },
+          "404": {
+            "description": "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"
+          },
+          "409": {
+            "description": "`invalid_transition` ou `overlapping_period`"
+          },
+          "422": {
+            "description": "`not_eligible`"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/reject": {
+      "post": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Rejeita um pedido `pending` (→ `rejected`) com motivo.",
+        "operationId": "reject_sponsorship",
+        "parameters": [
+          {
+            "name": "entity_id",
+            "in": "path",
+            "description": "Id da entidade patrocinadora",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id do patrocínio",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionReasonBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pedido rejeitado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SponsorshipDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo inválido, campos desconhecidos ou motivo fora de 1..=500"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"
+          },
+          "404": {
+            "description": "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"
+          },
+          "409": {
+            "description": "`invalid_transition`"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/sponsors/{entity_id}/sponsorships/{id}/revoke": {
+      "post": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Revoga um patrocínio `active` (→ `revoked`; a BD fecha a vigência agora) com motivo. Evento\ncrítico da caixa negra. A loja continua no portal e volta à exceção ou ao plano se não tiver\noutro patrocínio ativo.",
+        "operationId": "revoke_sponsorship",
+        "parameters": [
+          {
+            "name": "entity_id",
+            "in": "path",
+            "description": "Id da entidade patrocinadora",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id do patrocínio",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionReasonBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Patrocínio revogado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SponsorshipDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo inválido, campos desconhecidos ou motivo fora de 1..=500"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"
+          },
+          "404": {
+            "description": "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"
+          },
+          "409": {
+            "description": "`invalid_transition`"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/staff/auth/login": {
       "post": {
         "tags": [
@@ -1343,6 +1655,25 @@
           "active"
         ]
       },
+      "ApproveBody": {
+        "type": "object",
+        "description": "Corpo de `approve`: vigência opcional (RFC 3339). `valid_from` por defeito = agora, nunca\nanterior a agora − 1 min; `valid_to` (`null` = sem fim) > `valid_from`. Nada mais (estado, bps\nou outro campo → 400).",
+        "properties": {
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "CeremonyOptions": {
         "type": "object",
         "description": "Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`.",
@@ -1470,6 +1801,19 @@
           }
         }
       },
+      "DecisionReasonBody": {
+        "type": "object",
+        "description": "Corpo de `reject` e `revoke`: só o motivo (1..=500 caracteres).",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "EligibleForStore": {
         "type": "object",
         "description": "Entidade elegível para a loja, com o estado do pedido.",
@@ -1502,6 +1846,72 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "EntitySponsorshipItem": {
+        "type": "object",
+        "description": "Pedido/patrocínio visto pela entidade. Datas em RFC 3339 UTC.",
+        "required": [
+          "id",
+          "status",
+          "store",
+          "requested_at"
+        ],
+        "properties": {
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requested_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `active`, `rejected`, `expired` ou `revoked`."
+          },
+          "store": {
+            "$ref": "#/components/schemas/SponsoredStore"
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` = sem fim."
+          }
+        }
+      },
+      "EntitySponsorshipPage": {
+        "type": "object",
+        "description": "Página da lista (mais recentes primeiro). `next_cursor` = `null` quando não há mais.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitySponsorshipItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -1924,6 +2334,41 @@
           }
         }
       },
+      "SponsoredStore": {
+        "type": "object",
+        "description": "Loja patrocinada (ou que pede): só os campos públicos do portal (DSA). Nunca IBAN, chaves,\ncomissões, contactos nem dados de compradores (spec 14 §7).",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "legal_name",
+          "nif"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "legal_name": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nif": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "storefront_dicofre": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SponsorshipCreated": {
         "type": "object",
         "description": "Pedido criado (sempre `pending`: a entidade aprova no painel).",
@@ -1938,6 +2383,37 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "SponsorshipDecision": {
+        "type": "object",
+        "description": "Patrocínio depois da decisão.",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "description": "`active`, `rejected` ou `revoked`."
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` = sem fim."
           }
         }
       },

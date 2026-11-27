@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE store_sponsorships\n           SET status = 'active',\n               valid_from = 'epoch'::timestamptz + $4::int8 * interval '1 microsecond',\n               valid_to = 'epoch'::timestamptz + $5::int8 * interval '1 microsecond',\n               decided_by = $6, decided_at = now(), decision_reason = NULL, updated_at = now()\n           WHERE id = $1 AND tenant_id = $2 AND sponsor_entity_id = $3 AND status = 'pending'\n           RETURNING\n               to_char(valid_from AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_from?\",\n               to_char(valid_to AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_to?\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "valid_from?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "valid_to?",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "d0f6d54babc38034bc224eb34d7e4ef3f466c7a06eaa1af5dad58c6c5c27edbf"
+}

@@ -4,12 +4,17 @@
 //!
 //! Endpoints do lojista (cartão 03/19, no fim do ficheiro): pedir e consultar patrocínios da loja,
 //! com sessão de staff e o âmbito da loja (`begin_store_tx`).
+//!
+//! Endpoints do `sponsor_admin` (cartão 03/20, no fim do ficheiro): lista, aprovar, rejeitar e
+//! revogar os patrocínios da entidade (`begin_sponsor_tx` no canal nacional do país da entidade).
+
+use std::collections::HashMap;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{
-        FromRequestParts, Query, State,
-        rejection::{JsonRejection, QueryRejection},
+        FromRequestParts, Path, Query, State,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::{HeaderValue, StatusCode, header::CACHE_CONTROL, request::Parts},
     response::{IntoResponse, Response},
@@ -25,11 +30,12 @@ use crate::{
     identity::{
         elevate::NoImpersonation,
         http::no_store,
-        rbac::{RequireStoreOwner, RequireStoreRole},
+        rbac::{DENIED_IDOR, RequireSponsorAdmin, RequireStoreOwner, RequireStoreRole},
     },
     payments::commission::{self, PlanView},
     sponsors::{
         PUBLIC_COUNTRY,
+        admin::{self, Decision, EntitySponsorshipPage, ListFilter},
         eligibility::{self, SponsorSummary},
         geo::{self, GeoItem},
         sponsorships::{
@@ -39,8 +45,8 @@ use crate::{
     },
     state::AppState,
     tenancy::{
-        PlatformHost, ResolvedTenant,
-        db::{begin_store_tx, db_error},
+        NationalPortal, PlatformHost, ResolvedTenant, TenantTx, begin_national_read_tx,
+        db::{begin_sponsor_tx, begin_store_tx, db_error},
     },
 };
 
@@ -473,4 +479,425 @@ pub async fn eligible_for_store(
     let items = sponsorships::eligible_for_store(&mut tx, r.store_id).await?;
     tx.rollback().await?;
     Ok(no_store(Json(items).into_response()))
+}
+
+// ---------------------------------------------------------------------------------------------
+// sponsor_admin (cartão 03/20): ver, aprovar, rejeitar e revogar os patrocínios da entidade.
+// `RequireSponsorAdmin` (2FA sempre) → entidade ativa → canal nacional do país da entidade →
+// `begin_sponsor_tx` (RLS 0035). Os dados da loja vêm só do portal (`stores_by_ids`).
+// ---------------------------------------------------------------------------------------------
+
+const ACTION_APPROVED: &str = "sponsorship.approved";
+const ACTION_REJECTED: &str = "sponsorship.rejected";
+/// Kind crítico `sponsorship_revoked` (0038).
+const ACTION_REVOKED: &str = "sponsorship.revoked";
+
+/// Filtros de `GET /api/v1/sponsors/{entity_id}/sponsorships`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntityListQuery {
+    pub status: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// Corpo de `approve`: vigência opcional (RFC 3339). `valid_from` por defeito = agora, nunca
+/// anterior a agora − 1 min; `valid_to` (`null` = sem fim) > `valid_from`. Nada mais (estado, bps
+/// ou outro campo → 400).
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApproveBody {
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+}
+
+/// Corpo de `reject` e `revoke`: só o motivo (1..=500 caracteres).
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionReasonBody {
+    pub reason: String,
+}
+
+/// Patrocínio depois da decisão.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SponsorshipDecision {
+    #[schema(value_type = String, format = "uuid")]
+    pub id: Uuid,
+    /// `active`, `rejected` ou `revoked`.
+    pub status: String,
+    pub valid_from: Option<String>,
+    /// `null` = sem fim.
+    pub valid_to: Option<String>,
+}
+
+/// 404 + `Denied("idor")`: patrocínio de outra entidade, inexistente, ou entidade desativada.
+fn idor() -> Response {
+    no_store((Extension(DENIED_IDOR), AppError::NotFound).into_response())
+}
+
+/// Id do patrocínio no caminho; inválido → `None` (404 + `idor`, como inexistente).
+fn sponsorship_id(path: Result<Path<HashMap<String, String>>, PathRejection>) -> Option<Uuid> {
+    let Path(p) = path.ok()?;
+    Uuid::parse_str(p.get("id")?).ok()
+}
+
+/// Canal nacional da entidade e a transação de entidade nele. Entidade inexistente ou desativada
+/// → `Err(404 + idor)` antes de qualquer leitura de patrocínios.
+async fn sponsor_tx(
+    st: &AppState,
+    r: &RequireSponsorAdmin,
+    ctx: &AuditCtx,
+) -> Result<Result<(NationalPortal, TenantTx), Response>, AppError> {
+    let mut conn = st.db_primary.acquire().await.map_err(db_error)?;
+    let Some(channel) = admin::channel_for_entity(&mut conn, r.entity_id()).await? else {
+        return Ok(Err(idor()));
+    };
+    drop(conn);
+    let tx = begin_sponsor_tx(&st.db_primary, channel.id(), &r.scope(), ctx).await?;
+    Ok(Ok((channel, tx)))
+}
+
+fn decision_refusal(d: &Decision) -> Response {
+    match d {
+        Decision::NotFound => idor(),
+        Decision::InvalidTransition { .. } => refusal(
+            StatusCode::CONFLICT,
+            "invalid_transition",
+            "O estado atual deste patrocínio não permite esta ação.",
+        ),
+        Decision::Overlap { .. } => refusal(
+            StatusCode::CONFLICT,
+            "overlapping_period",
+            "Já existe um patrocínio ativo desta entidade para a loja nesse período.",
+        ),
+        Decision::NotEligible { .. } => refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_eligible",
+            "A entidade não pode patrocinar esta loja.",
+        ),
+        Decision::Done(_) => {
+            AppError::Internal(anyhow::anyhow!("decision_refusal(Done)")).into_response()
+        }
+    }
+}
+
+/// Grava a decisão (ou a recusa 409/422) na caixa negra, na transação `tx`, e confirma. IDOR:
+/// nada gravado aqui (rollback; o middleware grava a recusa pela marca `idor`).
+async fn finish_decision(
+    mut tx: TenantTx,
+    action: &'static str,
+    entity_id: Uuid,
+    id: Uuid,
+    decision: Decision,
+    reason: Option<&str>,
+) -> Result<Response, AppError> {
+    let (store_id, outcome, code, from, to) = match &decision {
+        Decision::NotFound => {
+            tx.rollback().await?;
+            return Ok(idor());
+        }
+        Decision::Done(d) => (
+            d.store_id,
+            Outcome::Success,
+            None,
+            d.valid_from.clone(),
+            d.valid_to.clone(),
+        ),
+        Decision::InvalidTransition { store_id } => (
+            *store_id,
+            Outcome::Denied,
+            Some("invalid_transition"),
+            None,
+            None,
+        ),
+        Decision::Overlap { store_id } => (
+            *store_id,
+            Outcome::Denied,
+            Some("overlapping_period"),
+            None,
+            None,
+        ),
+        Decision::NotEligible { store_id } => {
+            (*store_id, Outcome::Denied, Some("not_eligible"), None, None)
+        }
+    };
+    record(
+        &mut tx,
+        AuditEvent {
+            action,
+            target_type: Some(TARGET_SPONSORSHIP),
+            target_id: Some(id.to_string()),
+            outcome,
+            reason: code.map(str::to_owned),
+            changes: Some(json!({
+                "sponsor_entity_id": entity_id,
+                "valid_from": from,
+                "valid_to": to,
+                "reason": reason,
+            })),
+            store_id: Some(store_id),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    match decision {
+        Decision::Done(d) => Ok(no_store(
+            Json(SponsorshipDecision {
+                id: d.id,
+                status: d.status.to_owned(),
+                valid_from: d.valid_from,
+                valid_to: d.valid_to,
+            })
+            .into_response(),
+        )),
+        other => Ok(decision_refusal(&other)),
+    }
+}
+
+/// Pedidos e patrocínios da entidade, do mais recente para o mais antigo, com os dados públicos
+/// da loja (nunca IBAN, contactos, comissões nem compradores). Lojas inativas ficam de fora.
+#[utoipa::path(
+    get,
+    path = "/api/v1/sponsors/{entity_id}/sponsorships",
+    tag = "sponsors",
+    params(
+        ("entity_id" = String, Path, description = "Id da entidade patrocinadora"),
+        ("status" = Option<String>, Query, description = "pending, active, rejected, expired ou revoked"),
+        ("cursor" = Option<String>, Query, description = "`next_cursor` da página anterior"),
+        ("limit" = Option<i64>, Query, description = "1..=100 (por defeito 50)")
+    ),
+    responses(
+        (status = 200, description = "Página de patrocínios da entidade", body = EntitySponsorshipPage),
+        (status = 400, description = "Filtros inválidos"),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "Sem `sponsor_admin` (`rbac`) ou 2FA em falta (`mfa_required`)"),
+        (status = 404, description = "Outra entidade, inexistente ou desativada (`idor`)"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn entity_sponsorships(
+    State(st): State<AppState>,
+    r: RequireSponsorAdmin,
+    ctx: AuditCtx,
+    q: Result<Query<EntityListQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let q = match query(q, "status") {
+        Ok(q) => q,
+        Err(r) => return Ok(no_store(*r)),
+    };
+    if let Some(s) = &q.status
+        && !admin::STATUSES.contains(&s.as_str())
+    {
+        return Ok(no_store(bad_request("status", "estado desconhecido")));
+    }
+    let limit = q.limit.unwrap_or(admin::DEFAULT_LIST_LIMIT);
+    if !(1..=admin::MAX_LIST_LIMIT).contains(&limit) {
+        return Ok(no_store(bad_request("limit", "entre 1 e 100")));
+    }
+    let cursor = match q.cursor.as_deref() {
+        None => None,
+        Some(c) => match admin::parse_cursor(c) {
+            Some(c) => Some(c),
+            None => return Ok(no_store(bad_request("cursor", "cursor inválido"))),
+        },
+    };
+    let (channel, mut tx) = match sponsor_tx(&st, &r, &ctx).await? {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
+    // Primário (não a réplica): com lag, uma loja acabada de criar ficaria fora da lista sem aviso.
+    let mut portal = begin_national_read_tx(&st.db_primary, &channel, &ctx).await?;
+    let filter = ListFilter {
+        status: q.status,
+        cursor,
+        limit,
+    };
+    let page = admin::list_for_entity(&mut tx, &mut portal, r.entity_id(), &filter).await;
+    portal.finish().await?;
+    tx.rollback().await?;
+    Ok(no_store(Json(page?).into_response()))
+}
+
+/// Aprova um pedido `pending` (→ `active`), com a elegibilidade revista pela morada da loja.
+#[utoipa::path(
+    post,
+    path = "/api/v1/sponsors/{entity_id}/sponsorships/{id}/approve",
+    tag = "sponsors",
+    params(
+        ("entity_id" = String, Path, description = "Id da entidade patrocinadora"),
+        ("id" = String, Path, description = "Id do patrocínio"),
+        ("X-CSRF-Token" = String, Header, description = "Token CSRF da sessão")
+    ),
+    request_body = ApproveBody,
+    responses(
+        (status = 200, description = "Patrocínio ativo", body = SponsorshipDecision),
+        (status = 400, description = "Corpo inválido, campos desconhecidos ou vigência inválida"),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"),
+        (status = 404, description = "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"),
+        (status = 409, description = "`invalid_transition` ou `overlapping_period`"),
+        (status = 422, description = "`not_eligible`"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn approve_sponsorship(
+    State(st): State<AppState>,
+    r: RequireSponsorAdmin,
+    _ni: NoImpersonation,
+    ctx: AuditCtx,
+    path: Result<Path<HashMap<String, String>>, PathRejection>,
+    body: Result<Json<ApproveBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(id) = sponsorship_id(path) else {
+        return Ok(idor());
+    };
+    let Ok(Json(body)) = body else {
+        return Ok(no_store(bad_request(
+            "body",
+            "corpo JSON só com valid_from e valid_to (opcionais)",
+        )));
+    };
+    let parse = |v: &Option<String>| match v {
+        None => Ok(None),
+        Some(s) => admin::parse_rfc3339_us(s).map(Some).ok_or(()),
+    };
+    let Ok(from) = parse(&body.valid_from) else {
+        return Ok(no_store(bad_request(
+            "valid_from",
+            "data RFC 3339 inválida",
+        )));
+    };
+    let Ok(to) = parse(&body.valid_to) else {
+        return Ok(no_store(bad_request("valid_to", "data RFC 3339 inválida")));
+    };
+    let (channel, mut tx) = match sponsor_tx(&st, &r, &ctx).await? {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
+    let now = admin::db_now_us(&mut tx).await?;
+    let from = from.unwrap_or(now);
+    if from < now - admin::VALID_FROM_TOLERANCE_US {
+        tx.rollback().await?;
+        return Ok(no_store(bad_request(
+            "valid_from",
+            "não pode ser anterior a agora",
+        )));
+    }
+    if from > now + admin::VALID_FROM_MAX_AHEAD_US {
+        tx.rollback().await?;
+        return Ok(no_store(bad_request(
+            "valid_from",
+            "no máximo 366 dias a partir de agora",
+        )));
+    }
+    if to.is_some_and(|t| t <= from) {
+        tx.rollback().await?;
+        return Ok(no_store(bad_request(
+            "valid_to",
+            "tem de ser posterior a valid_from",
+        )));
+    }
+    let mut portal = begin_national_read_tx(&st.db_primary, &channel, &ctx).await?;
+    let decision =
+        admin::approve(&mut tx, &mut portal, r.entity_id(), id, r.user_id, from, to).await;
+    portal.finish().await?;
+    finish_decision(tx, ACTION_APPROVED, r.entity_id(), id, decision?, None).await
+}
+
+/// Rejeita um pedido `pending` (→ `rejected`) com motivo.
+#[utoipa::path(
+    post,
+    path = "/api/v1/sponsors/{entity_id}/sponsorships/{id}/reject",
+    tag = "sponsors",
+    params(
+        ("entity_id" = String, Path, description = "Id da entidade patrocinadora"),
+        ("id" = String, Path, description = "Id do patrocínio"),
+        ("X-CSRF-Token" = String, Header, description = "Token CSRF da sessão")
+    ),
+    request_body = DecisionReasonBody,
+    responses(
+        (status = 200, description = "Pedido rejeitado", body = SponsorshipDecision),
+        (status = 400, description = "Corpo inválido, campos desconhecidos ou motivo fora de 1..=500"),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"),
+        (status = 404, description = "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"),
+        (status = 409, description = "`invalid_transition`"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn reject_sponsorship(
+    State(st): State<AppState>,
+    r: RequireSponsorAdmin,
+    _ni: NoImpersonation,
+    ctx: AuditCtx,
+    path: Result<Path<HashMap<String, String>>, PathRejection>,
+    body: Result<Json<DecisionReasonBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    decide_with_reason(st, r, ctx, path, body, ACTION_REJECTED).await
+}
+
+/// Revoga um patrocínio `active` (→ `revoked`; a BD fecha a vigência agora) com motivo. Evento
+/// crítico da caixa negra. A loja continua no portal e volta à exceção ou ao plano se não tiver
+/// outro patrocínio ativo.
+#[utoipa::path(
+    post,
+    path = "/api/v1/sponsors/{entity_id}/sponsorships/{id}/revoke",
+    tag = "sponsors",
+    params(
+        ("entity_id" = String, Path, description = "Id da entidade patrocinadora"),
+        ("id" = String, Path, description = "Id do patrocínio"),
+        ("X-CSRF-Token" = String, Header, description = "Token CSRF da sessão")
+    ),
+    request_body = DecisionReasonBody,
+    responses(
+        (status = 200, description = "Patrocínio revogado", body = SponsorshipDecision),
+        (status = 400, description = "Corpo inválido, campos desconhecidos ou motivo fora de 1..=500"),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "Sem `sponsor_admin` (`rbac`), 2FA em falta (`mfa_required`) ou impersonação (`impersonation`)"),
+        (status = 404, description = "Patrocínio de outra entidade ou inexistente, ou entidade desativada (`idor`)"),
+        (status = 409, description = "`invalid_transition`"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn revoke_sponsorship(
+    State(st): State<AppState>,
+    r: RequireSponsorAdmin,
+    _ni: NoImpersonation,
+    ctx: AuditCtx,
+    path: Result<Path<HashMap<String, String>>, PathRejection>,
+    body: Result<Json<DecisionReasonBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    decide_with_reason(st, r, ctx, path, body, ACTION_REVOKED).await
+}
+
+async fn decide_with_reason(
+    st: AppState,
+    r: RequireSponsorAdmin,
+    ctx: AuditCtx,
+    path: Result<Path<HashMap<String, String>>, PathRejection>,
+    body: Result<Json<DecisionReasonBody>, JsonRejection>,
+    action: &'static str,
+) -> Result<Response, AppError> {
+    let Some(id) = sponsorship_id(path) else {
+        return Ok(idor());
+    };
+    let Ok(Json(body)) = body else {
+        return Ok(no_store(bad_request("reason", "corpo JSON só com reason")));
+    };
+    let Some(reason) = admin::valid_reason(&body.reason) else {
+        return Ok(no_store(bad_request(
+            "reason",
+            "entre 1 e 500 caracteres, sem caracteres de controlo",
+        )));
+    };
+    let (_channel, mut tx) = match sponsor_tx(&st, &r, &ctx).await? {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
+    let decision = if action == ACTION_REVOKED {
+        admin::revoke(&mut tx, r.entity_id(), id, r.user_id, reason).await?
+    } else {
+        admin::reject(&mut tx, r.entity_id(), id, r.user_id, reason).await?
+    };
+    finish_decision(tx, action, r.entity_id(), id, decision, Some(reason)).await
 }

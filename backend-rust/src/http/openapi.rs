@@ -36,7 +36,11 @@ use crate::{admin, http::health, identity, sponsors, tenancy};
         sponsors::http::commission_preview,
         sponsors::http::request_sponsorship,
         sponsors::http::list_sponsorships,
-        sponsors::http::eligible_for_store
+        sponsors::http::eligible_for_store,
+        sponsors::http::entity_sponsorships,
+        sponsors::http::approve_sponsorship,
+        sponsors::http::reject_sponsorship,
+        sponsors::http::revoke_sponsorship
     ),
     info(title = "PT Market API", version = "0.1.0")
 )]
