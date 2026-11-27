@@ -431,7 +431,8 @@ async fn user_secrets(
 
 /// Eventos do tenant como JSON (linha inteira, para procurar segredos).
 async fn tenant_events(app: &PgPool, t: &Tenant) -> anyhow::Result<Vec<Value>> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, TenantId::for_tests(t.id), &reader).await?;
     let rows: Vec<(Value,)> =
         sqlx::query_as("SELECT to_jsonb(e) FROM audit.audit_events e ORDER BY chain_seq")

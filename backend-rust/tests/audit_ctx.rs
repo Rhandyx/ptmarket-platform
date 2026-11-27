@@ -3,7 +3,8 @@
 //! e a cadeia continua contígua quando duas transações REPEATABLE READ competem pela cabeça.
 //!
 //! As pools da app fazem `SET ROLE ptmarket_app` em cada ligação nova. As leituras de eventos são
-//! feitas como app dentro de uma `TenantTx` (política `tenant_read`).
+//! feitas como app dentro de uma `TenantTx` (política `tenant_read`) e, desde a 0038, como admin
+//! sem impersonação (`store_scope_read` é fail-closed por loja).
 //!
 //! Leituras de `audit.*` sem `query!`: a verificação em compilação (EXPLAIN) corre como o migrator,
 //! que a selagem deixou sem privilégios em `audit.*`. SQL estático, tudo por parâmetro.
@@ -169,6 +170,44 @@ fn event(action: &'static str, changes: Option<serde_json::Value>) -> AuditEvent
     }
 }
 
+// 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+fn reader() -> AuditCtx {
+    AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None)
+}
+
+/// Leitura na MESMA transação que escreveu com outro ator: vista de admin só para a leitura.
+/// Devolve (`app.actor_type`, `app.impersonator_id`) antigos para `restore_view`.
+// 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+async fn admin_view(tx: &mut TenantTx) -> sqlx::Result<(Option<String>, Option<String>)> {
+    let old: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT current_setting('app.actor_type', true), current_setting('app.impersonator_id', true)",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query(
+        "SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(old)
+}
+
+/// Repõe o ator da transação depois de `admin_view`.
+async fn restore_view(
+    tx: &mut TenantTx,
+    old: (Option<String>, Option<String>),
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "SELECT set_config('app.actor_type', coalesce($1, ''), true),
+                set_config('app.impersonator_id', coalesce($2, ''), true)",
+    )
+    .bind(old.0)
+    .bind(old.1)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn count_event(tx: &mut TenantTx, id: Uuid) -> sqlx::Result<i64> {
     sqlx::query_scalar("SELECT count(*) FROM audit.audit_events WHERE id = $1")
         .bind(id)
@@ -291,6 +330,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     assert!(!ctx.is_recorded());
     let id = record(&mut tx, event("store.settings_changed", Some(changes))).await?;
     assert!(!ctx.is_recorded(), "a marca só vale depois do COMMIT");
+    let old = admin_view(&mut tx).await?;
     let (actor_type, actor_id, request_id, outcome, changes, tenant_id): RecordRow =
         sqlx::query_as(
             "SELECT actor_type::text, actor_id, request_id, outcome::text, changes, tenant_id
@@ -299,6 +339,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
+    restore_view(&mut tx, old).await?;
     tx.commit().await?;
     assert!(ctx.is_recorded(), "COMMIT tem de marcar o AuditCtx");
     assert_eq!(actor_type, "merchant");
@@ -319,10 +360,12 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     let ctx_rb = merchant(None);
     let mut tx = begin_tenant_tx(&app, a, &ctx_rb).await?;
     let rb_id = record(&mut tx, event("store.settings_changed", None)).await?;
+    let old = admin_view(&mut tx).await?;
     assert_eq!(count_event(&mut tx, rb_id).await?, 1);
+    restore_view(&mut tx, old).await?;
     tx.rollback().await?;
     assert!(!ctx_rb.is_recorded(), "rollback não pode marcar");
-    let mut tx = begin_tenant_tx(&app, a, &ctx_rb).await?;
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
     assert_eq!(
         count_event(&mut tx, rb_id).await?,
         0,
@@ -332,7 +375,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     tx.rollback().await?;
 
     // Anti-IDOR: o tenant B não lê o evento de A.
-    let mut tx = begin_tenant_tx(&app, b, &merchant(None)).await?;
+    let mut tx = begin_tenant_tx(&app, b, &reader()).await?;
     assert_eq!(count_event(&mut tx, id).await?, 0, "B leu o evento de A");
     tx.rollback().await?;
 
@@ -343,7 +386,7 @@ async fn record_writes_masked_event_in_same_tx_and_respects_tenant(
     let pid = record(&mut ptx, event("platform.job_ran", None)).await?;
     ptx.commit().await?;
     assert!(sys.is_recorded());
-    let mut tx = begin_tenant_tx(&app, a, &merchant(None)).await?;
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
     assert_eq!(count_event(&mut tx, pid).await?, 0);
     tx.rollback().await?;
     Ok(())
@@ -429,7 +472,7 @@ async fn chain_race_in_repeatable_read_retries_and_stays_contiguous(
     }
 
     // Cadeia contígua e sem repetidos: tenants.insert (L1, 'db' do seed) + inicial + T1 + T2 repetida + 4.
-    let mut tx = begin_tenant_tx(&app, a, &merchant(None)).await?;
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
     let a_uuid = a.as_uuid();
     let seqs: Vec<i64> = sqlx::query_scalar(
         "SELECT chain_seq FROM audit.audit_events
@@ -485,17 +528,64 @@ async fn record_rejects_oversized_event_without_truncating(
     nul.reason = Some("r\u{0}".to_owned());
     nul.target_id = Some("\u{0}id".to_owned());
     let id = record(&mut tx, nul).await?;
+    tx.commit().await?;
+    assert!(ctx.is_recorded());
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
     let (target_id, reason, changes): (Option<String>, Option<String>, Option<serde_json::Value>) =
         sqlx::query_as("SELECT target_id, reason, changes FROM audit.audit_events WHERE id = $1")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
+    tx.rollback().await?;
     assert_eq!(target_id.as_deref(), Some("\u{FFFD}id"));
     assert_eq!(reason.as_deref(), Some("r\u{FFFD}"));
     let changes = changes.unwrap_or_default();
     assert_eq!(changes["note"], "a\u{FFFD}b");
     assert_eq!(changes["k\u{FFFD}"], 1);
+    Ok(())
+}
+
+/// 0038 (`store_scope_read`): com `begin_store_tx` da loja L1, a app lê os eventos de L1 e não lê
+/// os de L2 do mesmo tenant nem os sem `store_id`; o admin sem impersonação lê os três.
+#[sqlx::test(migrations = "../migrations")]
+async fn store_tx_reads_only_its_own_store_events(
+    opts: PgPoolOptions,
+    conn: PgConnectOptions,
+) -> TestResult {
+    let owner = owner_pool(&opts, &conn).await?;
+    let a = seed_tenant(&owner, "nacional-a", "PT").await?;
+    let app = app_pool(&opts, &conn, 1).await?;
+    let (l1, l2) = (Uuid::now_v7(), Uuid::now_v7());
+
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
+    let mut ev = event("store.ping", None);
+    ev.store_id = Some(l1);
+    let e1 = record(&mut tx, ev).await?;
+    let mut ev = event("store.ping", None);
+    ev.store_id = Some(l2);
+    let e2 = record(&mut tx, ev).await?;
+    let e0 = record(&mut tx, event("store.ping", None)).await?;
     tx.commit().await?;
-    assert!(ctx.is_recorded());
+
+    let mut tx = begin_store_tx(&app, &StoreScope::for_tests(a, l1), &merchant(None)).await?;
+    assert_eq!(
+        count_event(&mut tx, e1).await?,
+        1,
+        "L1 não leu o próprio evento"
+    );
+    assert_eq!(count_event(&mut tx, e2).await?, 0, "L1 leu o evento de L2");
+    assert_eq!(
+        count_event(&mut tx, e0).await?,
+        0,
+        "L1 leu um evento sem loja"
+    );
+    tx.rollback().await?;
+
+    // Controlo: os três existem (o 0 acima é da policy, não da falta de linhas).
+    let mut tx = begin_tenant_tx(&app, a, &reader()).await?;
+    for id in [e1, e2, e0] {
+        assert_eq!(count_event(&mut tx, id).await?, 1);
+    }
+    tx.rollback().await?;
     Ok(())
 }

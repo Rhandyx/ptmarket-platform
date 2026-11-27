@@ -268,6 +268,9 @@ RESET ROLE;
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('anonymous', '');
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'customers.insert' AND actor_type = 'anonymous' AND actor_id IS NULL
@@ -301,6 +304,7 @@ SELECT pg_temp.expect_count(
        WHERE target_type = 'customers'
          AND changes::text ~* '(cliente\.|anon\.z|Teste\.invalid|Xavier|Yolanda|Confidencial|9120|211111111|222222222|argon2id)'$q$,
     0, 'eventos de customers sem email/nome/telefone/NIF/hash em claro');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 
 ROLLBACK;

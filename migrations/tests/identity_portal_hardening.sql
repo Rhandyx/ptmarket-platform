@@ -151,6 +151,9 @@ SELECT pg_temp.expect_error(
     $q$UPDATE customers SET email = 'h21.c1.x@teste.invalid', email_verified_at = now()
        WHERE id = '00000000-0000-7000-8000-0000000021c1'$q$,
     '42501', 'app continua sem UPDATE de email_verified_at');
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'customers.update' AND target_id = '00000000-0000-7000-8000-0000000021c1'
@@ -164,6 +167,7 @@ SELECT pg_temp.expect_count(
        WHERE action = 'customers.update' AND target_id = '00000000-0000-7000-8000-0000000021c1'
          AND (changes->'after' ? 'email_verified_at' OR changes->'before' ? 'email_verified_at')$q$,
     1, 'só esse evento mexe em email_verified_at (a mudança de nome não)');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 
 -- Fluxo futuro (dono, ator db): confirmar o email novo no MESMO UPDATE não é anulado.

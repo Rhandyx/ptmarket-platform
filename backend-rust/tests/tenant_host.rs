@@ -673,7 +673,8 @@ async fn white_label_channel_opens_without_national_flag_and_is_not_denied(
     let rid = r
         .request_id
         .ok_or_else(|| anyhow::anyhow!("sem x-request-id"))?;
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(&pool, a.tid(), &reader).await?;
     let rows: Vec<EvRow> = sqlx::query_as(
         "SELECT tenant_id, outcome::text, reason, actor_id

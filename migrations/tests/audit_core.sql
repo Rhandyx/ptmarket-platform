@@ -152,6 +152,9 @@ SELECT audit.audit_append('stores.update', 'store', 's1', 'error', 'timeout', NU
 SELECT audit.audit_append('orders.create', 'order', 'o1', 'success', NULL, NULL, NULL);
 SELECT audit.audit_append('stores.delete', 'store', 's1', 'denied', 'sem permissão', NULL, NULL);
 
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events WHERE retention_class = 'standard'
        AND chain_key = '00000000-0000-7000-8000-00000000a00a'::uuid
@@ -188,6 +191,7 @@ SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE uuid_extract_version(id) = 7 AND octet_length(hash) = 32$q$,
     5, 'A: ids uuidv7 e hash de 32 bytes');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 
 -- Hash: ip::text inclui a máscara — o mesmo evento com /8 em vez de /32 dá outro hash (host() era igual).
 RESET ROLE;
@@ -217,10 +221,14 @@ SET ROLE ptmarket_app;
 -- ---------------------------------------------------------------------------
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000a00b';
 SELECT audit.audit_append('stores.update', 'store', 's2', 'success', NULL, NULL, NULL);
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events WHERE retention_class = 'standard' AND chain_seq = 1
        AND prev_hash = decode(repeat('00', 32), 'hex')$q$,
     1, 'B standard: cadeia própria (seq 1)');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 SELECT pg_temp.expect_error(
     $q$SELECT audit.audit_append('stores.update', 'store', 's2', 'success', NULL, NULL, NULL,
                            '00000000-0000-7000-8000-00000000a00a')$q$,
@@ -240,6 +248,9 @@ SET app.actor_type = 'merchant';
 -- Anti-IDOR e app sem contexto.
 -- ---------------------------------------------------------------------------
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000a00a';
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events WHERE tenant_id = '00000000-0000-7000-8000-00000000a00b'$q$,
     0, 'tenant A não lê eventos do B');
@@ -249,6 +260,7 @@ SELECT pg_temp.expect_value(
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit_hash_check WHERE hash = recomputed$q$,
     5, 'A: hash recalculado em SQL = hash gravado (5/5)');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 
 -- Plataforma (sem tenant): a app sem contexto grava com p_tenant_id NULL mas lê 0 linhas.
 SET app.current_tenant_id = '';
@@ -265,8 +277,12 @@ SELECT pg_temp.expect_error(
                                  '00000000-0000-7000-8000-00000000a00d')$q$,
     'P0001', 'app sem contexto, ator ≠ system, com p_tenant_id ⇒ recusado (não injeta na cadeia de outro tenant)');
 SET app.actor_type = 'system';
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value($q$SELECT count(*) FROM audit.audit_events$q$, 0, 'app sem contexto lê 0 linhas');
 SELECT pg_temp.expect_value($q$SELECT count(*) FROM audit_hash_check$q$, 0, 'app sem contexto lê 0 linhas (vista)');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 SET ROLE ptmarket_audit_writer;
 SELECT pg_temp.expect_value(
@@ -561,10 +577,14 @@ RESET ROLE;
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000a00c';
 SELECT audit.audit_append('stores.update', 'store', 's3', 'success', NULL, NULL, NULL);
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE tableoid = 'audit.audit_events_standard_default'::regclass AND chain_seq = 1$q$,
     1, 'data fora das partições mensais cai na DEFAULT');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 SET ROLE ptmarket_worker;
 SELECT pg_temp.expect_value(

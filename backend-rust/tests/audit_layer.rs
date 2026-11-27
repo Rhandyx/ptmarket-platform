@@ -204,7 +204,8 @@ async fn wait_stream(
 
 /// Quantos eventos há com estes request_id (lidos como app, dentro do tenant).
 async fn count_events(app: &PgPool, tenant: TenantId, rids: &[Uuid]) -> anyhow::Result<i64> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, tenant, &reader).await?;
     let n: i64 =
         sqlx::query_scalar("SELECT count(*) FROM audit.audit_events WHERE request_id = ANY($1)")
@@ -217,7 +218,8 @@ async fn count_events(app: &PgPool, tenant: TenantId, rids: &[Uuid]) -> anyhow::
 
 /// Eventos gravados com este request_id (lidos como app, dentro do tenant).
 async fn events(app: &PgPool, tenant: TenantId, rid: Uuid) -> anyhow::Result<Vec<EvRow>> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, tenant, &reader).await?;
     let rows: Vec<EvRow> = sqlx::query_as(
         "SELECT actor_type::text, actor_id, action::text, target_type::text, target_id,
@@ -237,7 +239,8 @@ async fn events_by_actor(
     tenant: TenantId,
     actor: Actor,
 ) -> anyhow::Result<Vec<(Option<Uuid>, Option<String>)>> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, tenant, &reader).await?;
     let rows = sqlx::query_as(
         "SELECT request_id, host(ip) FROM audit.audit_events WHERE actor_id = $1 ORDER BY chain_seq",

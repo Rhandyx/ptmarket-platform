@@ -186,6 +186,9 @@ SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000c00a';
 -- Âmbito da loja (0035): as escritas da app em stores/products/variantes são da loja L1 (c0a1).
 SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
+-- A 0038 fecha audit_events ao âmbito de loja: as leituras de eventos fazem-se como admin sem impersonação.
+RESET app.store_id;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'tenants.insert' AND target_type = 'tenants'
@@ -212,6 +215,8 @@ SELECT pg_temp.expect_value(
 -- ---------------------------------------------------------------------------
 SELECT pg_temp.l1_mark();
 
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
+SELECT set_config('app.actor_type', '', true);
 SELECT pg_temp.expect_error(
     $q$INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email)
        VALUES ('00000000-0000-7000-8000-00000000c0a1', '00000000-0000-7000-8000-00000000c00a', 'S', 's', 'S Lda',
@@ -226,6 +231,8 @@ SELECT pg_temp.expect_error(
     '42501', 'app não chama audit_append_db (42501)');
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM stores$q$, 0, 'app sem ator: a loja não ficou');
+RESET app.store_id;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT pg_temp.l1_delta()$q$, 0, 'app sem ator: nada gravado');
 RESET ROLE;
@@ -235,6 +242,7 @@ INSERT INTO ptm_l1_probe (id, tenant_id, note)
     VALUES ('00000000-0000-7000-8000-00000000c0e1', '00000000-0000-7000-8000-00000000c00a', 'dono');
 SET ROLE ptmarket_app;
 SELECT pg_temp.l1_mark();
+SELECT set_config('app.actor_type', '', true);
 SELECT pg_temp.expect_error(
     $q$UPDATE ptm_l1_probe SET note = 'y' WHERE id = '00000000-0000-7000-8000-00000000c0e1'$q$,
     'PTA01', 'app sem ator: UPDATE ⇒ PTA01');
@@ -265,6 +273,7 @@ SELECT pg_temp.expect_error(
 RESET ROLE;
 
 SET ROLE ptmarket_app;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT pg_temp.l1_delta()$q$, 0,
     'app/worker sem ator: nada gravado');
@@ -277,6 +286,7 @@ SELECT pg_temp.expect_value(
 -- ---------------------------------------------------------------------------
 SET app.actor_type = 'system';
 SET app.actor_label = 'test';
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
 INSERT INTO stores (id, tenant_id, name, slug, legal_name, nif, iban, email, invoicing_credentials_enc,
                     eupago_split_key) VALUES
     ('00000000-0000-7000-8000-00000000c0a1', '00000000-0000-7000-8000-00000000c00a', 'Loja L1', 'loja-l1',
@@ -293,6 +303,8 @@ INSERT INTO product_variants (id, tenant_id, product_id, price_cents, stock_qty)
 UPDATE product_variants SET price_cents = 300 WHERE id = '00000000-0000-7000-8000-00000000c0a3';
 -- 2.ª mudança: lowest_price_30d já não muda (250), por isso só price_cents muda.
 UPDATE product_variants SET price_cents = 350 WHERE id = '00000000-0000-7000-8000-00000000c0a3';
+RESET app.store_id;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
@@ -323,12 +335,20 @@ SELECT pg_temp.expect_value(
 
 -- UPDATE sem diferenças: sem evento.
 SELECT pg_temp.l1_mark();
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
+SELECT set_config('app.actor_type', 'system', true);
 UPDATE product_variants SET stock_qty = stock_qty WHERE id = '00000000-0000-7000-8000-00000000c0a3';
+RESET app.store_id;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT pg_temp.l1_delta()$q$, 0, 'UPDATE sem diferenças não grava');
 
 -- DELETE grava a linha antes.
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
+SELECT set_config('app.actor_type', 'system', true);
 DELETE FROM products WHERE id = '00000000-0000-7000-8000-00000000c0a4';
+RESET app.store_id;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'products.delete' AND target_id = '00000000-0000-7000-8000-00000000c0a4'
@@ -336,7 +356,9 @@ SELECT pg_temp.expect_value(
     1, 'DELETE grava products.delete com before');
 
 -- TRUNCATE grava '<tabela>.truncate' (tenant do contexto).
+SELECT set_config('app.actor_type', 'system', true);
 TRUNCATE ptm_l1_probe;
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'ptm_l1_probe.truncate' AND tenant_id = '00000000-0000-7000-8000-00000000c00a'
@@ -345,6 +367,8 @@ SELECT pg_temp.expect_value(
 
 -- ROLLBACK não deixa evento.
 SAVEPOINT l1_sp;
+SET app.store_id = '00000000-0000-7000-8000-00000000c0a1';
+SELECT set_config('app.actor_type', 'system', true);
 UPDATE product_variants SET price_cents = 999 WHERE id = '00000000-0000-7000-8000-00000000c0a3';
 ROLLBACK TO SAVEPOINT l1_sp;
 SELECT pg_temp.expect_value(
@@ -363,6 +387,7 @@ RESET ROLE;
 -- Anti-IDOR: cada tenant só lê os seus eventos.
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000c00b';
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'ptm_l1_probe.insert' AND actor_label = 'job:l1'
@@ -403,6 +428,7 @@ UPDATE customers SET email = 'novo.l1@teste.invalid' WHERE id = '00000000-0000-7
 
 SET ROLE ptmarket_app;
 SET app.current_tenant_id = '00000000-0000-7000-8000-00000000c00a';
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_value(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'customers.insert' AND target_id = '00000000-0000-7000-8000-00000000c0c1'

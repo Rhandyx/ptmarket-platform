@@ -3163,6 +3163,84 @@ END
 $body$;
 $chg_0026$);
 
+-- ---------------------------------------------------------------------------
+-- APROVADA: 0038_critical_kinds_commission (cartão 03/11 + adenda do supervisor). Disparada por
+--   migrations/0038_audit_critical_kinds_commission.sql. Exige 0026.
+--   audit.critical_kind: mesma assinatura, INVOKER, IMMUTABLE, sem ler tabelas; os 5 ramos antigos iguais e 4 kinds
+--     novos, só com outcome 'success' (ações exatas; as da L1 são '<tabela>.<operação>', 0010):
+--       platform_settings.insert|update|delete|truncate → commission_base_change;
+--       billing_plan_tiers.insert|update|delete|truncate → billing_tiers_change;
+--       store.commission_override → store_commission_override (gravada pela função do super_admin, backoffice);
+--       sponsorship.revoked → sponsorship_revoked (gravada pela app, cartão 20).
+--   audit_alerts_kind_check passa a aceitar os 4 kinds novos (lista fechada = a de critical_kind).
+--   Policy store_scope_read (RESTRICTIVE, SELECT, TO ptmarket_app) em audit.audit_events, fechada como a 0035: a app
+--     só lê os eventos da loja de app.store_id (nem de outras lojas do tenant, nem os sem store_id), salvo o ator
+--     admin sem impersonação. Sem app.store_id e sem admin: 0 linhas (substitui o "sem âmbito vê o tenant" da
+--     adenda, decisão da auditoria do cartão 11). As expressões DUPLICAM public.app_store_id() e
+--     public.app_is_platform_admin() (0035), só com pg_catalog: referenciar essas funções (dono = quem migra, com
+--     LOGIN) criava uma dependência de audit.* que a audit_seal recusa (regra da 0008). Quando a
+--     app_is_platform_admin passar a DEFINER com a porta da 0026 (dívida do 08b), esta policy selada tem de ser
+--     atualizada numa alteração selada nova. app.store_id que não é uuid → 22P02, como app_store_id().
+--     Quem grava (audit_append, audit_append_event, audit_append_db, _chain_insert) é DEFINER do writer: a policy
+--     não se lhe aplica. As partições não dão nada à app (só o pai tem GRANT SELECT).
+-- ---------------------------------------------------------------------------
+INSERT INTO pg_temp.ptm_sealed_changes_new (name, requires, sql) VALUES ('0038_critical_kinds_commission', '0026_admin_read_events_v2', $chg_0038$
+CREATE OR REPLACE FUNCTION audit.critical_kind(p_action text, p_outcome text, p_actor_type text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, pg_temp
+AS $body$
+    SELECT CASE
+        WHEN starts_with(p_action, 'stores.iban')
+             OR starts_with(p_action, 'payout_accounts.')
+             OR starts_with(p_action, 'merchants.iban')
+            THEN 'iban_change'
+        WHEN ((starts_with(p_action, 'payments.') OR starts_with(p_action, 'refunds.')) AND p_outcome = 'error')
+             OR p_action = 'payments.failed'
+            THEN 'payment_failure'
+        WHEN (starts_with(p_action, 'invoices.') AND p_outcome = 'error')
+             OR p_action = 'invoices.failed'
+            THEN 'invoice_failure'
+        WHEN p_action = 'auth.login' AND p_actor_type = 'admin'
+            THEN 'superadmin_login'
+        WHEN p_action = 'audit.verify_failed'
+            THEN 'verify_failure'
+        WHEN p_action IN ('platform_settings.insert', 'platform_settings.update', 'platform_settings.delete',
+                          'platform_settings.truncate') AND p_outcome = 'success'
+            THEN 'commission_base_change'
+        WHEN p_action IN ('billing_plan_tiers.insert', 'billing_plan_tiers.update', 'billing_plan_tiers.delete',
+                          'billing_plan_tiers.truncate') AND p_outcome = 'success'
+            THEN 'billing_tiers_change'
+        WHEN p_action = 'store.commission_override' AND p_outcome = 'success'
+            THEN 'store_commission_override'
+        WHEN p_action = 'sponsorship.revoked' AND p_outcome = 'success'
+            THEN 'sponsorship_revoked'
+    END
+$body$;
+
+ALTER TABLE audit.audit_alerts
+    DROP CONSTRAINT audit_alerts_kind_check,
+    ADD CONSTRAINT audit_alerts_kind_check CHECK (kind IN ('iban_change', 'payment_failure', 'invoice_failure',
+        'superadmin_login', 'verify_failure', 'commission_base_change', 'billing_tiers_change',
+        'store_commission_override', 'sponsorship_revoked'));
+
+-- DUPLICA public.app_store_id() e public.app_is_platform_admin() (0035), só com pg_catalog (a audit_seal recusa
+-- dependências de audit.* para funções de quem migra). Quando a app_is_platform_admin passar a DEFINER com a porta
+-- da 0026 (dívida do 08b), atualizar esta policy numa alteração selada nova.
+CREATE POLICY store_scope_read ON audit.audit_events AS RESTRICTIVE FOR SELECT TO ptmarket_app
+    USING (store_id = (SELECT NULLIF(pg_catalog.current_setting('app.store_id', true), '')::uuid)
+           OR (SELECT COALESCE(pg_catalog.current_setting('app.actor_type', true) = 'admin', false)
+                      AND NULLIF(pg_catalog.current_setting('app.impersonator_id', true), '') IS NULL));
+
+COMMENT ON POLICY store_scope_read ON audit.audit_events IS
+    'Âmbito por loja na leitura da app (0038), fechado: só a loja de app.store_id ou o admin sem impersonação; '
+    'sem âmbito de loja nem admin, 0 linhas. DUPLICA public.app_store_id() e public.app_is_platform_admin() (0035), '
+    'só com pg_catalog. Quando app_is_platform_admin passar a DEFINER com a porta da 0026 (dívida do 08b), '
+    'atualizar numa alteração selada nova.';
+$chg_0038$);
+
 -- Upsert das aprovadas; recusa mudar o texto de uma já aplicada nesta BD.
 DO $$
 DECLARE

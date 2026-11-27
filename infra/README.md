@@ -65,7 +65,9 @@ o `migrations/tests/run.sh` corre o mesmo ficheiro no seu postgres descartável.
   `0015_critical_timeline` → `0020_mask_v2` → `0023_mask_uuid` → `0025_admin_read_events` (timeline global do
   Super-Admin: `public.identity_admin_read_events`, dono `ptmarket_identity`, faz a porta e chama a selada) →
   `0026_admin_read_events_v2` (só com `session_user` = `ptmarket_app`, grava `admin.audit_timeline.read` na cadeia,
-  24 h sem filtro seletivo, `chain_ok` com a cauda). O bootstrap recusa
+  24 h sem filtro seletivo, `chain_ok` com a cauda) → `0038_critical_kinds_commission` (kinds críticos
+  `commission_base_change`, `billing_tiers_change`, `store_commission_override`, `sponsorship_revoked`, só com
+  `success`; policy RESTRICTIVE `store_scope_read` em `audit_events`: só a loja de `app.store_id` ou o admin sem impersonação, só com `pg_catalog`). O bootstrap recusa
   `requires` que não seja uma alteração aprovada ou uma cadeia com ramos; `audit_upgrade` recusa uma alteração cuja
   anterior não esteja em `sealed_changes_applied` nesta BD ("<nome> exige <anterior> aplicada antes").
   `audit_upgrade` sela antes e depois do `EXECUTE` (os objetos criados nascem com dono `postgres` e a selagem

@@ -292,7 +292,8 @@ fn clears_tenant_cookie(r: &Reply) -> bool {
 
 /// Eventos da caixa negra de um pedido (no tenant `t`).
 async fn events(app: &PgPool, t: &Tenant, rid: Uuid) -> anyhow::Result<Vec<EvRow>> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, t.tid(), &reader).await?;
     let rows: Vec<EvRow> = sqlx::query_as(
         "SELECT action, outcome::text, reason, actor_type, actor_id

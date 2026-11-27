@@ -161,6 +161,51 @@ SELECT pg_temp.expect_count(
        WHERE p.polrelid = 'public.user_roles'::regclass AND p.polname LIKE 'store_scope_%'$q$,
     0, 'user_roles fica de fora');
 
+-- Schema audit (0038): a app só lê (escreve pelas DEFINER do writer). Toda a tabela de audit com store_id a que a
+-- app tenha algum privilégio tem store_scope_read RESTRICTIVE FOR SELECT só para ptmarket_app e nenhuma escrita da
+-- app; as partições (que fugiriam à policy do pai) não dão nada à app.
+CREATE TEMP TABLE ssr_audit_tables AS
+    SELECT c.oid::regclass AS t
+    FROM pg_class c
+    WHERE c.relnamespace = 'audit'::regnamespace AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND NOT c.relispartition
+      AND EXISTS (SELECT 1 FROM pg_attribute a
+                  WHERE a.attrelid = c.oid AND a.attname = 'store_id' AND NOT a.attisdropped AND a.attnum > 0)
+      AND (has_table_privilege('ptmarket_app', c.oid,
+               'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+           OR has_any_column_privilege('ptmarket_app', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'));
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM ssr_audit_tables WHERE t = 'audit.audit_events'::regclass$q$,
+    1, 'audit: audit_events entra na guarda (store_id + SELECT da app)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM ssr_audit_tables s
+       WHERE NOT EXISTS (SELECT 1 FROM pg_policy p
+                         WHERE p.polrelid = s.t AND p.polname = 'store_scope_read' AND NOT p.polpermissive
+                           AND p.polcmd = 'r' AND p.polroles = ARRAY['ptmarket_app'::regrole::oid])$q$,
+    0, 'audit: toda a tabela com store_id lida pela app tem store_scope_read RESTRICTIVE (SELECT) só para ptmarket_app');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM ssr_audit_tables s JOIN pg_class c ON c.oid = s.t
+       WHERE NOT (c.relrowsecurity AND c.relforcerowsecurity)$q$,
+    0, 'audit: toda a tabela com store_id lida pela app tem RLS ativo e FORCE');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM ssr_audit_tables s JOIN pg_policy p ON p.polrelid = s.t AND p.polname = 'store_scope_read'
+       WHERE p.polqual IS NULL
+          OR pg_get_expr(p.polqual, p.polrelid) NOT LIKE '%store_id%'
+          OR btrim(pg_get_expr(p.polqual, p.polrelid), ' ()') = 'true'$q$,
+    0, 'audit: o USING de store_scope_read não é trivial (filtra por store_id)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM ssr_audit_tables s
+       WHERE has_table_privilege('ptmarket_app', s.t, 'INSERT, UPDATE, DELETE, TRUNCATE')
+          OR has_any_column_privilege('ptmarket_app', s.t, 'INSERT, UPDATE')$q$,
+    0, 'audit: a app não escreve em nenhuma tabela com store_id (só pelas DEFINER do writer)');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM pg_class c
+       WHERE c.relnamespace = 'audit'::regnamespace AND c.relispartition AND c.relkind IN ('r', 'p')
+         AND (has_table_privilege('ptmarket_app', c.oid,
+                  'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN')
+              OR has_any_column_privilege('ptmarket_app', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))$q$,
+    0, 'audit: a app sem acesso direto a nenhuma partição');
+
 -- Um só national_portal por país.
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid

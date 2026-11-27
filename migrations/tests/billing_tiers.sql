@@ -284,12 +284,16 @@ RESET ROLE;
 SELECT set_config('app.current_tenant_id', '00000000-0000-7000-8000-0000000032a0', true);
 UPDATE platform_settings SET base_commission_bps = 750;
 SET ROLE ptmarket_app;
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'platform_settings.update' AND target_type = 'platform_settings' AND target_id = 'true'
          AND actor_type = 'db' AND outcome = 'success'
          AND changes = '{"before": {"base_commission_bps": 800}, "after": {"base_commission_bps": 750}}'::jsonb$q$,
     1, 'UPDATE de base_commission_bps pelo migrator → platform_settings.update na caixa negra');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 
 ROLLBACK;

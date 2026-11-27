@@ -496,7 +496,8 @@ async fn sessions_of(app: &PgPool, t: &Tenant, id: Uuid) -> anyhow::Result<Vec<(
 
 /// Eventos da caixa negra do tenant `t` (filtro opcional por ação).
 async fn events(app: &PgPool, t: &Tenant, action: Option<&str>) -> anyhow::Result<Vec<EvRow>> {
-    let reader = AuditCtx::for_tests(ActorType::System, None, None, None);
+    // 0038: a auditoria é fail-closed por loja; ler como admin sem impersonação.
+    let reader = AuditCtx::for_tests(ActorType::Admin, Some(Uuid::now_v7()), None, None);
     let mut tx = begin_tenant_tx(app, t.tid(), &reader).await?;
     let rows: Vec<EvRow> = sqlx::query_as(
         "SELECT action::text, outcome::text, reason::text, actor_type::text, actor_id::uuid,

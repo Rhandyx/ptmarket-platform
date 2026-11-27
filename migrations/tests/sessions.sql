@@ -499,6 +499,9 @@ SELECT pg_temp.expect_count(
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_app;
 SELECT pg_temp.as_actor('merchant', '00000000-0000-7000-8000-0000000014e1');
+-- A 0038 fecha audit_events ao âmbito de loja: leituras como admin sem impersonação; ator anterior reposto a seguir.
+SELECT set_config('ptm.prev_actor', COALESCE(current_setting('app.actor_type', true), ''), true), set_config('ptm.prev_imp', COALESCE(current_setting('app.impersonator_id', true), ''), true);
+SELECT set_config('app.actor_type', 'admin', true), set_config('app.impersonator_id', '', true);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM audit.audit_events
        WHERE action = 'sessions.insert' AND target_type = 'sessions' AND actor_type = 'merchant'
@@ -541,6 +544,7 @@ SELECT pg_temp.expect_count(
        WHERE target_type IN ('sessions', 'user_passkeys', 'user_recovery_codes')
          AND changes::text ~* '(203\.0\.113|198\.51\.100|c0ffee|cGstW|public_key)'$q$,
     0, 'nenhum evento contém IP, credential_id nem chave pública em claro');
+SELECT set_config('app.actor_type', current_setting('ptm.prev_actor'), true), set_config('app.impersonator_id', current_setting('ptm.prev_imp'), true);
 RESET ROLE;
 
 ROLLBACK;
