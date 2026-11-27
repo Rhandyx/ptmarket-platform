@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(\n               SELECT 1 FROM sponsor_entities e JOIN tenants t ON t.country_code = e.country_code\n               WHERE e.id = $1 AND e.is_active AND t.id = $2) AS \"ok!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c05cdf9bce15f4fca1fb8b411044380d49d2be0619e64722433e13dbfe25fb4d"
+}

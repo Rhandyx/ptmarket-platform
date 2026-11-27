@@ -33,7 +33,10 @@ use crate::{admin, http::health, identity, sponsors, tenancy};
         sponsors::http::municipalities,
         sponsors::http::parishes,
         sponsors::http::eligible,
-        sponsors::http::commission_preview
+        sponsors::http::commission_preview,
+        sponsors::http::request_sponsorship,
+        sponsors::http::list_sponsorships,
+        sponsors::http::eligible_for_store
     ),
     info(title = "PT Market API", version = "0.1.0")
 )]

@@ -1,0 +1,154 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.status, s.commission_override_bps, s.decision_reason,\n                  to_char(s.valid_from AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_from?\",\n                  to_char(s.valid_to AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"valid_to?\",\n                  to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"created_at!\",\n                  to_char(s.decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"decided_at?\",\n                  e.id AS sponsor_id, e.kind, e.name, e.slug, e.logo_key\n           FROM store_sponsorships s\n           JOIN sponsor_entities e ON e.id = s.sponsor_entity_id\n           WHERE s.tenant_id = $1 AND s.store_id = $2\n           ORDER BY s.created_at DESC, s.id DESC\n           LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "commission_override_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "commission_override_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "decision_reason",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "store_sponsorships",
+            "name": "decision_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "valid_from?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "valid_to?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "decided_at?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "sponsor_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "sponsor_entities",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "kind",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "sponsor_entities",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "sponsor_entities",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "slug",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "sponsor_entities",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "logo_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sponsor_entities",
+            "name": "logo_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "164162865cf18f085bb2c584dd8d4a6c7712407dbdd5137eb3fa5d9605c5c843"
+}

@@ -420,7 +420,7 @@
           "staff"
         ],
         "summary": "Inicia sessão de backoffice (só no host de plataforma). Falha → 401 sempre igual (exista ou não\na conta, tenha ou não papéis, seja ou não um Host de canal).",
-        "operationId": "login",
+        "operationId": "staff_login",
         "requestBody": {
           "content": {
             "application/json": {
@@ -926,6 +926,170 @@
         }
       }
     },
+    "/api/v1/stores/{store_id}/sponsors/eligible": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Entidades que cobrem a freguesia da loja (ordem fixa dos selos), com o estado do pedido de cada\numa. Loja sem morada física → lista vazia.",
+        "operationId": "eligible_for_store",
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "description": "Id da loja",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entidades elegíveis para a loja",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EligibleForStore"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "2FA em falta (`mfa_required`)"
+          },
+          "404": {
+            "description": "Loja sem papel do utilizador ou inexistente"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/stores/{store_id}/sponsorships": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Pedidos e patrocínios da loja (mais recentes primeiro, máximo 100), com a comissão de cada um.",
+        "operationId": "list_sponsorships",
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "description": "Id da loja",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Patrocínios da loja",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoreSponsorshipItem"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "2FA em falta (`mfa_required`)"
+          },
+          "404": {
+            "description": "Loja sem papel do utilizador ou inexistente"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "O dono pede o patrocínio de uma entidade que cubra a freguesia da loja. O pedido nasce\n`pending`; nenhuma loja fica patrocinada sem a aprovação explícita da entidade.",
+        "operationId": "request_sponsorship",
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "description": "Id da loja",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "description": "Token CSRF da sessão",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SponsorshipRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Pedido criado (pending)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SponsorshipCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo inválido ou com campos desconhecidos"
+          },
+          "401": {
+            "description": "Sem sessão de backoffice"
+          },
+          "403": {
+            "description": "Não é o dono da loja (`rbac`), 2FA em falta (`mfa_required`) ou sessão de impersonação (`impersonation`)"
+          },
+          "404": {
+            "description": "Loja sem papel do utilizador ou inexistente"
+          },
+          "409": {
+            "description": "`already_requested` ou `too_many_pending`"
+          },
+          "422": {
+            "description": "`store_address_missing` ou `not_eligible`"
+          },
+          "503": {
+            "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
     "/api/v1/superadmin/audit/events": {
       "get": {
         "tags": [
@@ -1170,6 +1334,15 @@
   },
   "components": {
     "schemas": {
+      "Already": {
+        "type": "string",
+        "description": "Estado do par (loja, entidade) visto do lojista.",
+        "enum": [
+          "none",
+          "pending",
+          "active"
+        ]
+      },
       "CeremonyOptions": {
         "type": "object",
         "description": "Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`.",
@@ -1294,6 +1467,41 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "EligibleForStore": {
+        "type": "object",
+        "description": "Entidade elegível para a loja, com o estado do pedido.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "slug",
+          "already"
+        ],
+        "properties": {
+          "already": {
+            "$ref": "#/components/schemas/Already"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "logo_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
           }
         }
       },
@@ -1716,6 +1924,37 @@
           }
         }
       },
+      "SponsorshipCreated": {
+        "type": "object",
+        "description": "Pedido criado (sempre `pending`: a entidade aprova no painel).",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "SponsorshipRequestBody": {
+        "type": "object",
+        "description": "Corpo de `POST /api/v1/stores/{store_id}/sponsorships`: só a entidade (nunca datas, estado nem\nbps: campo desconhecido → 400).",
+        "required": [
+          "sponsor_entity_id"
+        ],
+        "properties": {
+          "sponsor_entity_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
       "StaffLoginResponse": {
         "type": "object",
         "description": "Resposta do login de staff.",
@@ -1767,6 +2006,63 @@
         "properties": {
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "StoreSponsorshipItem": {
+        "type": "object",
+        "description": "Pedido/patrocínio da loja visto pelo lojista (sem dados pessoais: nem `requested_by` nem\n`decided_by`). Datas em RFC 3339 UTC.",
+        "required": [
+          "id",
+          "sponsor",
+          "status",
+          "commission_override_bps",
+          "created_at"
+        ],
+        "properties": {
+          "commission_override_bps": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Comissão com este patrocínio ativo, em bps (o lojista sabe sempre o que paga)."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sponsor": {
+            "$ref": "#/components/schemas/SponsorSummary"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `active`, `rejected`, `expired` ou `revoked`."
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` = sem fim."
           }
         }
       },

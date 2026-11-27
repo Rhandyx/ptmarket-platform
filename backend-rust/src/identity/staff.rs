@@ -57,6 +57,7 @@ pub struct StaffLoginResponse {
 #[utoipa::path(
     post,
     path = "/api/v1/staff/auth/login",
+    operation_id = "staff_login",
     tag = "staff",
     request_body = LoginRequest,
     responses(

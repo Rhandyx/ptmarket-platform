@@ -150,6 +150,15 @@ pub fn api(
         .route(
             "/api/v1/staff/auth/passkey/finish",
             post(identity::passkey::login_finish),
+        )
+        // Patrocínios do lojista (cartão 03/19): pedir (dono + 2FA) e consultar (papel na loja).
+        .route(
+            "/api/v1/stores/{store_id}/sponsorships",
+            get(sponsors::http::list_sponsorships).post(sponsors::http::request_sponsorship),
+        )
+        .route(
+            "/api/v1/stores/{store_id}/sponsors/eligible",
+            get(sponsors::http::eligible_for_store),
         );
     // Consola de plataforma: o gate (`RequireSuperAdmin`) vale para o grupo INTEIRO (`.layer`),
     // incluindo os caminhos desconhecidos: qualquer caminho sob `/api/v1/superadmin` dá o mesmo 404

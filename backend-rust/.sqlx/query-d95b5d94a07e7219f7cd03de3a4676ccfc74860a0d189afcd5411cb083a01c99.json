@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO store_sponsorships\n             (id, tenant_id, store_id, sponsor_entity_id, initiated_by, requested_by)\n         VALUES ($1, $2, $3, $4, 'store', $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d95b5d94a07e7219f7cd03de3a4676ccfc74860a0d189afcd5411cb083a01c99"
+}

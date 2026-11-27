@@ -1,28 +1,47 @@
 //! Endpoints públicos (sem sessão; qualquer `Host` conhecido, incluindo o de plataforma):
 //! geografia, entidades elegíveis e a pré-visualização da comissão para o registo. Leitura na
 //! réplica; sem dados pessoais; nunca lê `stores`.
+//!
+//! Endpoints do lojista (cartão 03/19, no fim do ficheiro): pedir e consultar patrocínios da loja,
+//! com sessão de staff e o âmbito da loja (`begin_store_tx`).
 
 use axum::{
     Json,
-    extract::{FromRequestParts, Query, State, rejection::QueryRejection},
+    extract::{
+        FromRequestParts, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderValue, StatusCode, header::CACHE_CONTROL, request::Parts},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::{
+    audit::{AuditCtx, AuditEvent, Outcome, record},
     error::AppError,
+    identity::{
+        elevate::NoImpersonation,
+        http::no_store,
+        rbac::{RequireStoreOwner, RequireStoreRole},
+    },
     payments::commission::{self, PlanView},
     sponsors::{
         PUBLIC_COUNTRY,
         eligibility::{self, SponsorSummary},
         geo::{self, GeoItem},
-        sponsorships::NEW_SPONSORSHIP_OVERRIDE_BPS,
+        sponsorships::{
+            self, EligibleForStore, NEW_SPONSORSHIP_OVERRIDE_BPS, RequestOutcome,
+            StoreSponsorshipItem,
+        },
     },
     state::AppState,
-    tenancy::{PlatformHost, ResolvedTenant, db::db_error},
+    tenancy::{
+        PlatformHost, ResolvedTenant,
+        db::{begin_store_tx, db_error},
+    },
 };
 
 const CACHE: &str = "public, max-age=300";
@@ -274,4 +293,184 @@ pub async fn commission_preview(
         },
         PREVIEW_CACHE,
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lojista (cartão 03/19): pedir e consultar patrocínios. Painel único (`PLATFORM_ADMIN_HOST`: os
+// papéis de loja só valem lá); âmbito da loja provado pelo extractor → `begin_store_tx` (RLS 0035).
+// ---------------------------------------------------------------------------------------------
+
+/// Evento semântico do pedido (sucesso e recusas 422/409).
+const ACTION_REQUESTED: &str = "sponsorship.requested";
+const TARGET_SPONSORSHIP: &str = "store_sponsorship";
+
+/// Corpo de `POST /api/v1/stores/{store_id}/sponsorships`: só a entidade (nunca datas, estado nem
+/// bps: campo desconhecido → 400).
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SponsorshipRequestBody {
+    #[schema(value_type = String, format = "uuid")]
+    pub sponsor_entity_id: Uuid,
+}
+
+/// Pedido criado (sempre `pending`: a entidade aprova no painel).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SponsorshipCreated {
+    #[schema(value_type = String, format = "uuid")]
+    pub id: Uuid,
+    pub status: String,
+}
+
+/// Recusa de negócio com código estável (`{"error":{"code","message"}}`).
+fn refusal(status: StatusCode, code: &str, message: &str) -> Response {
+    let body = json!({ "error": { "code": code, "message": message } });
+    no_store((status, Json(body)).into_response())
+}
+
+fn refusal_for(outcome: RequestOutcome) -> Response {
+    match outcome {
+        RequestOutcome::StoreAddressMissing => refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "store_address_missing",
+            "A loja ainda não tem a morada física (freguesia) preenchida.",
+        ),
+        RequestOutcome::NotEligible => refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_eligible",
+            "Esta entidade não pode patrocinar a loja.",
+        ),
+        RequestOutcome::AlreadyRequested => refusal(
+            StatusCode::CONFLICT,
+            "already_requested",
+            "Já existe um pedido pendente ou um patrocínio ativo com esta entidade.",
+        ),
+        RequestOutcome::TooManyPending => refusal(
+            StatusCode::CONFLICT,
+            "too_many_pending",
+            "A loja já tem o máximo de pedidos pendentes.",
+        ),
+        RequestOutcome::Created(_) => {
+            AppError::Internal(anyhow::anyhow!("refusal_for(Created)")).into_response()
+        }
+    }
+}
+
+/// O dono pede o patrocínio de uma entidade que cubra a freguesia da loja. O pedido nasce
+/// `pending`; nenhuma loja fica patrocinada sem a aprovação explícita da entidade.
+#[utoipa::path(
+    post,
+    path = "/api/v1/stores/{store_id}/sponsorships",
+    tag = "sponsors",
+    params(
+        ("store_id" = String, Path, description = "Id da loja"),
+        ("X-CSRF-Token" = String, Header, description = "Token CSRF da sessão")
+    ),
+    request_body = SponsorshipRequestBody,
+    responses(
+        (status = 201, description = "Pedido criado (pending)", body = SponsorshipCreated),
+        (status = 400, description = "Corpo inválido ou com campos desconhecidos"),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "Não é o dono da loja (`rbac`), 2FA em falta (`mfa_required`) ou sessão de impersonação (`impersonation`)"),
+        (status = 404, description = "Loja sem papel do utilizador ou inexistente"),
+        (status = 409, description = "`already_requested` ou `too_many_pending`"),
+        (status = 422, description = "`store_address_missing` ou `not_eligible`"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn request_sponsorship(
+    State(st): State<AppState>,
+    r: RequireStoreOwner,
+    // Decisão comercial do dono (partilha os dados da loja com a entidade): nunca por impersonação.
+    _ni: NoImpersonation,
+    ctx: AuditCtx,
+    body: Result<Json<SponsorshipRequestBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Ok(Json(body)) = body else {
+        return Ok(no_store(bad_request(
+            "sponsor_entity_id",
+            "corpo JSON só com sponsor_entity_id (uuid)",
+        )));
+    };
+    let entity = body.sponsor_entity_id;
+    let mut tx = begin_store_tx(&st.db_primary, &r.scope(), &ctx).await?;
+    let outcome = sponsorships::request(&mut tx, r.store_id, entity, r.user_id).await?;
+    let (target_id, result, reason) = match outcome {
+        RequestOutcome::Created(id) => (Some(id.to_string()), Outcome::Success, None),
+        other => (None, Outcome::Denied, other.code().map(str::to_owned)),
+    };
+    record(
+        &mut tx,
+        AuditEvent {
+            action: ACTION_REQUESTED,
+            target_type: Some(TARGET_SPONSORSHIP),
+            target_id,
+            outcome: result,
+            reason,
+            changes: Some(json!({ "sponsor_entity_id": entity })),
+            store_id: Some(r.store_id),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    match outcome {
+        RequestOutcome::Created(id) => {
+            let out = SponsorshipCreated {
+                id,
+                status: "pending".to_owned(),
+            };
+            Ok(no_store((StatusCode::CREATED, Json(out)).into_response()))
+        }
+        other => Ok(refusal_for(other)),
+    }
+}
+
+/// Pedidos e patrocínios da loja (mais recentes primeiro, máximo 100), com a comissão de cada um.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stores/{store_id}/sponsorships",
+    tag = "sponsors",
+    params(("store_id" = String, Path, description = "Id da loja")),
+    responses(
+        (status = 200, description = "Patrocínios da loja", body = [StoreSponsorshipItem]),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "2FA em falta (`mfa_required`)"),
+        (status = 404, description = "Loja sem papel do utilizador ou inexistente"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn list_sponsorships(
+    State(st): State<AppState>,
+    r: RequireStoreRole,
+    ctx: AuditCtx,
+) -> Result<Response, AppError> {
+    let mut tx = begin_store_tx(&st.db_primary, &r.scope(), &ctx).await?;
+    let items = sponsorships::list_for_store(&mut tx, r.store_id).await?;
+    tx.rollback().await?;
+    Ok(no_store(Json(items).into_response()))
+}
+
+/// Entidades que cobrem a freguesia da loja (ordem fixa dos selos), com o estado do pedido de cada
+/// uma. Loja sem morada física → lista vazia.
+#[utoipa::path(
+    get,
+    path = "/api/v1/stores/{store_id}/sponsors/eligible",
+    tag = "sponsors",
+    params(("store_id" = String, Path, description = "Id da loja")),
+    responses(
+        (status = 200, description = "Entidades elegíveis para a loja", body = [EligibleForStore]),
+        (status = 401, description = "Sem sessão de backoffice"),
+        (status = 403, description = "2FA em falta (`mfa_required`)"),
+        (status = 404, description = "Loja sem papel do utilizador ou inexistente"),
+        (status = 503, description = "Serviço temporariamente indisponível")
+    )
+)]
+pub async fn eligible_for_store(
+    State(st): State<AppState>,
+    r: RequireStoreRole,
+    ctx: AuditCtx,
+) -> Result<Response, AppError> {
+    let mut tx = begin_store_tx(&st.db_primary, &r.scope(), &ctx).await?;
+    let items = sponsorships::eligible_for_store(&mut tx, r.store_id).await?;
+    tx.rollback().await?;
+    Ok(no_store(Json(items).into_response()))
 }

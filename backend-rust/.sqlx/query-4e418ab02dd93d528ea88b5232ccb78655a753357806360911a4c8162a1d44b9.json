@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE store_sponsorships SET status = 'active', valid_from = now() - interval '1 day'\n         WHERE store_id = $1 AND sponsor_entity_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4e418ab02dd93d528ea88b5232ccb78655a753357806360911a4c8162a1d44b9"
+}

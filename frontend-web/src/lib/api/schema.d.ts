@@ -199,7 +199,7 @@ export interface paths {
          * Inicia sessão de backoffice (só no host de plataforma). Falha → 401 sempre igual (exista ou não
          *     a conta, tenha ou não papéis, seja ou não um Host de canal).
          */
-        post: operations["login"];
+        post: operations["staff_login"];
         delete?: never;
         options?: never;
         head?: never;
@@ -405,6 +405,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/stores/{store_id}/sponsors/eligible": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Entidades que cobrem a freguesia da loja (ordem fixa dos selos), com o estado do pedido de cada
+         *     uma. Loja sem morada física → lista vazia.
+         */
+        get: operations["eligible_for_store"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stores/{store_id}/sponsorships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pedidos e patrocínios da loja (mais recentes primeiro, máximo 100), com a comissão de cada um. */
+        get: operations["list_sponsorships"];
+        put?: never;
+        /**
+         * O dono pede o patrocínio de uma entidade que cubra a freguesia da loja. O pedido nasce
+         *     `pending`; nenhuma loja fica patrocinada sem a aprovação explícita da entidade.
+         */
+        post: operations["request_sponsorship"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/superadmin/audit/events": {
         parameters: {
             query?: never;
@@ -495,6 +536,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description Estado do par (loja, entidade) visto do lojista.
+         * @enum {string}
+         */
+        Already: "none" | "pending" | "active";
         /** @description Opções da cerimónia (para `navigator.credentials.create/get`) e o id a devolver no `finish`. */
         CeremonyOptions: {
             ceremony_id: string;
@@ -539,6 +585,16 @@ export interface components {
             name: string | null;
             nif: string | null;
             phone: string | null;
+        };
+        /** @description Entidade elegível para a loja, com o estado do pedido. */
+        EligibleForStore: {
+            already: components["schemas"]["Already"];
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            logo_key?: string | null;
+            name: string;
+            slug: string;
         };
         /** @description Código DICOFRE + nome. */
         GeoItem: {
@@ -708,6 +764,20 @@ export interface components {
             /** @description Entidades que cobrem a freguesia, na ordem fixa dos selos. */
             sponsors: components["schemas"]["SponsorSummary"][];
         };
+        /** @description Pedido criado (sempre `pending`: a entidade aprova no painel). */
+        SponsorshipCreated: {
+            /** Format: uuid */
+            id: string;
+            status: string;
+        };
+        /**
+         * @description Corpo de `POST /api/v1/stores/{store_id}/sponsorships`: só a entidade (nunca datas, estado nem
+         *     bps: campo desconhecido → 400).
+         */
+        SponsorshipRequestBody: {
+            /** Format: uuid */
+            sponsor_entity_id: string;
+        };
         /** @description Resposta do login de staff. */
         StaffLoginResponse: {
             /**
@@ -728,6 +798,28 @@ export interface components {
         };
         Status: {
             status: string;
+        };
+        /**
+         * @description Pedido/patrocínio da loja visto pelo lojista (sem dados pessoais: nem `requested_by` nem
+         *     `decided_by`). Datas em RFC 3339 UTC.
+         */
+        StoreSponsorshipItem: {
+            /**
+             * Format: int32
+             * @description Comissão com este patrocínio ativo, em bps (o lojista sabe sempre o que paga).
+             */
+            commission_override_bps: number;
+            created_at: string;
+            decided_at?: string | null;
+            decision_reason?: string | null;
+            /** Format: uuid */
+            id: string;
+            sponsor: components["schemas"]["SponsorSummary"];
+            /** @description `pending`, `active`, `rejected`, `expired` ou `revoked`. */
+            status: string;
+            valid_from?: string | null;
+            /** @description `null` = sem fim. */
+            valid_to?: string | null;
         };
         /** @description Identidade do `super_admin` (prova do gate). */
         SuperAdminWhoami: {
@@ -1235,7 +1327,7 @@ export interface operations {
             };
         };
     };
-    login: {
+    staff_login: {
         parameters: {
             query?: never;
             header?: never;
@@ -1882,6 +1974,187 @@ export interface operations {
             };
             /** @description Última credencial de uma conta sem password */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    eligible_for_store: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Id da loja */
+                store_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Entidades elegíveis para a loja */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EligibleForStore"][];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 2FA em falta (`mfa_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Loja sem papel do utilizador ou inexistente */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sponsorships: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Id da loja */
+                store_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Patrocínios da loja */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StoreSponsorshipItem"][];
+                };
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 2FA em falta (`mfa_required`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Loja sem papel do utilizador ou inexistente */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Serviço temporariamente indisponível */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    request_sponsorship: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Token CSRF da sessão */
+                "X-CSRF-Token": string;
+            };
+            path: {
+                /** @description Id da loja */
+                store_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SponsorshipRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Pedido criado (pending) */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SponsorshipCreated"];
+                };
+            };
+            /** @description Corpo inválido ou com campos desconhecidos */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Sem sessão de backoffice */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Não é o dono da loja (`rbac`), 2FA em falta (`mfa_required`) ou sessão de impersonação (`impersonation`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Loja sem papel do utilizador ou inexistente */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `already_requested` ou `too_many_pending` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `store_address_missing` ou `not_eligible` */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

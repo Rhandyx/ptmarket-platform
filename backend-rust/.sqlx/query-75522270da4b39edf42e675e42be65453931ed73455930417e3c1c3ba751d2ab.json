@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT country_code FROM tenants WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "country_code",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "tenants",
+            "name": "country_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "75522270da4b39edf42e675e42be65453931ed73455930417e3c1c3ba751d2ab"
+}
