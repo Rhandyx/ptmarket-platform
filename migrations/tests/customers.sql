@@ -216,6 +216,9 @@ SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM (SELECT array_agg(p.oid::regprocedure::text ORDER BY p.oid::regprocedure::text) AS fns
                              FROM pg_proc p WHERE p.proowner = 'ptmarket_identity'::regrole) s
        WHERE s.fns = ARRAY['identity_admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)',
+                           'identity_admin_verification_decide(uuid,boolean,text)',
+                           'identity_admin_verification_secret(uuid)',
+                           'identity_admin_verifications_list(text,timestamp with time zone,uuid,integer)',
                            'identity_customer_credentials(text)', 'identity_passkey_lookup(bytea)',
                            'identity_session_lookup(bytea)', 'identity_user_credentials(text)']$q$,
     1, 'ptmarket_identity é dono exatamente de {identity_admin_read_events (0025), identity_customer_credentials, '

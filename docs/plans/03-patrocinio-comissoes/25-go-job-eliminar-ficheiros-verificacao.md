@@ -38,3 +38,6 @@ Config: PRIVATE_STORAGE_DIR obrigatória em staging/production (como as outras e
 
 ## Re-provar (funcionalidades já aprovadas que partilham este código)
 - Worker e job de patrocínios — o mesmo comando cobre `internal/audit`, `internal/sponsorship`, `internal/config`, `cmd/worker`
+
+## Adenda do supervisor (0037, 27/11)
+- O job apaga **ficheiro e código** (RGPD art. 5.º/1/e): o worker não tem SELECT de `access_code_enc`, por isso seleciona pelas linhas que a policy lhe mostra (vencidas com algo para apagar) e faz, num só UPDATE, `storage_key = NULL, access_code_enc = NULL, file_deleted_at = now()`; sem `file_deleted_at` → 42501. Apagar o objeto no armazenamento ANTES do UPDATE (idempotente: objeto inexistente conta como apagado).

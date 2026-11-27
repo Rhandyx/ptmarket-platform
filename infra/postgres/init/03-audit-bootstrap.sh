@@ -14,6 +14,9 @@
 #     DEFINER public.identity_create_superadmin (0024). Os seus INSERT passam pela L1 (INVOKER) → precisa de USAGE em
 #     audit e de EXECUTE em audit.audit_append_db (allowlist de grants da audit_seal; ator 'db' + session_user).
 #     O migrator recebe SET (sem INHERIT, sem ADMIN), para o ALTER FUNCTION … OWNER TO da 0024.
+#   ptmarket_identity (0017, NOLOGIN; criado pela migration, não aqui): o UPDATE da DEFINER
+#     public.identity_admin_verification_decide (0037) passa pela L1 (INVOKER) → EXECUTE em audit.audit_append_db
+#     (allowlist de grants da audit_seal; ator 'db' + session_user), como ptmarket_bootstrap.
 # Schemas (por BD):
 #   audit: dono ptmarket_audit_owner. USAGE para app, worker, price_writer e writer. O migrator tem USAGE + CREATE
 #     (cria objetos novos nas migrations; CREATE não dá poder sobre objetos selados, que não são dele).
@@ -103,6 +106,12 @@ BEGIN
     IF to_regprocedure('audit.audit_append_db(text,text,text,jsonb,uuid,uuid)') IS NOT NULL THEN
         GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_bootstrap;
     END IF;
+    -- ptmarket_identity: EXECUTE em audit_append_db (0037: L1 do UPDATE da DEFINER identity_admin_verification_decide).
+    -- Numa BD nova, cada audit_seal() depois da 0017 (que cria o papel) volta a concedê-lo. A 0037 recusa correr sem ele.
+    IF to_regrole('ptmarket_identity') IS NOT NULL
+       AND to_regprocedure('audit.audit_append_db(text,text,text,jsonb,uuid,uuid)') IS NOT NULL THEN
+        GRANT EXECUTE ON FUNCTION audit.audit_append_db(text, text, text, jsonb, uuid, uuid) TO ptmarket_identity;
+    END IF;
     -- ptmarket_identity (0017, NOLOGIN): USAGE em audit só depois da 0025 (dono da DEFINER que chama
     -- audit.admin_read_events). Numa BD nova é a própria alteração 0025_admin_read_events que o concede.
     IF to_regrole('ptmarket_identity') IS NOT NULL
@@ -133,7 +142,9 @@ GRANT USAGE ON SCHEMA audit_admin TO ptmarket_migrator;
 --     EXECUTE) e em audit.audit_row_trigger (só para CREATE TRIGGER em tabelas novas; não se chama diretamente); EXECUTE de
 --     ptmarket_bootstrap (NOLOGIN) em audit.audit_append_db (L1 dos INSERT da DEFINER da 0024, ator 'db' +
 --     session_user); EXECUTE de ptmarket_identity (NOLOGIN) em audit.admin_read_events (0025: só a DEFINER
---     public.identity_admin_read_events, que verifica super_admin + TOTP + sessão com 2FA, chama a timeline).
+--     public.identity_admin_read_events, que verifica super_admin + TOTP + sessão com 2FA, chama a timeline) e em
+--     audit.audit_append_db (0037: L1 do UPDATE da DEFINER identity_admin_verification_decide, ator 'db' +
+--     session_user). Um par cujo papel ainda não existe (ptmarket_identity nasce na 0017) é saltado.
 --     O migrator mantém USAGE + CREATE no schema: pode criar
 --     objetos novos, mas depois da selagem não são dele e não lhes mexe.
 --   search_path = pg_catalog, pg_temp e catálogos qualificados: com o pg_temp fora da lista, o PostgreSQL
@@ -196,12 +207,15 @@ DECLARE
         'audit.audit_row_trigger()',
         'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)',  -- 0024: L1 dos INSERT da DEFINER de bootstrap
         -- 0025: só a DEFINER public.identity_admin_read_events (dono ptmarket_identity, NOLOGIN) chama a timeline.
-        'audit.admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)'
+        'audit.admin_read_events(timestamp with time zone,timestamp with time zone,uuid,uuid,uuid,uuid,text,text,timestamp with time zone,uuid,integer)',
+        -- 0037: L1 do UPDATE da DEFINER identity_admin_verification_decide
+        'audit.audit_append_db(text,text,text,jsonb,uuid,uuid)'
     ];
     v_grant_role  text[] := ARRAY[
         'ptmarket_migrator',
         'ptmarket_migrator',
         'ptmarket_bootstrap',
+        'ptmarket_identity',
         'ptmarket_identity'
     ];
     v_callers oid[];
@@ -308,9 +322,10 @@ BEGIN
         END LOOP;
     END LOOP;
 
-    -- 2b. Allowlist de grants: volta a conceder só estes pares (se a função existir).
+    -- 2b. Allowlist de grants: volta a conceder só estes pares (se a função e o papel existirem; ptmarket_identity
+    --     só nasce na 0017).
     FOR i IN 1 .. array_length(v_grant_sig, 1) LOOP
-        IF to_regprocedure(v_grant_sig[i]) IS NOT NULL THEN
+        IF to_regprocedure(v_grant_sig[i]) IS NOT NULL AND to_regrole(v_grant_role[i]) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
                 to_regprocedure(v_grant_sig[i]), v_grant_role[i]);
         END IF;

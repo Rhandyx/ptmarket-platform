@@ -218,6 +218,10 @@ códigos de recuperação. Só `ptmarket_operator` tem EXECUTE. O CLI liga como 
 - Pré-requisito: o bootstrap da caixa negra cria `ptmarket_bootstrap` (com USAGE em `audit` e EXECUTE em
   `audit.audit_append_db`, na allowlist de grants da `audit_seal`). Num cluster existente: reaplicar o bootstrap
   (comando da secção anterior) **antes** da 0024; sem isso a 0024 recusa-se a correr.
+- 0037 (revisão das verificações pelo super_admin): `ptmarket_identity` também tem EXECUTE em
+  `audit.audit_append_db` (allowlist de grants da `audit_seal`; L1 do UPDATE de
+  `identity_admin_verification_decide`, ator `db` + `session_user`). Num cluster existente: reaplicar o bootstrap
+  **antes** da 0037; sem isso a 0037 recusa-se a correr.
 - Produção: o owner pode criar um login próprio, membro de `ptmarket_operator` (`WITH INHERIT FALSE, SET TRUE`),
   depois de aplicada a 0024. Em dev, não acrescentar membros: as BDs do `sqlx::test` voltam a correr a 0024 e
   a guarda de memberships recusa-os.

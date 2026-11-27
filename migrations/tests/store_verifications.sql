@@ -4,6 +4,8 @@
 -- Tenants pelo migrator; lojas pela app (ator admin); linhas com status/datas pelo migrator com o FORCE desligado só
 -- nesta transação (sem policy para o migrator). Tudo com ROLLBACK. now() é constante na transação.
 --   T1 = nacional PT (L1, L2) · T2 = nacional ES (L3)
+-- Com as correções da 0037: código no formato real 'v1:<kid 8 hex>:<base64 ≥ 28 B>', apagado como o ficheiro (o
+-- worker apaga os dois e põe file_deleted_at, nunca antes da decisão); access_code_enc só → NULL depois da decisão.
 BEGIN;
 
 CREATE FUNCTION pg_temp.expect_error(p_sql text, p_state text, p_label text)
@@ -108,12 +110,13 @@ SELECT pg_temp.expect_count(
        WHERE table_schema = 'public' AND table_name = 'store_verifications' AND grantee = 'ptmarket_worker'
          AND ((privilege_type = 'SELECT'
                AND column_name IN ('id', 'tenant_id', 'store_id', 'storage_key', 'delete_after'))
-              OR (privilege_type = 'UPDATE' AND column_name IN ('storage_key', 'file_deleted_at')))$q$,
-    7, 'worker: SELECT (id, tenant_id, store_id, storage_key, delete_after), UPDATE (storage_key, file_deleted_at)');
+              OR (privilege_type = 'UPDATE' AND column_name IN ('storage_key', 'access_code_enc', 'file_deleted_at')))$q$,
+    8, 'worker: SELECT (id, tenant_id, store_id, storage_key, delete_after), UPDATE (storage_key, access_code_enc, '
+       'file_deleted_at)');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM information_schema.column_privileges
        WHERE table_schema = 'public' AND table_name = 'store_verifications' AND grantee = 'ptmarket_worker'$q$,
-    7, 'worker: mais nenhum privilégio de coluna');
+    8, 'worker: mais nenhum privilégio de coluna');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM unnest(ARRAY['INSERT', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(priv)
        WHERE has_table_privilege('ptmarket_worker', 'store_verifications', p.priv)$q$,
@@ -160,7 +163,7 @@ SELECT pg_temp.ctx('system', '');
 -- Válidos: código cifrado sem ficheiro; PDF com hash e ficheiro.
 INSERT INTO store_verifications (id, tenant_id, store_id, kind, access_code_enc) VALUES
     ('00000000-0000-7000-8000-000000003601', '00000000-0000-7000-8000-0000000036a1',
-     '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code', 'v1:k1:cifrado');
+     '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code', 'v1:0a1b2c3d:PiPoFgA5WUoziU9lZOGxNIu9egCI1CxKy3PurtWc');
 INSERT INTO store_verifications (id, tenant_id, store_id, kind, sha256, storage_key) VALUES
     ('00000000-0000-7000-8000-000000003602', '00000000-0000-7000-8000-0000000036a1',
      '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_pdf', sha256('pdf'::bytea), 'verif/3602.pdf');
@@ -176,13 +179,28 @@ SELECT pg_temp.expect_error(
         'certidao_permanente_code', '1234-5678-9012')$q$,
     '23514', 'access_code_enc sem prefixo v1: (código em claro) falha');
 SELECT pg_temp.expect_error(
+    $q$INSERT INTO store_verifications (tenant_id, store_id, kind, access_code_enc) VALUES
+       ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1',
+        'certidao_permanente_code', 'v1:1234-5678')$q$,
+    '23514', 'v1:1234-5678 (código em claro com prefixo) falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO store_verifications (tenant_id, store_id, kind, access_code_enc) VALUES
+       ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1',
+        'certidao_permanente_code', 'v1:0a1b2c3d:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')$q$,
+    '23514', 'base64 de 27 bytes (menos que nonce + tag) falha');
+SELECT pg_temp.expect_error(
+    $q$INSERT INTO store_verifications (tenant_id, store_id, kind, access_code_enc) VALUES
+       ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1',
+        'certidao_permanente_code', 'v1:k1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==')$q$,
+    '23514', 'kid fora do formato (8 hex) falha');
+SELECT pg_temp.expect_error(
     $q$INSERT INTO store_verifications (tenant_id, store_id, kind) VALUES
        ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code')$q$,
-    '23514', 'certidao_permanente_code sem código falha');
+    '23514', 'certidao_permanente_code pending sem código falha');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO store_verifications (tenant_id, store_id, kind, sha256, access_code_enc) VALUES
        ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1',
-        'certidao_permanente_pdf', sha256('x'::bytea), 'v1:k1:cifrado')$q$,
+        'certidao_permanente_pdf', sha256('x'::bytea), 'v1:0a1b2c3d:PiPoFgA5WUoziU9lZOGxNIu9egCI1CxKy3PurtWc')$q$,
     '23514', 'código cifrado fora de certidao_permanente_code falha');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO store_verifications (tenant_id, store_id, kind, storage_key) VALUES
@@ -192,7 +210,7 @@ SELECT pg_temp.expect_error(
 SELECT pg_temp.expect_error(
     $q$INSERT INTO store_verifications (tenant_id, store_id, kind, access_code_enc, storage_key) VALUES
        ('00000000-0000-7000-8000-0000000036a1', '00000000-0000-7000-8000-0000000036b1',
-        'certidao_permanente_code', 'v1:k1:cifrado', 'verif/sem-hash.pdf')$q$,
+        'certidao_permanente_code', 'v1:0a1b2c3d:PiPoFgA5WUoziU9lZOGxNIu9egCI1CxKy3PurtWc', 'verif/sem-hash.pdf')$q$,
     '23514', 'ficheiro (storage_key) sem hash falha, mesmo no tipo código');
 SELECT pg_temp.expect_error(
     $q$INSERT INTO store_verifications (tenant_id, store_id, kind, sha256) VALUES
@@ -238,7 +256,7 @@ SELECT pg_temp.expect_error(
 
 -- Linhas para o worker (todas em L1):
 --   3603 vencida com ficheiro · 3604 decidida, ainda não vencida · 3605 já apagada (file_deleted_at)
---   3606 código sem ficheiro, decidida há muito (nunca teve ficheiro) · 3602 pending com ficheiro (acima)
+--   3606 código sem ficheiro, decidida há muito (código vencido, a apagar) · 3602 pending com ficheiro (acima)
 INSERT INTO store_verifications (id, tenant_id, store_id, kind, sha256, storage_key, access_code_enc, status,
                                  reviewed_at, delete_after, file_deleted_at) VALUES
     ('00000000-0000-7000-8000-000000003603', '00000000-0000-7000-8000-0000000036a1',
@@ -252,7 +270,7 @@ INSERT INTO store_verifications (id, tenant_id, store_id, kind, sha256, storage_
      NULL, 'approved', now() - interval '40 days', now() - interval '10 days', now() - interval '9 days'),
     ('00000000-0000-7000-8000-000000003606', '00000000-0000-7000-8000-0000000036a1',
      '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code', NULL, NULL,
-     'v1:k1:antigo', 'approved', now() - interval '40 days', now() - interval '10 days', NULL);
+     'v1:0a1b2c3d:Ln0sA6lQeuJl7PW1NWiFpTOTogKdJBOUmXJloaJa', 'approved', now() - interval '40 days', now() - interval '10 days', NULL);
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_verifications
        WHERE id IN ('00000000-0000-7000-8000-000000003604')
@@ -271,8 +289,11 @@ SELECT pg_temp.expect_error(
        WHERE id = '00000000-0000-7000-8000-000000003602'$q$,
     '23514', 'store_id imutável');
 SELECT pg_temp.expect_error(
-    $q$UPDATE store_verifications SET access_code_enc = 'v1:k2:outro' WHERE id = '00000000-0000-7000-8000-000000003601'$q$,
-    '23514', 'access_code_enc imutável');
+    $q$UPDATE store_verifications SET access_code_enc = 'v1:0a1b2c3d:P3m7e0NbBTIWUdrv03TNxoHcBvqmXjdOODN7iMoE' WHERE id = '00000000-0000-7000-8000-000000003601'$q$,
+    '23514', 'access_code_enc não muda para outro valor');
+SELECT pg_temp.expect_error(
+    $q$UPDATE store_verifications SET access_code_enc = NULL WHERE id = '00000000-0000-7000-8000-000000003601'$q$,
+    '23514', 'access_code_enc → NULL com pending falha');
 SELECT pg_temp.expect_error(
     $q$UPDATE store_verifications SET created_at = created_at - interval '1 day'
        WHERE id = '00000000-0000-7000-8000-000000003601'$q$,
@@ -292,7 +313,7 @@ SELECT pg_temp.expect_error(
     $q$UPDATE store_verifications SET status = 'approved' WHERE id = '00000000-0000-7000-8000-000000003604'$q$,
     '23514', 'rejected → approved proibido');
 SELECT pg_temp.expect_rows(
-    $q$UPDATE store_verifications SET status = 'approved', reviewed_at = now(), delete_after = now()
+    $q$UPDATE store_verifications SET status = 'approved', reviewed_at = now(), delete_after = now() + interval '1 day'
        WHERE id = '00000000-0000-7000-8000-000000003601'$q$,
     1, 'pending → approved passa (código, sem ficheiro)');
 
@@ -317,7 +338,7 @@ INSERT INTO store_verifications (id, tenant_id, store_id, kind, sha256, storage_
 SELECT pg_temp.ctx('merchant', '00000000-0000-7000-8000-0000000036b1');
 INSERT INTO store_verifications (id, tenant_id, store_id, kind, access_code_enc, metadata) VALUES
     ('00000000-0000-7000-8000-000000003611', '00000000-0000-7000-8000-0000000036a1',
-     '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code', 'v1:k1:app', '{"nif_prefix": "5"}');
+     '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_code', 'v1:0a1b2c3d:GKw+c0PwFokMUQ6T+TUmEWnZ4/VlQ2Qpgw+vCTT0', '{"nif_prefix": "5"}');
 INSERT INTO store_verifications (id, tenant_id, store_id, kind, sha256, storage_key) VALUES
     ('00000000-0000-7000-8000-000000003612', '00000000-0000-7000-8000-0000000036a1',
      '00000000-0000-7000-8000-0000000036b1', 'certidao_permanente_pdf', sha256('app'::bytea), 'verif/3612.pdf');
@@ -377,7 +398,8 @@ SELECT pg_temp.expect_error(
 RESET ROLE;
 
 -- ---------------------------------------------------------------------------
--- 4. Como ptmarket_worker (cartão 25): só vencidas com ficheiro; só storage_key → NULL (com file_deleted_at).
+-- 4. Como ptmarket_worker (cartão 25): só vencidas com ficheiro ou código; ficheiro e código → NULL com
+--    file_deleted_at (nunca antes da decisão).
 -- ---------------------------------------------------------------------------
 SET ROLE ptmarket_worker;
 SELECT pg_temp.ctx('system', '');
@@ -388,13 +410,13 @@ SELECT pg_temp.expect_count(
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_verifications
        WHERE id IN ('00000000-0000-7000-8000-000000003601', '00000000-0000-7000-8000-000000003602',
-                    '00000000-0000-7000-8000-000000003604', '00000000-0000-7000-8000-000000003606',
+                    '00000000-0000-7000-8000-000000003604',
                     '00000000-0000-7000-8000-000000003611', '00000000-0000-7000-8000-000000003612',
                     '00000000-0000-7000-8000-000000003621')$q$,
-    0, 'worker não vê pending, não vencidas nem as que nunca tiveram ficheiro');
+    0, 'worker não vê pending nem não vencidas (ficheiro ou código)');
 SELECT pg_temp.expect_count(
-    'SELECT count(*) FROM store_verifications', 2,
-    'worker vê 2: a vencida com ficheiro e a já apagada (estado depois da eliminação, preciso para o UPDATE)');
+    'SELECT count(*) FROM store_verifications', 3,
+    'worker vê 3: a vencida com ficheiro (3603), a vencida só com código (3606) e a já apagada (3605)');
 SELECT pg_temp.expect_error(
     $q$SELECT sha256 FROM store_verifications$q$, '42501', 'worker não lê sha256');
 SELECT pg_temp.expect_error(
@@ -406,15 +428,22 @@ SELECT pg_temp.expect_error(
     $q$UPDATE store_verifications SET status = 'rejected' WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
     '42501', 'worker não mexe em status');
 SELECT pg_temp.expect_error(
-    $q$UPDATE store_verifications SET access_code_enc = 'v1:k1:x' WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
-    '42501', 'worker não mexe em access_code_enc');
+    $q$UPDATE store_verifications SET access_code_enc = 'v1:0a1b2c3d:P3m7e0NbBTIWUdrv03TNxoHcBvqmXjdOODN7iMoE' WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
+    '23514', 'worker não põe access_code_enc com valor (trigger)');
 SELECT pg_temp.expect_error(
     $q$UPDATE store_verifications SET storage_key = 'verif/outro.pdf', file_deleted_at = NULL
        WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
     '23514', 'worker não troca storage_key por outro valor (trigger)');
 SELECT pg_temp.expect_error(
     $q$UPDATE store_verifications SET storage_key = NULL WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
-    '42501', 'worker: apagar sem file_deleted_at → 42501 (linha nova fora de worker_select)');
+    '42501', 'worker: apagar sem file_deleted_at → 42501 (WITH CHECK de worker_update)');
+SELECT pg_temp.expect_error(
+    $q$UPDATE store_verifications SET access_code_enc = NULL WHERE id = '00000000-0000-7000-8000-000000003606'$q$,
+    '42501', 'worker: apagar o código sem file_deleted_at → 42501');
+SELECT pg_temp.expect_error(
+    $q$UPDATE store_verifications SET storage_key = NULL, file_deleted_at = now() - interval '30 days'
+       WHERE id = '00000000-0000-7000-8000-000000003603'$q$,
+    '23514', 'worker: file_deleted_at anterior à decisão → 23514');
 SELECT pg_temp.expect_rows(
     $q$UPDATE store_verifications SET storage_key = NULL, file_deleted_at = now()
        WHERE id = '00000000-0000-7000-8000-000000003604'$q$,
@@ -435,15 +464,16 @@ SELECT pg_temp.expect_error(
     '42501', 'worker não insere');
 SELECT pg_temp.expect_count(
     $q$WITH u AS (
-           UPDATE store_verifications SET storage_key = NULL, file_deleted_at = now()
-           WHERE id IN (SELECT id FROM store_verifications WHERE storage_key IS NOT NULL AND delete_after <= now()
+           UPDATE store_verifications SET storage_key = NULL, access_code_enc = NULL, file_deleted_at = now()
+           WHERE id IN (SELECT id FROM store_verifications WHERE delete_after <= now()
                         ORDER BY delete_after LIMIT 500 FOR UPDATE SKIP LOCKED)
            RETURNING id, tenant_id, store_id
        )
        SELECT count(*) FROM u
-       WHERE id = '00000000-0000-7000-8000-000000003603' AND tenant_id = '00000000-0000-7000-8000-0000000036a1'
-         AND store_id = '00000000-0000-7000-8000-0000000036b1' AND (SELECT count(*) FROM u) = 1$q$,
-    1, 'job de eliminação: só a vencida com ficheiro passa a storage_key NULL (RETURNING com os ids)');
+       WHERE id IN ('00000000-0000-7000-8000-000000003603', '00000000-0000-7000-8000-000000003606')
+         AND tenant_id = '00000000-0000-7000-8000-0000000036a1'
+         AND store_id = '00000000-0000-7000-8000-0000000036b1' AND (SELECT count(*) FROM u) = 2$q$,
+    2, 'job de eliminação: a vencida com ficheiro e a vencida com código (a já apagada fica de fora)');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_verifications WHERE storage_key IS NOT NULL$q$,
     0, 'worker: já não há ficheiros vencidos');
@@ -456,6 +486,11 @@ SELECT pg_temp.expect_count(
        WHERE id = '00000000-0000-7000-8000-000000003603' AND storage_key IS NULL AND file_deleted_at = now()
          AND sha256 = sha256('due'::bytea) AND status = 'approved'$q$,
     1, 'depois do worker: hash e estado ficam (prova), ficheiro apagado');
+SELECT pg_temp.expect_count(
+    $q$SELECT count(*) FROM store_verifications
+       WHERE id = '00000000-0000-7000-8000-000000003606' AND access_code_enc IS NULL AND file_deleted_at = now()
+         AND status = 'approved'$q$,
+    1, 'depois do worker: código apagado, com file_deleted_at');
 SELECT pg_temp.expect_count(
     $q$SELECT count(*) FROM store_verifications
        WHERE id = '00000000-0000-7000-8000-000000003604' AND storage_key IS NOT NULL$q$,
