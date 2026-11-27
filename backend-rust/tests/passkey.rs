@@ -607,6 +607,89 @@ async fn platform_events(reader: &PlatformReader, app: &PgPool) -> anyhow::Resul
         .collect())
 }
 
+/// Pedido num Host de canal com o cookie de uma sessão de plataforma e `Origin` do canal (o que
+/// um browser enganado ou um script fariam): a gestão de passkeys nem chega a olhar para ele.
+async fn on_channel(
+    app: &Router,
+    method: Method,
+    host: &str,
+    uri: &str,
+    cookie: &str,
+    body: &str,
+) -> anyhow::Result<Reply> {
+    let origin = format!("https://{host}");
+    send(
+        app,
+        method,
+        uri,
+        &[
+            (header::HOST, host),
+            (header::COOKIE, cookie),
+            (header::ORIGIN, &origin),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        body,
+    )
+    .await
+}
+
+/// Credencial criada por uma Relying Party `rp_host` (fora da API: a de um canal já não se regista)
+/// com o autenticador `auth`: (passkey serializada, id da credencial).
+fn foreign_passkey(
+    rp_host: &str,
+    auth: &mut SoftPasskey,
+    user: Uuid,
+) -> anyhow::Result<(Value, Vec<u8>)> {
+    let rp = webauthn_rs::prelude::WebauthnBuilder::new(rp_host, &origin(rp_host)?)?.build()?;
+    let (ccr, state) = rp.start_passkey_registration(user, "antiga@x.pt", "Antiga", None)?;
+    let cred = auth
+        .do_registration(origin(rp_host)?, ccr)
+        .map_err(|e| anyhow::anyhow!("do_registration: {e:?}"))?;
+    let pk = rp.finish_passkey_registration(&cred, &state)?;
+    Ok((serde_json::to_value(&pk)?, cred.raw_id.to_vec()))
+}
+
+/// Passkey de staff antiga (dados de dev): guardada com o `rp_id` de um canal, pelo dono.
+async fn seed_legacy_passkey(
+    owner: &PgPool,
+    user: Uuid,
+    rp_host: &str,
+    auth: &mut SoftPasskey,
+) -> anyhow::Result<(Uuid, Vec<u8>)> {
+    let (pk, raw) = foreign_passkey(rp_host, auth, user)?;
+    let id = Uuid::now_v7();
+    let stored = json!({"v": 1, "rp_id": rp_host, "passkey": pk});
+    let mut tx = owner.begin().await?;
+    sqlx::query!("ALTER TABLE user_passkeys NO FORCE ROW LEVEL SECURITY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query!(
+        "INSERT INTO user_passkeys (id, user_id, credential_id, credential, sign_count, label)
+         VALUES ($1, $2, $3, $4, 0, 'Antiga')",
+        id,
+        user,
+        raw.as_slice(),
+        stored
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!("ALTER TABLE user_passkeys FORCE ROW LEVEL SECURITY")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok((id, raw))
+}
+
+fn denied_on(evs: &[Value], reason: &str, target: Uuid) -> usize {
+    let t = target.to_string();
+    count(evs, |e| {
+        is(e, "action", "auth.passkey_login")
+            && is(e, "outcome", "denied")
+            && is(e, "reason", reason)
+            && is(e, "target_id", &t)
+    })
+}
+
 fn denied(evs: &[Value], action: &str, reason: &str) -> usize {
     count(evs, |e| {
         is(e, "action", action) && is(e, "outcome", "denied") && is(e, "reason", reason)
@@ -867,5 +950,136 @@ async fn superadmin_passkey_needs_totp(opts: PgPoolOptions, conn: PgConnectOptio
         let w = get(&app, PLATFORM, WHOAMI, &cookie).await?;
         assert_eq!(w.status, whoami, "{}", w.body);
     }
+    cleanup(&ns).await
+}
+
+/// Um só `rp_id` para o staff (cartão 03/15, spec 14 §8): num Host de canal, registo, lista e
+/// remoção → 404 (com ou sem sessão) e o login por passkey → o mesmo 401 de uma credencial
+/// desconhecida + `denied`; na plataforma, registo e login normais. Uma passkey antiga com o
+/// `rp_id` de um canal não entra em lado nenhum, aparece com `valid = false` e apaga-se; não conta
+/// como "última credencial" de uma conta sem password.
+#[sqlx::test(migrations = "../migrations")]
+async fn staff_passkeys_single_rp_id(opts: PgPoolOptions, conn: PgConnectOptions) -> TestResult {
+    let pool = app_login_pool(&opts, &conn).await?;
+    let owner = owner_pool(&opts, &conn).await?;
+    let reader = PlatformReader::new(&owner, &pool).await?;
+    let ns = format!("t0315:{}:", Uuid::now_v7());
+    let app = router(&pool, &ns)?;
+    let a = seed_tenant(&owner, "rp-nacional", "national_portal").await?;
+    let b = seed_tenant(&owner, "rp-canal", "municipal").await?;
+    let la = seed_store(&pool, &a, "loja-rp").await?;
+    let w = seed_user(
+        &owner,
+        "w@x.pt",
+        false,
+        &[("merchant_staff", Some(a.id), Some(la))],
+    )
+    .await?;
+    let hb = b.domain.as_str();
+
+    // Host de canal sem sessão: registo → 404.
+    for uri in [REG_START, REG_FINISH] {
+        let r = anon_post(&app, hb, uri, "").await?;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{uri}: {}", r.body);
+    }
+
+    // Plataforma: registo (rp_id = host de plataforma) e login por passkey.
+    let cw = password_login(&app, PLATFORM, "w@x.pt").await?;
+    let (_, o) = reg_start(&app, PLATFORM, &cw).await?;
+    assert_eq!(o["publicKey"]["rp"]["id"], json!(PLATFORM));
+    let mut auth_ok = SoftPasskey::new(true);
+    let (r, cred_ok) = register(&app, PLATFORM, &cw, &mut auth_ok, "Atual").await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let id_ok: Uuid = serde_json::from_value(r.json()["id"].clone())?;
+    let r = passkey_login(&app, PLATFORM, &mut auth_ok, &cred_ok, w).await?;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+
+    // Host de canal com o cookie da plataforma: registo, lista e remoção → 404.
+    let bad = json!({"ceremony_id": "x", "label": "Chave", "credential": {}}).to_string();
+    let del_ok = format!("{LIST}/{id_ok}");
+    for (m, uri, body) in [
+        (Method::POST, REG_START, ""),
+        (Method::POST, REG_FINISH, bad.as_str()),
+        (Method::GET, LIST, ""),
+        (Method::DELETE, del_ok.as_str(), ""),
+    ] {
+        let r = on_channel(&app, m, hb, uri, &cw, body).await?;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{uri}: {}", r.body);
+    }
+    let list = get(&app, PLATFORM, LIST, &cw).await?.json();
+    assert_eq!(list[0]["id"], json!(id_ok));
+
+    // Host de canal: a passkey válida de staff → 401 igual ao de uma credencial desconhecida.
+    let r_staff = passkey_login(&app, hb, &mut auth_ok, &cred_ok, w).await?;
+    assert_eq!(r_staff.status, StatusCode::UNAUTHORIZED, "{}", r_staff.body);
+    assert!(r_staff.set_cookie.is_none());
+    let mut auth_none = SoftPasskey::new(true);
+    let (_, cred_none) = foreign_passkey(hb, &mut auth_none, Uuid::now_v7())?;
+    let r_none = passkey_login(&app, hb, &mut auth_none, &cred_none, w).await?;
+    assert_eq!(r_none.status, StatusCode::UNAUTHORIZED, "{}", r_none.body);
+    assert_eq!(r_staff.body, r_none.body);
+    let evs_b = tenant_events(&pool, &b).await?;
+    assert_eq!(denied_on(&evs_b, "rp_mismatch", id_ok), 1, "{evs_b:#?}");
+    assert_eq!(
+        denied(&evs_b, "auth.passkey_login", "unknown_credential"),
+        1
+    );
+
+    // Passkey antiga com o rp_id do canal: não entra no canal nem na plataforma.
+    let mut auth_old = SoftPasskey::new(true);
+    let (id_old, cred_old) = seed_legacy_passkey(&owner, w, hb, &mut auth_old).await?;
+    let r = passkey_login(&app, hb, &mut auth_old, &cred_old, w).await?;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
+    assert!(r.set_cookie.is_none());
+    let (pid, popts) = auth_start(&app, PLATFORM).await?;
+    let psigned = sign(&mut auth_old, origin(PLATFORM)?, popts, &cred_old, w)?;
+    let r = auth_finish(&app, PLATFORM, &pid, &psigned).await?;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{}", r.body);
+    assert!(r.set_cookie.is_none());
+    let evs_b = tenant_events(&pool, &b).await?;
+    assert_eq!(denied_on(&evs_b, "rp_mismatch", id_old), 1);
+    let evs = platform_events(&reader, &pool).await?;
+    assert_eq!(denied_on(&evs, "rp_mismatch", id_old), 1, "{evs:#?}");
+    assert_eq!(counter(&owner, id_old, None).await?, (0, false));
+
+    // Listagem: a antiga aparece marcada como inválida neste painel.
+    let r = get(&app, PLATFORM, LIST, &cw).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let list = r.json();
+    let valid_of = |id: Uuid| {
+        list.as_array()
+            .and_then(|l| l.iter().find(|p| p["id"] == json!(id)))
+            .map(|p| p["valid"].clone())
+    };
+    assert_eq!(list.as_array().map(Vec::len), Some(2));
+    assert_eq!(valid_of(id_ok), Some(json!(true)));
+    assert_eq!(valid_of(id_old), Some(json!(false)));
+
+    // Só com passkeys: a última VÁLIDA não se apaga (mesmo com a antiga lá); a antiga apaga-se.
+    drop_password(&owner, w).await?;
+    let r = mutate(&app, Method::DELETE, PLATFORM, &del_ok, &cw, "").await?;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let r = mutate(
+        &app,
+        Method::DELETE,
+        PLATFORM,
+        &format!("{LIST}/{id_old}"),
+        &cw,
+        "",
+    )
+    .await?;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    let r = mutate(&app, Method::DELETE, PLATFORM, &del_ok, &cw, "").await?;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
+    let list = get(&app, PLATFORM, LIST, &cw).await?.json();
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["id"], json!(id_ok));
+    let evs = platform_events(&reader, &pool).await?;
+    let removed = count(&evs, |e| {
+        is(e, "action", "passkey.removed")
+            && is(e, "outcome", "success")
+            && is(e, "target_id", &id_old.to_string())
+    });
+    assert_eq!(removed, 1);
     cleanup(&ns).await
 }

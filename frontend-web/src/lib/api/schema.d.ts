@@ -241,7 +241,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** As passkeys do próprio (nunca as de outro utilizador). */
+        /**
+         * As passkeys do próprio (nunca as de outro utilizador), com `valid = false` nas de `rp_id`
+         *     antigo (não servem para entrar neste painel).
+         */
         get: operations["list"];
         put?: never;
         post?: never;
@@ -281,8 +284,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Inicia o registo de uma passkey no host do pedido (user verification obrigatória; resident key
-         *     preferida; as passkeys já registadas ficam excluídas).
+         * Inicia o registo de uma passkey no host de plataforma (`rp_id` único do staff; user
+         *     verification obrigatória; resident key preferida; as passkeys já registadas ficam excluídas).
          */
         post: operations["register_start"];
         delete?: never;
@@ -302,8 +305,9 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey de
-         *     uma conta sem password não se apaga (409).
+         * Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey
+         *     VÁLIDA (`rp_id` da plataforma) de uma conta sem password não se apaga (409); as de `rp_id`
+         *     antigo apagam-se sempre.
          */
         delete: operations["remove"];
         options?: never;
@@ -476,6 +480,11 @@ export interface components {
             label: string;
             /** @description RFC 3339, UTC; `null` = nunca usada. */
             last_used_at?: string | null;
+            /**
+             * @description `false` = registada com o `rp_id` de outro host (passkey antiga de um canal): não serve
+             *     para entrar neste painel; pode ser apagada.
+             */
+            valid: boolean;
         };
         /**
          * @description Alteração do perfil: só os campos presentes mudam. `phone`/`nif` = `""` apagam o valor.
@@ -1020,7 +1029,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Cerimónia ou credencial inválida, ou sem acesso a este site (corpo sempre igual) */
+            /** @description Cerimónia ou credencial inválida, passkey de staff fora do host de plataforma ou com `rp_id` de outro host, ou sem acesso a este site (corpo sempre igual) */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1400,7 +1409,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Host desconhecido ou tenant inativo */
+            /** @description Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST` */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1455,7 +1464,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Host desconhecido ou tenant inativo */
+            /** @description Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST` */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1520,7 +1529,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Host desconhecido ou tenant inativo */
+            /** @description Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST` */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1572,7 +1581,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Passkey inexistente ou de outro utilizador */
+            /** @description Passkey inexistente ou de outro utilizador, ou fora do host de plataforma (Host de canal ou desconhecido) */
             404: {
                 headers: {
                     [name: string]: unknown;

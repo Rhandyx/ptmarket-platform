@@ -1,20 +1,28 @@
-//! Passkeys (WebAuthn) de backoffice (cartão 02/21; spec 12 §3, ASVS L3 em identity).
+//! Passkeys (WebAuthn) de backoffice (cartão 02/21; cartão 03/15; spec 12 §3 e spec 14 §8, ASVS L3
+//! em identity).
 //!
-//! - Relying Party = o host do pedido JÁ resolvido pela tenancy (domínio da Câmara ou
-//!   `PLATFORM_ADMIN_HOST`; nunca um cabeçalho cru): `rp_id` = host, origin = `https://<host>`
-//!   (`http://<host>` com qualquer porta só com `APP_ENV` development/test). Um `Webauthn` por host,
-//!   em cache. Uma passkey só serve no host onde foi registada: o `rp_id` fica guardado com a
-//!   credencial (`credential` = `{"v":1,"rp_id":…,"passkey":<serialização da biblioteca>}`) e é
-//!   comparado no login, além da verificação do `rpIdHash` pela biblioteca.
+//! - Relying Party ÚNICA para o staff: `PLATFORM_ADMIN_HOST` (spec 14 §8). Registo, listagem e
+//!   remoção só respondem nesse host (num Host de canal → 404, antes de olhar para a sessão):
+//!   `rp_id` = esse host, origin = `https://<host>` (`http://<host>` com qualquer porta só com
+//!   `APP_ENV` development/test e hosts locais). O host vem JÁ resolvido pela tenancy (nunca um
+//!   cabeçalho cru). Um `Webauthn` por host, em cache. O `rp_id` fica guardado com a credencial
+//!   (`credential` = `{"v":1,"rp_id":…,"passkey":<serialização da biblioteca>}`) e é comparado no
+//!   login, além da verificação do `rpIdHash` pela biblioteca. Uma passkey está presa ao `rp_id`
+//!   em que nasceu: as antigas com `rp_id` de um canal (dados de dev) não se migram; não servem
+//!   para entrar, aparecem na listagem com `valid = false` e podem ser apagadas.
 //! - Estado da cerimónia só no Redis: `<ns>webauthn:<reg|auth>:<id aleatório de 256 bits>`, TTL
 //!   5 min, uso único (`GETDEL`). Nunca em cookie nem no cliente; o cliente só recebe o id.
 //! - Registo (`RequireStaff` + CSRF: o 2FA obrigatório do cartão 19 já foi exigido): user
 //!   verification obrigatória, resident key `preferred`, credenciais já registadas excluídas.
 //! - Login (anónimo, `Origin` obrigatória): descoberta (sem lista de credenciais); credencial
 //!   procurada por `identity_passkey_lookup` (só utilizadores ativos); `userHandle` = id do dono;
-//!   mesmas regras de host/papel e o mesmo travão por IP/64 do login de staff (`throttle`, chaves
-//!   `staff:`). Sucesso → sessão rodada com `mfa_verified_at = now()` (houve user verification).
+//!   mesmas regras de papel e o mesmo travão por IP/64 do login de staff (`throttle`, chaves
+//!   `staff:`). Num Host de canal, ou com `rp_id` guardado ≠ `PLATFORM_ADMIN_HOST`: o mesmo 401
+//!   genérico de uma credencial desconhecida + `denied` `rp_mismatch` (não revela que a conta é de
+//!   staff). Sucesso → sessão rodada com `mfa_verified_at = now()` (houve user verification).
 //!   Falha → 401 genérico + `auth.passkey_login` `denied`.
+//! - "Última credencial": numa conta sem password não se apaga a última passkey VÁLIDA (`rp_id` =
+//!   `PLATFORM_ADMIN_HOST`); as de `rp_id` antigo não contam e apagam-se sempre.
 //! - Contador: recebido ≤ guardado com ambos > 0 → recusa (`cloned_authenticator`), atómico no
 //!   `UPDATE` (dois logins em paralelo com o mesmo contador: só um entra).
 //! - Caixa negra: `passkey.registered`, `passkey.removed`, `auth.passkey_login`. Nunca a
@@ -208,6 +216,9 @@ pub struct PasskeyItem {
     pub created_at: String,
     /// RFC 3339, UTC; `null` = nunca usada.
     pub last_used_at: Option<String>,
+    /// `false` = registada com o `rp_id` de outro host (passkey antiga de um canal): não serve
+    /// para entrar neste painel; pode ser apagada.
+    pub valid: bool,
 }
 
 /// Fim do login: id da cerimónia e a resposta do autenticador.
@@ -288,6 +299,13 @@ fn site(
         return Err(AppError::NotFound);
     };
     Ok(Site { tenant, host })
+}
+
+/// `PLATFORM_ADMIN_HOST` normalizado (= `rp_id` único do staff). Só se chama com o extractor
+/// `PlatformHost` já aceite (num Host de canal ou desconhecido o pedido já saiu com 404).
+fn platform_rp_id(host: Option<Extension<RequestHost>>) -> Result<String, AppError> {
+    host.and_then(|Extension(h)| h.host)
+        .ok_or(AppError::NotFound)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -457,8 +475,8 @@ struct Stored {
 // Registo e gestão (sessão de staff)
 // ---------------------------------------------------------------------------------------------
 
-/// Inicia o registo de uma passkey no host do pedido (user verification obrigatória; resident key
-/// preferida; as passkeys já registadas ficam excluídas).
+/// Inicia o registo de uma passkey no host de plataforma (`rp_id` único do staff; user
+/// verification obrigatória; resident key preferida; as passkeys já registadas ficam excluídas).
 #[utoipa::path(
     post,
     path = "/api/v1/staff/passkeys/register/start",
@@ -468,7 +486,7 @@ struct Stored {
         (status = 200, description = "Opções de criação e id da cerimónia (válida 5 min, uso único)", body = CeremonyOptions),
         (status = 401, description = "Sem sessão de backoffice"),
         (status = 403, description = "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"),
-        (status = 404, description = "Host desconhecido ou tenant inativo"),
+        (status = 404, description = "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"),
         (status = 503, description = "Serviço temporariamente indisponível")
     )
 )]
@@ -478,20 +496,19 @@ struct Stored {
 )]
 pub async fn register_start(
     State(st): State<AppState>,
+    _platform: PlatformHost,
     staff: RequireStaff,
     _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
-    tenant: Result<ResolvedTenant, AppError>,
-    platform: Result<PlatformHost, AppError>,
     host: Option<Extension<RequestHost>>,
 ) -> Result<Response, AppError> {
     let info = match recent_session(&cur) {
         Ok(i) => i,
         Err(r) => return Ok(*r),
     };
-    let site = site(tenant, platform, host)?;
-    let rp = cur.sessions().passkeys().rp(&site.host)?;
+    let rp_id = platform_rp_id(host)?;
+    let rp = cur.sessions().passkeys().rp(&rp_id)?;
     let user = staff.user_id;
     let mut tx = begin_platform_tx(&st.db_primary, &ctx).await?;
     let me = sqlx::query!("SELECT email, full_name FROM users WHERE id = $1", user)
@@ -524,7 +541,7 @@ pub async fn register_start(
     let ceremony = RegCeremony {
         user,
         session: info.id.as_uuid(),
-        host: site.host,
+        host: rp_id,
         state,
     };
     let ceremony_id = put(&cur, Kind::Reg, &ceremony).await?;
@@ -547,7 +564,7 @@ pub async fn register_start(
         (status = 201, description = "Passkey registada", body = PasskeyCreated),
         (status = 401, description = "Sem sessão, cerimónia desconhecida/expirada/já usada, ou credencial recusada"),
         (status = 403, description = "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"),
-        (status = 404, description = "Host desconhecido ou tenant inativo"),
+        (status = 404, description = "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"),
         (status = 409, description = "Credencial já registada"),
         (status = 422, description = "Dados inválidos, ou passkey não detetável (`credProps.rk = false`: `not_discoverable`)"),
         (status = 503, description = "Serviço temporariamente indisponível")
@@ -559,12 +576,11 @@ pub async fn register_start(
 )]
 pub async fn register_finish(
     State(st): State<AppState>,
+    _platform: PlatformHost,
     staff: RequireStaff,
     _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
-    tenant: Result<ResolvedTenant, AppError>,
-    platform: Result<PlatformHost, AppError>,
     host: Option<Extension<RequestHost>>,
     req: Result<Json<RegisterFinishRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
@@ -582,15 +598,15 @@ pub async fn register_finish(
         Ok(i) => i,
         Err(r) => return Ok(*r),
     };
-    let site = site(tenant, platform, host)?;
+    let rp_id = platform_rp_id(host)?;
     let user = staff.user_id;
     let ceremony: Option<RegCeremony> = take(&cur, Kind::Reg, &req.ceremony_id).await?;
     let same =
-        |c: &RegCeremony| c.user == user && c.session == info.id.as_uuid() && c.host == site.host;
+        |c: &RegCeremony| c.user == user && c.session == info.id.as_uuid() && c.host == rp_id;
     let Some(c) = ceremony.filter(same) else {
         return Ok(refused(DENIED_CEREMONY, AppError::Unauthorized));
     };
-    let rp = cur.sessions().passkeys().rp(&site.host)?;
+    let rp = cur.sessions().passkeys().rp(&rp_id)?;
     let Ok(pk) = rp.finish_passkey_registration(&cred, &c.state) else {
         return Ok(refused(DENIED_VERIFICATION, AppError::Unauthorized));
     };
@@ -600,7 +616,7 @@ pub async fn register_finish(
     let sign_count = passkey["cred"]["counter"].as_i64().unwrap_or(0).max(0);
     let stored = Stored {
         v: STORED_VERSION,
-        rp_id: site.host,
+        rp_id,
         passkey,
     };
     let stored = serde_json::to_value(&stored)
@@ -641,7 +657,8 @@ pub async fn register_finish(
     Ok(no_store((StatusCode::CREATED, Json(out)).into_response()))
 }
 
-/// As passkeys do próprio (nunca as de outro utilizador).
+/// As passkeys do próprio (nunca as de outro utilizador), com `valid = false` nas de `rp_id`
+/// antigo (não servem para entrar neste painel).
 #[utoipa::path(
     get,
     path = "/api/v1/staff/passkeys",
@@ -650,23 +667,28 @@ pub async fn register_finish(
         (status = 200, description = "Passkeys do utilizador da sessão", body = [PasskeyItem]),
         (status = 401, description = "Sem sessão de backoffice"),
         (status = 403, description = "Sem papel neste host, 2FA em falta ou sessão de impersonação (`impersonation`)"),
-        (status = 404, description = "Host desconhecido ou tenant inativo"),
+        (status = 404, description = "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"),
         (status = 503, description = "Serviço temporariamente indisponível")
     )
 )]
 pub async fn list(
     State(st): State<AppState>,
+    _platform: PlatformHost,
     staff: RequireStaff,
     _ni: NoImpersonation,
     ctx: AuditCtx,
+    host: Option<Extension<RequestHost>>,
 ) -> Result<Response, AppError> {
+    let rp_id = platform_rp_id(host)?;
     let mut tx = begin_platform_tx(&st.db_primary, &ctx).await?;
     let rows = sqlx::query!(
         r#"SELECT id, label,
                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "created_at!",
-                  to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "last_used_at?"
+                  to_char(last_used_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "last_used_at?",
+                  COALESCE(credential->>'rp_id' = $2, false) AS "valid!"
            FROM user_passkeys WHERE user_id = $1 ORDER BY created_at, id"#,
-        staff.user_id
+        staff.user_id,
+        rp_id
     )
     .fetch_all(&mut *tx)
     .await
@@ -679,13 +701,15 @@ pub async fn list(
             label: r.label,
             created_at: r.created_at,
             last_used_at: r.last_used_at,
+            valid: r.valid,
         })
         .collect();
     Ok(no_store(Json(out).into_response()))
 }
 
-/// Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey de
-/// uma conta sem password não se apaga (409).
+/// Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey
+/// VÁLIDA (`rp_id` da plataforma) de uma conta sem password não se apaga (409); as de `rp_id`
+/// antigo apagam-se sempre.
 #[utoipa::path(
     delete,
     path = "/api/v1/staff/passkeys/{id}",
@@ -698,23 +722,30 @@ pub async fn list(
         (status = 204, description = "Passkey apagada"),
         (status = 401, description = "Sem sessão de backoffice"),
         (status = 403, description = "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"),
-        (status = 404, description = "Passkey inexistente ou de outro utilizador"),
+        (status = 404, description = "Passkey inexistente ou de outro utilizador, ou fora do host de plataforma (Host de canal ou desconhecido)"),
         (status = 409, description = "Última credencial de uma conta sem password"),
         (status = 503, description = "Serviço temporariamente indisponível")
     )
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "um extractor por dependência do pedido"
+)]
 pub async fn remove(
     State(st): State<AppState>,
+    _platform: PlatformHost,
     staff: RequireStaff,
     _ni: NoImpersonation,
     ctx: AuditCtx,
     cur: CurrentSession,
+    host: Option<Extension<RequestHost>>,
     id: Result<Path<Uuid>, PathRejection>,
 ) -> Result<Response, AppError> {
     let info = match recent_session(&cur) {
         Ok(i) => i,
         Err(r) => return Ok(*r),
     };
+    let rp_id = platform_rp_id(host)?;
     let Ok(Path(id)) = id else {
         return Err(AppError::NotFound);
     };
@@ -743,19 +774,21 @@ pub async fn remove(
         return Ok(refused(DENIED_IDOR, AppError::NotFound));
     }
     if !has_password {
-        // Só contam as passkeys que servem no MESMO host (rp_id) da que se apaga.
-        let n = sqlx::query_scalar!(
-            r#"SELECT count(*) AS "n!" FROM user_passkeys
-               WHERE user_id = $1
-                 AND credential->>'rp_id' = (SELECT credential->>'rp_id' FROM user_passkeys
-                                            WHERE id = $2 AND user_id = $1)"#,
+        // Só contam as passkeys VÁLIDAS (`rp_id` = `PLATFORM_ADMIN_HOST`): apagar uma de `rp_id`
+        // antigo nunca tira o acesso; apagar a última válida, sim (409).
+        let last = sqlx::query!(
+            r#"SELECT count(*) FILTER (WHERE credential->>'rp_id' = $3) AS "valid!",
+                      COALESCE(bool_or(id = $2 AND credential->>'rp_id' = $3), false)
+                          AS "target_valid!"
+               FROM user_passkeys WHERE user_id = $1"#,
             user,
-            id
+            id,
+            rp_id
         )
         .fetch_one(tx.conn())
         .await
         .map_err(db_error)?;
-        if n <= 1 {
+        if last.target_valid && last.valid <= 1 {
             return Err(AppError::Conflict);
         }
     }
@@ -1063,6 +1096,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Mesmo trabalho do caso com conta (leitura de papéis), para o tempo de uma recusa antes da
+/// verificação não revelar se a credencial existe (desconhecida, `rp_id` de outro host, versão ou
+/// `userHandle` errados).
+async fn equalize_timing(st: &AppState, ctx: &AuditCtx) {
+    if let Err(e) = load_roles(&st.db_primary, Uuid::nil(), ctx.request_id()).await {
+        tracing::warn!(error = ?e, "login por passkey: leitura de igualação falhou");
+    }
+}
+
 /// Conclui o login por passkey neste host. Falha → 401 sempre igual + `auth.passkey_login`
 /// `denied`. Sucesso → 204 + cookie de uma sessão nova já com o 2FA feito.
 #[utoipa::path(
@@ -1072,7 +1114,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     request_body = LoginFinishRequest,
     responses(
         (status = 204, description = "Sessão iniciada e com o 2FA feito (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma)"),
-        (status = 401, description = "Cerimónia ou credencial inválida, ou sem acesso a este site (corpo sempre igual)"),
+        (status = 401, description = "Cerimónia ou credencial inválida, passkey de staff fora do host de plataforma ou com `rp_id` de outro host, ou sem acesso a este site (corpo sempre igual)"),
         (status = 403, description = "Origin ausente ou de outro site (com sessão: também o token CSRF)"),
         (status = 404, description = "Host desconhecido ou tenant inativo"),
         (status = 422, description = "Dados inválidos"),
@@ -1110,23 +1152,25 @@ pub async fn login_finish(
         return a.refuse(REASON_CEREMONY, None).await;
     };
     let Some(found) = a.lookup(&cred.raw_id).await? else {
-        // Mesmo trabalho do caso com conta (leitura de papéis), para o tempo não a revelar.
-        if let Err(e) = load_roles(&st.db_primary, Uuid::nil(), ctx.request_id()).await {
-            tracing::warn!(error = ?e, "login por passkey: leitura de igualação falhou");
-        }
+        equalize_timing(&st, &ctx).await;
         return a.refuse(REASON_UNKNOWN_CREDENTIAL, None).await;
     };
     let Ok(stored) = serde_json::from_value::<Stored>(found.credential) else {
         return a.broken(found.id).await;
     };
     if stored.v != STORED_VERSION {
+        equalize_timing(&st, &ctx).await;
         return a.refuse(REASON_VERSION, Some(found.id)).await;
     }
-    if stored.rp_id != site.host {
+    // `rp_id` único do staff (spec 14 §8): num Host de canal nenhuma passkey serve; na
+    // plataforma, só as registadas com o `rp_id` da plataforma (as antigas de canal, não).
+    if site.tenant.is_some() || stored.rp_id != site.host {
+        equalize_timing(&st, &ctx).await;
         return a.refuse(REASON_RP_MISMATCH, Some(found.id)).await;
     }
     // Descoberta: o `userHandle` tem de existir e ser o dono da credencial.
     if cred.response.user_handle.as_deref() != Some(found.user.as_bytes().as_slice()) {
+        equalize_timing(&st, &ctx).await;
         return a.refuse(REASON_VERIFICATION, Some(found.id)).await;
     }
     // O contador guardado vive em `sign_count` (a credencial JSONB não muda depois do registo):

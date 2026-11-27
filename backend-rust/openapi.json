@@ -308,7 +308,7 @@
             "description": "Sessão iniciada e com o 2FA feito (cookie `__Host-ptm_session` no tenant, `__Host-ptm_admin` na plataforma)"
           },
           "401": {
-            "description": "Cerimónia ou credencial inválida, ou sem acesso a este site (corpo sempre igual)"
+            "description": "Cerimónia ou credencial inválida, passkey de staff fora do host de plataforma ou com `rp_id` de outro host, ou sem acesso a este site (corpo sempre igual)"
           },
           "403": {
             "description": "Origin ausente ou de outro site (com sessão: também o token CSRF)"
@@ -565,7 +565,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "As passkeys do próprio (nunca as de outro utilizador).",
+        "summary": "As passkeys do próprio (nunca as de outro utilizador), com `valid = false` nas de `rp_id`\nantigo (não servem para entrar neste painel).",
         "operationId": "list",
         "responses": {
           "200": {
@@ -588,7 +588,7 @@
             "description": "Sem papel neste host, 2FA em falta ou sessão de impersonação (`impersonation`)"
           },
           "404": {
-            "description": "Host desconhecido ou tenant inativo"
+            "description": "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"
           },
           "503": {
             "description": "Serviço temporariamente indisponível"
@@ -642,7 +642,7 @@
             "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
           },
           "404": {
-            "description": "Host desconhecido ou tenant inativo"
+            "description": "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"
           },
           "409": {
             "description": "Credencial já registada"
@@ -661,7 +661,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Inicia o registo de uma passkey no host do pedido (user verification obrigatória; resident key\npreferida; as passkeys já registadas ficam excluídas).",
+        "summary": "Inicia o registo de uma passkey no host de plataforma (`rp_id` único do staff; user\nverification obrigatória; resident key preferida; as passkeys já registadas ficam excluídas).",
         "operationId": "register_start",
         "parameters": [
           {
@@ -692,7 +692,7 @@
             "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
           },
           "404": {
-            "description": "Host desconhecido ou tenant inativo"
+            "description": "Fora do host de plataforma (Host de canal ou desconhecido): as passkeys de staff só existem em `PLATFORM_ADMIN_HOST`"
           },
           "503": {
             "description": "Serviço temporariamente indisponível"
@@ -705,7 +705,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey de\numa conta sem password não se apaga (409).",
+        "summary": "Apaga uma passkey do próprio. De outro utilizador (ou inexistente) → 404. A última passkey\nVÁLIDA (`rp_id` da plataforma) de uma conta sem password não se apaga (409); as de `rp_id`\nantigo apagam-se sempre.",
         "operationId": "remove",
         "parameters": [
           {
@@ -738,7 +738,7 @@
             "description": "Sem papel neste host, 2FA em falta, token CSRF/Origin inválidos, sessão de impersonação (`impersonation`) ou login/2FA há mais de 10 min (`reauth_required`)"
           },
           "404": {
-            "description": "Passkey inexistente ou de outro utilizador"
+            "description": "Passkey inexistente ou de outro utilizador, ou fora do host de plataforma (Host de canal ou desconhecido)"
           },
           "409": {
             "description": "Última credencial de uma conta sem password"
@@ -1169,7 +1169,8 @@
         "required": [
           "id",
           "label",
-          "created_at"
+          "created_at",
+          "valid"
         ],
         "properties": {
           "created_at": {
@@ -1189,6 +1190,10 @@
               "null"
             ],
             "description": "RFC 3339, UTC; `null` = nunca usada."
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "`false` = registada com o `rp_id` de outro host (passkey antiga de um canal): não serve\npara entrar neste painel; pode ser apagada."
           }
         }
       },
