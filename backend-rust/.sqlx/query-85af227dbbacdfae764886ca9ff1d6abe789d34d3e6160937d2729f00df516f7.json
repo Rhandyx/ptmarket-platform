@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM sponsor_entities e WHERE e.id = $1 AND (\n               (e.kind = 'municipality' AND e.area_code = left($2, 4))\n            OR (e.kind = 'parish' AND e.area_code = $2)\n            OR (e.kind = 'association' AND EXISTS (\n                  SELECT 1 FROM sponsor_entity_areas a\n                  WHERE a.sponsor_entity_id = e.id AND left($2, length(a.area_code)) = a.area_code)))\n        ) AS \"covered!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "covered!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "85af227dbbacdfae764886ca9ff1d6abe789d34d3e6160937d2729f00df516f7"
+}

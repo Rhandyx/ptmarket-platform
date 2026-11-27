@@ -13,6 +13,7 @@ pub mod orders;
 pub mod outbox;
 pub mod payments;
 pub mod search;
+pub mod sponsors;
 pub mod state;
 pub mod storage;
 pub mod tenancy;

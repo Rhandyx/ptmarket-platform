@@ -152,6 +152,106 @@
         }
       }
     },
+    "/api/v1/geo/districts": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Distritos em vigor, por nome.",
+        "operationId": "districts",
+        "responses": {
+          "200": {
+            "description": "Distritos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GeoItem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/geo/municipalities": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Concelhos em vigor de um distrito, por nome.",
+        "operationId": "municipalities",
+        "parameters": [
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Código do distrito (2 algarismos)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Concelhos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GeoItem"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/parishes": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Freguesias em vigor de um concelho, por nome.",
+        "operationId": "parishes",
+        "parameters": [
+          {
+            "name": "municipality",
+            "in": "query",
+            "description": "Código do concelho (4 algarismos)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Freguesias",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GeoItem"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parâmetro inválido"
+          }
+        }
+      }
+    },
     "/api/v1/me": {
       "get": {
         "tags": [
@@ -233,6 +333,47 @@
           },
           "503": {
             "description": "Serviço temporariamente indisponível"
+          }
+        }
+      }
+    },
+    "/api/v1/sponsors/eligible": {
+      "get": {
+        "tags": [
+          "sponsors"
+        ],
+        "summary": "Entidades que cobrem uma freguesia em vigor, na ordem fixa dos selos.",
+        "operationId": "eligible",
+        "parameters": [
+          {
+            "name": "dicofre",
+            "in": "query",
+            "description": "DICOFRE da freguesia (6 caracteres, ex.: 0302FA)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entidades elegíveis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SponsorSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Código com formato inválido"
+          },
+          "404": {
+            "description": "Freguesia inexistente ou fora de vigor"
           }
         }
       }
@@ -1088,6 +1229,22 @@
           }
         }
       },
+      "GeoItem": {
+        "type": "object",
+        "description": "Código DICOFRE + nome.",
+        "required": [
+          "code",
+          "name"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "LoginFinishRequest": {
         "type": "object",
         "description": "Fim do login: id da cerimónia e a resposta do autenticador.",
@@ -1380,6 +1537,37 @@
               "null"
             ],
             "description": "Token a enviar em `X-CSRF-Token` (ou no campo `_csrf`) em todas as mutações; `null` se\nanónimo."
+          }
+        }
+      },
+      "SponsorSummary": {
+        "type": "object",
+        "description": "Entidade elegível (sem canal nem contactos).",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "logo_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
           }
         }
       },

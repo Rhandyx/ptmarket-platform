@@ -78,6 +78,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/geo/districts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Distritos em vigor, por nome. */
+        get: operations["districts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/geo/municipalities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Concelhos em vigor de um distrito, por nome. */
+        get: operations["municipalities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/geo/parishes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Freguesias em vigor de um concelho, por nome. */
+        get: operations["parishes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -94,6 +145,23 @@ export interface paths {
         head?: never;
         /** Altera nome, telefone, NIF e consentimento de marketing do cliente autenticado. */
         patch: operations["patch_me"];
+        trace?: never;
+    };
+    "/api/v1/sponsors/eligible": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Entidades que cobrem uma freguesia em vigor, na ordem fixa dos selos. */
+        get: operations["eligible"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/staff/auth/login": {
@@ -440,6 +508,11 @@ export interface components {
             nif: string | null;
             phone: string | null;
         };
+        /** @description Código DICOFRE + nome. */
+        GeoItem: {
+            code: string;
+            name: string;
+        };
         /** @description Fim do login: id da cerimónia e a resposta do autenticador. */
         LoginFinishRequest: {
             ceremony_id: string;
@@ -562,6 +635,15 @@ export interface components {
              *     anónimo.
              */
             csrf_token: string | null;
+        };
+        /** @description Entidade elegível (sem canal nem contactos). */
+        SponsorSummary: {
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            logo_key?: string | null;
+            name: string;
+            slug: string;
         };
         /** @description Resposta do login de staff. */
         StaffLoginResponse: {
@@ -840,6 +922,86 @@ export interface operations {
             };
         };
     };
+    districts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Distritos */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeoItem"][];
+                };
+            };
+        };
+    };
+    municipalities: {
+        parameters: {
+            query: {
+                /** @description Código do distrito (2 algarismos) */
+                district: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Concelhos */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeoItem"][];
+                };
+            };
+            /** @description Parâmetro inválido */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    parishes: {
+        parameters: {
+            query: {
+                /** @description Código do concelho (4 algarismos) */
+                municipality: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Freguesias */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeoItem"][];
+                };
+            };
+            /** @description Parâmetro inválido */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_me: {
         parameters: {
             query?: never;
@@ -936,6 +1098,43 @@ export interface operations {
             };
             /** @description Serviço temporariamente indisponível */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    eligible: {
+        parameters: {
+            query: {
+                /** @description DICOFRE da freguesia (6 caracteres, ex.: 0302FA) */
+                dicofre: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Entidades elegíveis */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SponsorSummary"][];
+                };
+            };
+            /** @description Código com formato inválido */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Freguesia inexistente ou fora de vigor */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

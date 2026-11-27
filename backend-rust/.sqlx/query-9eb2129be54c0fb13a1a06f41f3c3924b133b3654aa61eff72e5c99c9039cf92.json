@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sponsor_entity_areas (sponsor_entity_id, area_code) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9eb2129be54c0fb13a1a06f41f3c3924b133b3654aa61eff72e5c99c9039cf92"
+}

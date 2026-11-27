@@ -34,6 +34,7 @@ use crate::{
         self, Sessions,
         http::{with_csrf, with_request_host, with_sessions},
     },
+    sponsors,
     state::AppState,
     tenancy,
 };
@@ -83,7 +84,16 @@ pub fn api(
     audit: AuditLayerState,
     sessions: Option<Sessions>,
 ) -> Router<AppState> {
-    let read_async = Router::new().route("/api/v1/tenant", get(tenancy::http::tenant_info));
+    let read_async = Router::new()
+        .route("/api/v1/tenant", get(tenancy::http::tenant_info))
+        // Geografia e entidades elegíveis (cartão 03/17): públicas, qualquer Host conhecido.
+        .route("/api/v1/geo/districts", get(sponsors::http::districts))
+        .route(
+            "/api/v1/geo/municipalities",
+            get(sponsors::http::municipalities),
+        )
+        .route("/api/v1/geo/parishes", get(sponsors::http::parishes))
+        .route("/api/v1/sponsors/eligible", get(sponsors::http::eligible));
     let Some(sessions) = sessions else {
         return with_host_resolution(
             Router::new().merge(audited(read_async, audit).layer(Extension(AuditClass::ReadAsync))),
